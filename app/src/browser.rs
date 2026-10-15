@@ -284,10 +284,9 @@ impl BrowserMenuOwner {
         } else {
             None
         };
-        let mut prefix = crate::record_model::RecordPreview::from_file_with_setup(
+        let mut prefix = crate::record_model::RecordPreview::from_file_for_history_with_archive(
             std::path::Path::new(&key),
             &source,
-            &setup,
             file,
             decoded.as_ref(),
             player.map(crate::local_players::PlayerId),

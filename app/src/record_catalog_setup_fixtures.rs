@@ -182,6 +182,9 @@ fn every_portable_policy_dimension_mismatch_refuses_genuine_prefix() {
     changed.chart_seed -= 1;
     cases.push(changed);
     let mut changed = setup.clone();
+    changed.source_speed = "3/2".parse().unwrap();
+    cases.push(changed);
+    let mut changed = setup.clone();
     changed.start = Timestamp::from_nanos(1);
     cases.push(changed);
     let mut changed = setup.clone();
@@ -308,5 +311,92 @@ fn archived_score_and_comparison_remain_separate_from_genuine_preview_prefix() {
     }
     let missing = pure(&source, &setup, file, None, Some(player)).unwrap();
     assert_eq!(missing.score, prefix.score);
+    assert!(missing.archive_error.is_some());
+}
+
+#[test]
+fn variable_history_archive_preserves_actual_prefix_player_and_comparison_without_admission() {
+    use crate::replay_speed_policy::{
+        wrap_header_with_schedule, SourceRateCut, SourceRateSchedule,
+    };
+
+    let source = source();
+    let setup = draft_section(&native("groove"), &source).unwrap();
+    let mut file = recording(&source, &setup);
+    let fixed = pure(&source, &setup, file.clone(), None, None).unwrap();
+    let mut schedule = SourceRateSchedule::fixed(setup.source_speed);
+    schedule.try_reserve_change().unwrap();
+    schedule
+        .try_push(SourceRateCut::new(0, 1, 2, "3/2".parse().unwrap()).unwrap())
+        .unwrap();
+    file.header =
+        wrap_header_with_schedule(file.header, &schedule, replay_limits().unwrap()).unwrap();
+    assert!(pure(&source, &setup, file.clone(), None, None)
+        .unwrap_err()
+        .contains("variable"));
+    let player = PlayerId(u32::MAX);
+    let gauge = BmsGauge::new(setup.gauge.clone());
+    let completed = CompletedPlayResult::from_completed(Timestamp::ZERO, None, &gauge);
+    let mut archive = ResultArchive::from_completed_with_scores(
+        &[(player, completed)],
+        &[(player, file.header.clone(), setup.gauge.clone())],
+        &[(player, &fixed.score)],
+    )
+    .unwrap();
+    let comparison = CompetitionSnapshot {
+        ghosts: vec![GhostSnapshot {
+            kind: OpponentKind::Other,
+            label: "variable source history".into(),
+            hits: 9007199254740993,
+            misses: 2,
+            combo: 3,
+            max_combo: 4,
+            recorded_until: Some(Timestamp::from_nanos(604_800_000_000_001)),
+        }],
+        network: None,
+    };
+    archive
+        .attach_comparisons(&[(player, Some(&comparison))])
+        .unwrap();
+    let history = |archive: Option<&ResultArchive>, player| {
+        RecordPreview::from_file_for_history_with_archive(
+            Path::new("曲/variable.bkr"),
+            &source,
+            file.clone(),
+            archive,
+            player,
+        )
+        .unwrap()
+    };
+    for requested in [None, Some(player)] {
+        let preview = history(Some(&archive), requested);
+        assert_eq!(preview.score, fixed.score);
+        assert_eq!(preview.records, fixed.records);
+        assert_eq!(preview.recorded_until, fixed.recorded_until);
+        assert_eq!(preview.start, setup.start);
+        assert_eq!(preview.end, setup.end);
+        assert_eq!(preview.historical.as_ref().unwrap().0, player);
+        assert_eq!(
+            preview.historical_score.as_ref().unwrap().hits,
+            fixed.score.hits
+        );
+        assert_eq!(
+            preview.historical_comparison.as_ref().unwrap().as_ref(),
+            &Some(comparison.clone())
+        );
+        assert!(preview.historical_bms_score.is_some());
+        assert!(preview.archive_error.is_none());
+    }
+    for requested in [PlayerId(7), PlayerId(0)] {
+        let preview = history(Some(&archive), Some(requested));
+        assert_eq!(preview.score, fixed.score);
+        assert_eq!(preview.records, fixed.records);
+        assert!(preview.historical.is_none());
+        assert!(preview.historical_score.is_none());
+        assert!(preview.historical_comparison.is_none());
+        assert!(preview.archive_error.is_some());
+    }
+    let missing = history(None, Some(player));
+    assert_eq!(missing.score, fixed.score);
     assert!(missing.archive_error.is_some());
 }

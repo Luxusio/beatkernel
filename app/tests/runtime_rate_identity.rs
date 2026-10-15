@@ -12,6 +12,7 @@ use beatkernel::{
 use beatkernel_bms::{BmsChart, BmsInputMode};
 use beatkernel_bms_runtime::{
     competition::{compatible_headers, Competition, OpponentKind},
+    local_players::PlayerId,
     multiplayer::{competition_identity, competition_identity_for_section},
     play_policy::ResolvedPlayPolicy,
     record_catalog::RecordPreview,
@@ -330,6 +331,39 @@ fn variable_is_readable_for_replay_and_history_but_not_saved_or_network_competit
         )
         .unwrap();
         assert_eq!(preview.records, 0);
+        let associated = RecordPreview::from_file_for_history_with_archive(
+            Path::new("records/variable.bkr"),
+            &source(),
+            file.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(associated.score, preview.score);
+        assert_eq!(associated.recorded_until, preview.recorded_until);
+        assert!(associated.archive_error.is_none());
+        let missing_archive = RecordPreview::from_file_for_history_with_archive(
+            Path::new("records/variable.bkr"),
+            &source(),
+            file.clone(),
+            None,
+            Some(PlayerId(7)),
+        )
+        .unwrap();
+        assert_eq!(missing_archive.score, preview.score);
+        assert!(missing_archive.historical.is_none());
+        assert!(missing_archive.archive_error.is_some());
+        let selected_setup = decode_section_setup(&effective.options).unwrap();
+        assert!(RecordPreview::from_file_with_setup(
+            Path::new("records/variable.bkr"),
+            &source(),
+            &selected_setup,
+            file.clone(),
+            None,
+            None,
+        )
+        .unwrap_err()
+        .contains("variable"));
         assert!(!compatible_headers(&effective, &effective));
         let mut competition = Competition::new(effective.clone(), 2).unwrap();
         assert!(competition
@@ -363,4 +397,74 @@ fn variable_is_readable_for_replay_and_history_but_not_saved_or_network_competit
         )
         .is_ok());
     }
+}
+
+#[test]
+fn history_archive_seam_preserves_codec_hash_profile_and_section_refusal() {
+    use beatkernel::replay::{ReplayOperation, ReplayRecord};
+
+    let fixed = header("1/1");
+    let variable = schedule("1/1", &[cut(0, 1, 2, "3/2")]);
+    let effective = wrap_header_with_schedule(fixed.clone(), &variable, limits()).unwrap();
+    let file = ReplayFile::new(effective, vec![]);
+    let history = |file| {
+        RecordPreview::from_file_for_history_with_archive(
+            Path::new("records/variable.bkr"),
+            &source(),
+            file,
+            None,
+            None,
+        )
+    };
+    assert!(history(file.clone()).is_ok());
+    let mut invalid = Vec::new();
+    let mut changed = file.clone();
+    changed.header.chart_identity[0] ^= 1;
+    invalid.push(("chart hash", changed));
+    let mut changed = file.clone();
+    changed.header.rules_identity.push(0);
+    invalid.push(("rule identity", changed));
+    let mut changed = file.clone();
+    changed.header.seed = 1;
+    invalid.push(("rule seed", changed));
+    let mut changed = file.clone();
+    changed.runtime_version.push('x');
+    invalid.push(("runtime version", changed));
+    let mut changed = file.clone();
+    changed.header.options.push(0);
+    invalid.push(("trailing metadata", changed));
+    let mut changed = file.clone();
+    changed.header.options.truncate(V2.len());
+    invalid.push(("truncated schedule", changed));
+
+    let profile_prefix = b"bms-judge-profile/v1:";
+    let profile = fixed.options.strip_prefix(profile_prefix).unwrap().to_vec();
+    let mut no_windows = fixed.clone();
+    no_windows.options[profile_prefix.len() + 8..profile_prefix.len() + 16]
+        .copy_from_slice(&0u64.to_le_bytes());
+    no_windows = wrap_header_with_schedule(no_windows, &variable, limits()).unwrap();
+    invalid.push(("empty profile", ReplayFile::new(no_windows, vec![])));
+
+    let mut finite = fixed;
+    finite.options = b"bms-judge-profile/v4:".to_vec();
+    finite.options.extend_from_slice(&0u64.to_le_bytes());
+    finite.options.extend_from_slice(&0i64.to_le_bytes());
+    finite.options.extend_from_slice(&1i64.to_le_bytes());
+    finite.options.extend_from_slice(&profile);
+    let finite = wrap_header_with_schedule(finite, &variable, limits()).unwrap();
+    invalid.push((
+        "operation past finite end",
+        ReplayFile::new(
+            finite,
+            vec![ReplayRecord {
+                ordinal: 0,
+                song_time: Timestamp::from_nanos(2),
+                operation: ReplayOperation::Advance,
+            }],
+        ),
+    ));
+    for (reason, invalid) in invalid {
+        assert!(history(invalid).is_err(), "history accepted {reason}");
+    }
+    assert!(history(file).is_ok());
 }

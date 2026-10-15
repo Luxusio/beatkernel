@@ -106,7 +106,7 @@ use beatkernel_bms_runtime::{
     },
     practice_loop::PracticeLoop,
     presentation_settings::PresentationSettings,
-    record_catalog::{RecordCatalog, RecordPreview},
+    record_catalog::{RecordCatalog, RecordInspection, RecordPreview},
     room_presentation::RoomUiAction,
     screen_lifecycle::{ScreenInstanceId, ScreenKind, ScreenNavigator, ScreenPhase, ScreenRoute},
     session_launch::SessionLaunch,
@@ -1538,6 +1538,7 @@ struct RecordsDraft {
     selected: Option<usize>,
     first: usize,
     preview: Option<RecordPreview>,
+    fixed_comparison: Option<Result<(), String>>,
     error: Option<String>,
     message: Option<String>,
 }
@@ -1561,6 +1562,7 @@ impl RecordsDraft {
             selected: None,
             first: 0,
             preview: None,
+            fixed_comparison: None,
             error: None,
             message: None,
         })
@@ -1586,6 +1588,7 @@ impl RecordsDraft {
                 self.details = false;
                 self.grade_page = 0;
                 self.preview = None;
+                self.fixed_comparison = None;
                 self.message = None;
             }
             self.selected = Some(index);
@@ -1622,6 +1625,7 @@ impl RecordsDraft {
             self.grade_page = 0;
             self.catalog = None;
             self.preview = None;
+            self.fixed_comparison = None;
             self.selected = None;
             self.first = 0;
             self.message = None;
@@ -1645,7 +1649,7 @@ enum ProfileResult {
     Devices(DeviceCatalog, Option<PlayerId>),
     Loaded(PlayerProfile),
     Records(RecordCatalog),
-    Record(RecordPreview),
+    Record(RecordInspection),
     Saved,
 }
 struct ProfileOperation {
@@ -4119,21 +4123,29 @@ impl Desktop {
                         records.selected = (!catalog.entries.is_empty()).then_some(0);
                         records.first = 0;
                         records.preview = None;
+                        records.fixed_comparison = None;
                         records.directory_focused = false;
                         records.catalog = Some(catalog);
                         records.error = None;
                     }
-                    Ok(ProfileResult::Record(preview)) => {
+                    Ok(ProfileResult::Record(inspection)) => {
+                        let RecordInspection {
+                            preview,
+                            fixed_comparison_error,
+                        } = inspection;
                         if records.selected_path() == Some(&preview.path) {
                             records.error = preview
                                 .archive_error
                                 .as_ref()
                                 .map(|error| format!("Historical archive unavailable: {error}"));
+                            records.fixed_comparison =
+                                Some(fixed_comparison_error.map_or(Ok(()), Err));
                             records.preview = Some(preview);
                         }
                     }
                     Err(error) => {
                         records.preview = None;
+                        records.fixed_comparison = None;
                         records.error = Some(error);
                     }
                     _ => {}
@@ -4382,7 +4394,7 @@ impl Desktop {
                 .name("bms-profile".into())
                 .spawn(move || {
                     scoped_metadata(task, || match selected {
-                        Some(path) => RecordPreview::inspect(&path, &chart, &settings)
+                        Some(path) => RecordPreview::inspect_for_history(&path, &chart, &settings)
                             .map(ProfileResult::Record),
                         None => RecordCatalog::scan(&directory).map(ProfileResult::Records),
                     })
@@ -4401,6 +4413,7 @@ impl Desktop {
                     records.details = false;
                     records.grade_page = 0;
                     records.preview = None;
+                    records.fixed_comparison = None;
                     records.error = None;
                     records.message = None;
                     if !preview {
@@ -4428,7 +4441,7 @@ impl Desktop {
             let records = self.records.as_ref().ok_or("records unavailable")?;
             let preview = records
                 .valid_preview()
-                .ok_or("preview the selected compatible record first")?;
+                .ok_or("preview the selected record first")?;
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let launch = record_launch(&draft.values, &records.chart, &preview.path)?;
             (self.validate_replay)(launch.args()).map_err(|error| error.to_string())?;
@@ -4476,9 +4489,18 @@ impl Desktop {
         }
         let result = (|| {
             let records = self.records.as_ref().ok_or("records unavailable")?;
-            let path = records
+            let preview = records
                 .valid_preview()
-                .ok_or("preview the selected compatible record first")?
+                .ok_or("preview the selected record first")?;
+            records
+                .fixed_comparison
+                .as_ref()
+                .ok_or("preview the selected record to check fixed-opponent compatibility")?
+                .as_ref()
+                .map_err(|error| {
+                    format!("Cannot add this record as a fixed-condition opponent: {error}. Use WATCH to replay its original conditions.")
+                })?;
+            let path = preview
                 .path
                 .to_str()
                 .ok_or("record path must be UTF-8")?

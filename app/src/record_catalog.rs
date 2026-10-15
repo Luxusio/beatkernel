@@ -19,6 +19,13 @@ const MAX_INSPECTED: usize = 4096;
 const MAX_RETAINED: usize = 256;
 
 pub use crate::record_model::{RecordCatalog, RecordPreview};
+
+/// Original-condition history and the independent current fixed-opponent check.
+pub struct RecordInspection {
+    pub preview: RecordPreview,
+    pub fixed_comparison_error: Option<String>,
+}
+
 impl RecordCatalog {
     pub fn scan(directory: &Path) -> Result<Self, String> {
         settings_path(directory)?;
@@ -70,21 +77,7 @@ impl RecordCatalog {
 
 impl RecordPreview {
     pub fn inspect(path: &Path, chart: &Path, settings: &NativeSettings) -> Result<Self, String> {
-        settings_path(path)?;
-        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-        if !metadata.is_file() {
-            return Err("saved record must be a regular non-symlink file".into());
-        }
-        let limits = replay_limits().map_err(|error| error.to_string())?;
-        let mut reader = File::open(path).map_err(|error| error.to_string())?;
-        if !reader
-            .metadata()
-            .map_err(|error| error.to_string())?
-            .is_file()
-        {
-            return Err("saved record must be a regular file".into());
-        }
-        let file = read_replay(&mut reader, limits).map_err(|error| error.to_string())?;
+        let file = read_record(path)?;
         let setup =
             decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
         let source =
@@ -94,19 +87,41 @@ impl RecordPreview {
         #[cfg(not(target_arch = "wasm32"))]
         let preview = {
             let mut preview = preview;
-            match crate::native_result_archive::read_sidecar(path) {
-                Ok(None) => {}
-                Ok(Some(bytes)) => match crate::result_archive::decode_archive(&bytes) {
-                    Ok(archive) => preview.attach_archive(&header, &archive, None),
-                    Err(error) => preview.archive_error = Some(error.to_string()),
-                },
-                Err(error) => preview.archive_error = Some(error.to_string()),
-            }
+            preview.attach_sidecar(&header);
             preview
         };
         #[cfg(target_arch = "wasm32")]
         let _ = header;
         Ok(preview)
+    }
+    /// Metadata-worker inspection; browsing does not admit a fixed opponent.
+    pub fn inspect_for_history(
+        path: &Path,
+        chart: &Path,
+        settings: &NativeSettings,
+    ) -> Result<RecordInspection, String> {
+        let file = read_record(path)?;
+        let setup =
+            decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let source =
+            load_chart_with_seed(chart, setup.chart_seed).map_err(|error| error.to_string())?;
+        let fixed_comparison_error = draft_section(settings, &source)
+            .and_then(|expected| Self::validate_fixed_comparison(&file, &expected))
+            .err();
+        let header = file.header.clone();
+        let preview = Self::from_file_for_history_with_archive(path, &source, file, None, None)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let preview = {
+            let mut preview = preview;
+            preview.attach_sidecar(&header);
+            preview
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = header;
+        Ok(RecordInspection {
+            preview,
+            fixed_comparison_error,
+        })
     }
     fn from_file(
         path: &Path,
@@ -116,14 +131,12 @@ impl RecordPreview {
     ) -> Result<Self, String> {
         decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
         let expected = draft_section(settings, source)?;
-        Self::from_prefix_with_setup(path, source, &expected, file)
+        Self::from_file_with_setup(path, source, &expected, file, None, None)
     }
-    fn from_prefix_with_setup(
-        path: &Path,
-        source: &beatkernel_bms::BmsChart,
+    fn validate_fixed_comparison(
+        file: &ReplayFile,
         expected: &crate::replay_playback::RecordedSetup,
-        file: ReplayFile,
-    ) -> Result<Self, String> {
+    ) -> Result<(), String> {
         let (_, source_rates) = crate::replay_speed_policy::split_schedule(&file.header.options)
             .map_err(|error| error.to_string())?;
         if source_rates.is_variable() {
@@ -147,7 +160,7 @@ impl RecordPreview {
         {
             return Err("saved record profile or section differs from the current draft".into());
         }
-        Self::from_file_for_history(path, source, file)
+        Ok(())
     }
     /// Browses a valid recorded condition without admitting it as a fixed opponent.
     /// Reconstructs the actual recorded setup, independently of the current draft.
@@ -213,8 +226,19 @@ impl RecordPreview {
         archive: Option<&crate::result_archive::ResultArchive>,
         player: Option<crate::local_players::PlayerId>,
     ) -> Result<Self, String> {
+        Self::validate_fixed_comparison(&file, expected)?;
+        Self::from_file_for_history_with_archive(path, source, file, archive, player)
+    }
+    /// Browses original conditions and associates only the requested archived player.
+    pub fn from_file_for_history_with_archive(
+        path: &Path,
+        source: &beatkernel_bms::BmsChart,
+        file: ReplayFile,
+        archive: Option<&crate::result_archive::ResultArchive>,
+        player: Option<crate::local_players::PlayerId>,
+    ) -> Result<Self, String> {
         let association = archive.map(|archive| prepare_association(archive, &file.header, player));
-        let mut preview = Self::from_prefix_with_setup(path, source, expected, file)?;
+        let mut preview = Self::from_file_for_history(path, source, file)?;
         match association {
             Some(Ok((historical, score, comparison, bms_score))) => {
                 preview.historical = Some(historical);
@@ -229,6 +253,17 @@ impl RecordPreview {
             None => {}
         }
         Ok(preview)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attach_sidecar(&mut self, header: &beatkernel::replay::ReplayHeader) {
+        match crate::native_result_archive::read_sidecar(&self.path) {
+            Ok(None) => {}
+            Ok(Some(bytes)) => match crate::result_archive::decode_archive(&bytes) {
+                Ok(archive) => self.attach_archive(header, &archive, None),
+                Err(error) => self.archive_error = Some(error.to_string()),
+            },
+            Err(error) => self.archive_error = Some(error.to_string()),
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn attach_archive(
@@ -254,6 +289,23 @@ impl RecordPreview {
             }
         }
     }
+}
+fn read_record(path: &Path) -> Result<ReplayFile, String> {
+    settings_path(path)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("saved record must be a regular non-symlink file".into());
+    }
+    let limits = replay_limits().map_err(|error| error.to_string())?;
+    let mut reader = File::open(path).map_err(|error| error.to_string())?;
+    if !reader
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("saved record must be a regular file".into());
+    }
+    read_replay(&mut reader, limits).map_err(|error| error.to_string())
 }
 fn prepare_association(
     archive: &crate::result_archive::ResultArchive,
