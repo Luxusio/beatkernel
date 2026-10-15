@@ -1,5 +1,6 @@
 //! Complete same-rate software output ownership, independent of native handles.
 use super::{
+    asio::AsioPcmEncoding,
     channel_remix,
     source_history_retirement_mailbox::{
         apply_source_history_retirement_with_pending, SourceHistoryRetirementRequest,
@@ -7,15 +8,68 @@ use super::{
     DeviceFormat,
 };
 use beatkernel::audio::{
-    AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, OutputFrameBasis,
-    RenderReport, SoftwareOutputState,
+    AudioError, AudioFormat, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure,
+    OutputFrameBasis, RenderReport, SoftwareOutputState,
 };
+
+/// Exact ordered native channels and heterogeneous encodings of an ASIO target.
+/// Fixed storage keeps cold ownership snapshots and validation allocation-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsioPlanarLayout {
+    pcm: AudioFormat,
+    channels: [(u32, AsioPcmEncoding); 32],
+}
+impl AsioPlanarLayout {
+    /// Checks one distinct native channel per target PCM channel, in output order.
+    pub fn new(pcm: AudioFormat, channels: &[(u32, AsioPcmEncoding)]) -> Result<Self, AudioError> {
+        if channels.len() != usize::from(pcm.channels())
+            || channels.iter().enumerate().any(|(index, (channel, _))| {
+                *channel > i32::MAX as u32
+                    || channels[..index].iter().any(|(old, _)| old == channel)
+            })
+        {
+            return Err(AudioError::InvalidFormat);
+        }
+        let mut layout = Self {
+            pcm,
+            channels: [(0, AsioPcmEncoding::Float32Lsb); 32],
+        };
+        layout.channels[..channels.len()].copy_from_slice(channels);
+        Ok(layout)
+    }
+    /// Software PCM rate and channel count, without claiming native interleaving.
+    pub const fn pcm(&self) -> AudioFormat {
+        self.pcm
+    }
+    /// Actual native channel indices and encodings in software output order.
+    pub fn channels(&self) -> &[(u32, AsioPcmEncoding)] {
+        &self.channels[..usize::from(self.pcm.channels())]
+    }
+}
+
+/// Applied native interpretation of the retained software PCM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeOutputLayout {
+    /// Uniform interleaved native encoding and speaker ordering.
+    Interleaved(DeviceFormat),
+    /// Explicit ordered ASIO planes, each retaining its own native encoding.
+    AsioPlanar(AsioPlanarLayout),
+}
+impl NativeOutputLayout {
+    /// Software PCM rate and channels shared by every native interpretation.
+    pub const fn pcm(&self) -> AudioFormat {
+        match self {
+            Self::Interleaved(format) => format.pcm(),
+            Self::AsioPlanar(layout) => layout.pcm(),
+        }
+    }
+}
 
 /// Unique Mixer, prepared remix and generated output awaiting positive admission.
 /// Native counters and presentation observations are deliberately not stored here.
 pub struct NativeOutputState {
     mixer: Mixer,
-    format: Option<DeviceFormat>,
+    layout: Option<NativeOutputLayout>,
     remix: Option<FormatConverter>,
     samples: Vec<f32>,
     max_frames: usize,
@@ -28,7 +82,7 @@ impl NativeOutputState {
     pub fn from_mixer(mixer: Mixer) -> Self {
         Self {
             mixer,
-            format: None,
+            layout: None,
             remix: None,
             samples: Vec::new(),
             max_frames: 0,
@@ -54,9 +108,20 @@ impl NativeOutputState {
     pub fn mixer(&self) -> &Mixer {
         &self.mixer
     }
-    /// Applied interpretation, absent before cold preparation.
+    /// Applied uniform interleaved format; planar targets have no DeviceFormat.
     pub fn format(&self) -> Option<DeviceFormat> {
-        self.format
+        match self.layout.as_ref() {
+            Some(NativeOutputLayout::Interleaved(format)) => Some(*format),
+            _ => None,
+        }
+    }
+    /// Exact prepared native interpretation, absent before cold preparation.
+    pub fn layout(&self) -> Option<&NativeOutputLayout> {
+        self.layout.as_ref()
+    }
+    /// Prepared software target rate and channels, including planar native output.
+    pub fn target_pcm(&self) -> Option<AudioFormat> {
+        self.layout.as_ref().map(NativeOutputLayout::pcm)
     }
     /// Maximum size of a fresh block; retained tails may be larger after reopen.
     pub fn max_frames(&self) -> usize {
@@ -93,7 +158,7 @@ impl NativeOutputState {
         if self.pending_frames() == 0 {
             return &[];
         }
-        let Some(format) = self.format else {
+        let Some(format) = self.target_pcm() else {
             return &[];
         };
         let Some(report) = self.report else {
@@ -185,7 +250,7 @@ impl NativeOutputState {
         max_frames: usize,
     ) -> Result<(), AudioError> {
         self.reconfigure_with_remix_capacity(
-            format,
+            NativeOutputLayout::Interleaved(format),
             matrix,
             max_frames,
             self.mixer.config().limits().max_render_frames(),
@@ -200,18 +265,39 @@ impl NativeOutputState {
         matrix: Option<ChannelMatrix>,
         max_frames: usize,
     ) -> Result<(), AudioError> {
-        self.reconfigure_with_remix_capacity(format, matrix, max_frames, max_frames)
+        self.reconfigure_with_remix_capacity(
+            NativeOutputLayout::Interleaved(format),
+            matrix,
+            max_frames,
+            max_frames,
+        )
+    }
+    /// Cold ASIO preparation sizes remix storage to the actual native buffer.
+    /// Pending PCM keeps its exact ordered native channels and encodings.
+    pub fn reconfigure_asio(
+        &mut self,
+        layout: AsioPlanarLayout,
+        matrix: Option<ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<(), AudioError> {
+        self.reconfigure_with_remix_capacity(
+            NativeOutputLayout::AsioPlanar(layout),
+            matrix,
+            max_frames,
+            max_frames,
+        )
     }
     fn reconfigure_with_remix_capacity(
         &mut self,
-        format: DeviceFormat,
+        layout: NativeOutputLayout,
         matrix: Option<ChannelMatrix>,
         max_frames: usize,
         remix_max_frames: usize,
     ) -> Result<(), AudioError> {
-        self.validate_reconfigure(format, matrix.as_ref(), max_frames)?;
+        self.validate_reconfigure_layout(&layout, matrix.as_ref(), max_frames)?;
         let config = self.mixer.config();
-        let same = self.format == Some(format)
+        let format = layout.pcm();
+        let same = self.layout.as_ref() == Some(&layout)
             && self.remix.as_ref().map(FormatConverter::matrix) == matrix.as_ref();
         let storage_changed = self
             .remix
@@ -226,7 +312,7 @@ impl NativeOutputState {
             Some(match matrix {
                 Some(matrix) => Some(channel_remix::prepare(
                     config,
-                    format.pcm(),
+                    format,
                     matrix,
                     remix_max_frames,
                 )?),
@@ -262,7 +348,7 @@ impl NativeOutputState {
                 self.admitted = 0;
             }
         }
-        self.format = Some(format);
+        self.layout = Some(layout);
         self.max_frames = max_frames;
         Ok(())
     }
@@ -274,10 +360,36 @@ impl NativeOutputState {
         matrix: Option<&ChannelMatrix>,
         max_frames: usize,
     ) -> Result<(), AudioError> {
+        self.validate_reconfigure_layout(
+            &NativeOutputLayout::Interleaved(format),
+            matrix,
+            max_frames,
+        )
+    }
+    /// Checks an exact ASIO request without changing retained state or allocating.
+    pub fn validate_reconfigure_asio(
+        &self,
+        layout: &AsioPlanarLayout,
+        matrix: Option<&ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<(), AudioError> {
+        self.validate_reconfigure_layout(
+            &NativeOutputLayout::AsioPlanar(*layout),
+            matrix,
+            max_frames,
+        )
+    }
+    fn validate_reconfigure_layout(
+        &self,
+        layout: &NativeOutputLayout,
+        matrix: Option<&ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<(), AudioError> {
         if self.admission_uncertain {
             return Err(AudioError::InvalidBuffer);
         }
         let config = self.mixer.config();
+        let format = layout.pcm();
         if max_frames == 0 {
             return Err(AudioError::InvalidCapacity);
         }
@@ -285,11 +397,11 @@ impl NativeOutputState {
             return Err(AudioError::RenderCapacity);
         }
         match matrix {
-            Some(matrix) => channel_remix::validate(config.format(), format.pcm(), matrix)?,
-            None if config.format() != format.pcm() => return Err(AudioError::InvalidFormat),
+            Some(matrix) => channel_remix::validate(config.format(), format, matrix)?,
+            None if config.format() != format => return Err(AudioError::InvalidFormat),
             None => {}
         }
-        let same = self.format == Some(format)
+        let same = self.layout.as_ref() == Some(layout)
             && self.remix.as_ref().map(FormatConverter::matrix) == matrix;
         if self.pending_frames() != 0 && !same {
             return Err(AudioError::InvalidFormat);
@@ -305,7 +417,7 @@ impl NativeOutputState {
         if frames > self.max_frames {
             return Err(AudioError::RenderCapacity);
         }
-        let format = self.format.ok_or(AudioError::InvalidFormat)?;
+        let format = self.target_pcm().ok_or(AudioError::InvalidFormat)?;
         let count = frames * usize::from(format.channels());
         let report =
             channel_remix::render(&mut self.mixer, &mut self.remix, &mut self.samples[..count])?;

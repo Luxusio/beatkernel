@@ -1,6 +1,8 @@
 //! Software admission tests: native presentation is deliberately not inferred.
 use super::*;
-use crate::audio::{DeviceFormat, SampleEncoding};
+use crate::audio::{
+    asio::AsioPcmEncoding, AsioPlanarLayout, DeviceFormat, NativeOutputLayout, SampleEncoding,
+};
 use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},
@@ -570,6 +572,7 @@ fn cold_history_snapshot(mixer: &Mixer) -> Option<ColdHistorySnapshot> {
 #[derive(Debug, PartialEq)]
 struct ColdOutputSnapshot {
     format: Option<DeviceFormat>,
+    layout: Option<NativeOutputLayout>,
     max_frames: usize,
     report: Option<RenderReport>,
     admitted: usize,
@@ -584,6 +587,7 @@ struct ColdOutputSnapshot {
 fn cold_output_snapshot(state: &NativeOutputState) -> ColdOutputSnapshot {
     ColdOutputSnapshot {
         format: state.format(),
+        layout: state.layout().copied(),
         max_frames: state.max_frames(),
         report: state.pending_report(),
         admitted: state.admitted_frames(),
@@ -1425,4 +1429,421 @@ fn complete_cold_history_geometry_allocation_and_quarantine_refuse_atomically() 
     assert_eq!(state.admitted_frames(), 1);
     assert_eq!(state.mixer().counters(), counters);
     assert!(state.admission_is_uncertain());
+}
+
+fn asio_layout(rows: &[(u32, AsioPcmEncoding)]) -> AsioPlanarLayout {
+    AsioPlanarLayout::new(AudioFormat::new(8, rows.len() as u16).unwrap(), rows).unwrap()
+}
+
+fn prepared_asio(
+    mixer: Mixer,
+    layout: AsioPlanarLayout,
+    matrix: Option<ChannelMatrix>,
+    frames: usize,
+) -> NativeOutputState {
+    let mut state = NativeOutputState::from_mixer(mixer);
+    state.reconfigure_asio(layout, matrix, frames).unwrap();
+    state
+}
+
+#[test]
+fn asio_checked_layout_rejects_malformed_native_rows_without_allocating() {
+    let stereo = AudioFormat::new(8, 2).unwrap();
+    let invalid_rows: &[&[(u32, AsioPcmEncoding)]] = &[
+        &[],
+        &[(0, AsioPcmEncoding::Int16Lsb)],
+        &[
+            (0, AsioPcmEncoding::Int16Lsb),
+            (1, AsioPcmEncoding::Float64Msb),
+            (2, AsioPcmEncoding::Int24Lsb),
+        ],
+        &[
+            (7, AsioPcmEncoding::Int16Lsb),
+            (7, AsioPcmEncoding::Float64Msb),
+        ],
+        &[
+            (0, AsioPcmEncoding::Int16Lsb),
+            (i32::MAX as u32 + 1, AsioPcmEncoding::Float64Msb),
+        ],
+    ];
+    for rows in invalid_rows {
+        let (result, heap) = count_heap_calls(|| AsioPlanarLayout::new(stereo, rows));
+        assert_eq!(result, Err(AudioError::InvalidFormat));
+        assert_eq!(heap, 0);
+    }
+    let rows: Vec<_> = (0..33)
+        .map(|channel| (channel, AsioPcmEncoding::Int24Lsb))
+        .collect();
+    let (result, heap) =
+        count_heap_calls(|| AsioPlanarLayout::new(AudioFormat::new(8, 32).unwrap(), &rows));
+    assert_eq!(result, Err(AudioError::InvalidFormat));
+    assert_eq!(heap, 0);
+    let (layout, heap) =
+        count_heap_calls(|| AsioPlanarLayout::new(AudioFormat::new(8, 32).unwrap(), &rows[..32]));
+    assert_eq!(heap, 0);
+    assert_eq!(layout.unwrap().channels(), &rows[..32]);
+    assert!(AsioPlanarLayout::new(
+        AudioFormat::new(8, 1).unwrap(),
+        &[(i32::MAX as u32, AsioPcmEncoding::Float64Msb)]
+    )
+    .is_ok());
+}
+
+#[test]
+fn asio_all_eighteen_native_encodings_keep_honest_layout_and_actual_remixed_pcm() {
+    use AsioPcmEncoding::*;
+    let encodings = [
+        Int16Msb, Int24Msb, Int32Msb, Float32Msb, Float64Msb, Int32Msb16, Int32Msb18, Int32Msb20,
+        Int32Msb24, Int16Lsb, Int24Lsb, Int32Lsb, Float32Lsb, Float64Lsb, Int32Lsb16, Int32Lsb18,
+        Int32Lsb20, Int32Lsb24,
+    ];
+    let rows: Vec<_> = encodings
+        .into_iter()
+        .enumerate()
+        .map(|(index, encoding)| (31 - index as u32, encoding))
+        .collect();
+    let layout = asio_layout(&rows);
+    let coefficients: Vec<_> = (0..18)
+        .map(|channel| if channel % 2 == 0 { 1. } else { -0.5 })
+        .collect();
+    let (_, mixer) = rig();
+    let mut state = prepared_asio(
+        mixer,
+        layout,
+        Some(ChannelMatrix::new(1, 18, &coefficients).unwrap()),
+        4,
+    );
+    assert_eq!(
+        state.format(),
+        None,
+        "heterogeneous planes are not a DeviceFormat"
+    );
+    assert_eq!(state.target_pcm(), Some(AudioFormat::new(8, 18).unwrap()));
+    assert_eq!(
+        state.layout(),
+        Some(&NativeOutputLayout::AsioPlanar(layout))
+    );
+    assert_eq!(layout.channels(), rows);
+    let (report, heap) = count_heap_calls(|| state.render_pending(3));
+    let report = report.unwrap();
+    assert_eq!(heap, 0);
+    assert_eq!((report.start_frame, report.frames), (0, 3));
+    for (frame, original) in [0.125, -0.25, 0.375].into_iter().enumerate() {
+        for (channel, coefficient) in coefficients.iter().enumerate() {
+            assert_eq!(
+                state.pending_samples()[frame * 18 + channel],
+                original * coefficient
+            );
+        }
+    }
+    let (admitted, heap) = count_heap_calls(|| state.admit(1));
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(heap, 0);
+    assert_eq!(state.pending_samples().len(), 36);
+    assert_eq!(state.pending_samples()[0], -0.25);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 1);
+}
+
+#[test]
+fn asio_prefix_reopen_preserves_original_report_history_queue_and_first_unsent_pcm() {
+    let layout = asio_layout(&[
+        (5, AsioPcmEncoding::Int24Lsb),
+        (2, AsioPcmEncoding::Float64Msb),
+    ]);
+    let (mut producer, mut mixer) = rig();
+    mixer.enable_source_playback_history(8).unwrap();
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = prepared_asio(mixer, layout, Some(matrix.clone()), 8);
+    let report = state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    assert_eq!(
+        state.pending_samples(),
+        [-0.25, 0.125, 0.375, -0.1875, -0.5, 0.25]
+    );
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 1);
+    producer
+        .try_push(AudioCommand::Play {
+            voice: VoiceId(2),
+            sample: SampleId(1),
+            at: Timestamp::from_nanos(500_000_000),
+            gain: 0.5,
+        })
+        .unwrap();
+    let producer_counters = producer.counters();
+    let mut expected = cold_output_snapshot(&state);
+    let (validation, heap) =
+        count_heap_calls(|| state.validate_reconfigure_asio(&layout, Some(&matrix), 2));
+    assert_eq!(validation, Ok(()));
+    assert_eq!(heap, 0);
+    assert_eq!(cold_output_snapshot(&state), expected);
+    state.reconfigure_asio(layout, Some(matrix), 2).unwrap();
+    expected.max_frames = 2;
+    assert_eq!(cold_output_snapshot(&state), expected);
+    assert_eq!(producer.counters(), producer_counters);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(prepared_storage(&state), (16, Some((2, 2, 0))));
+    let (result, heap) = count_heap_calls(|| {
+        assert_eq!(state.render_pending(1), Err(AudioError::InvalidBuffer));
+        state.admit(3)?;
+        state.render_pending(2)
+    });
+    assert_eq!(heap, 0);
+    let next = result.unwrap();
+    assert_eq!(
+        (next.start_frame, next.playback_start_frame, next.frames),
+        (4, 4, 2)
+    );
+    // The newly scheduled voice starts its asset at sample zero at frame four:
+    // [.625, -.75] + .5 * [.125, -.25], followed by the unchanged remix.
+    assert_eq!(state.pending_samples(), [0.6875, -0.34375, -0.875, 0.4375]);
+    assert_eq!(state.mixer().counters().commands_consumed, 2);
+    assert_eq!(
+        state
+            .mixer()
+            .source_playback_history()
+            .unwrap()
+            .pulled_end_frame(),
+        6
+    );
+}
+
+#[test]
+fn asio_pending_exact_plane_order_encoding_index_rate_matrix_and_family_refuse_atomically() {
+    let rows = [
+        (5, AsioPcmEncoding::Int24Lsb),
+        (2, AsioPcmEncoding::Float64Msb),
+    ];
+    let layout = asio_layout(&rows);
+    let (_, mut mixer) = rig();
+    mixer.enable_source_playback_history(8).unwrap();
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = prepared_asio(mixer, layout, Some(matrix.clone()), 8);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let before = cold_output_snapshot(&state);
+    let storage = prepared_storage(&state);
+    let changed_layouts = [
+        asio_layout(&[rows[1], rows[0]]),
+        asio_layout(&[(6, rows[0].1), rows[1]]),
+        asio_layout(&[(rows[0].0, AsioPcmEncoding::Int24Msb), rows[1]]),
+        asio_layout(&[(5, AsioPcmEncoding::Int24Lsb)]),
+        AsioPlanarLayout::new(AudioFormat::new(16, 2).unwrap(), &rows).unwrap(),
+    ];
+    for changed in changed_layouts {
+        let (refused, heap) =
+            count_heap_calls(|| state.validate_reconfigure_asio(&changed, Some(&matrix), 16));
+        assert_eq!(refused, Err(AudioError::InvalidFormat));
+        assert_eq!(heap, 0);
+        assert_eq!(
+            state.reconfigure_asio(changed, Some(matrix.clone()), 16),
+            refused
+        );
+        assert_eq!(cold_output_snapshot(&state), before);
+        assert_eq!(prepared_storage(&state), storage);
+    }
+    for (matrix, frames, expected_error) in [
+        (None, 8, AudioError::InvalidFormat),
+        (
+            Some(ChannelMatrix::new(1, 2, &[0.5, 1.]).unwrap()),
+            8,
+            AudioError::InvalidFormat,
+        ),
+        (Some(matrix.clone()), 0, AudioError::InvalidCapacity),
+        (Some(matrix.clone()), 33, AudioError::RenderCapacity),
+    ] {
+        assert_eq!(
+            state.reconfigure_asio(layout, matrix, frames),
+            Err(expected_error)
+        );
+        assert_eq!(cold_output_snapshot(&state), before);
+        assert_eq!(prepared_storage(&state), storage);
+    }
+    assert_eq!(
+        state.reconfigure(target(2), Some(matrix), 8),
+        Err(AudioError::InvalidFormat)
+    );
+    assert_eq!(cold_output_snapshot(&state), before);
+    assert_eq!(prepared_storage(&state), storage);
+    state.admit(3).unwrap();
+    state
+        .reconfigure_asio(
+            changed_layouts[0],
+            Some(ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap()),
+            2,
+        )
+        .unwrap();
+    assert_eq!(state.render_pending(2).unwrap().start_frame, 4);
+    assert_eq!(state.pending_samples(), [0.625, -0.3125, -0.75, 0.375]);
+}
+
+#[test]
+fn asio_cold_storage_tracks_actual_frames_and_preserves_retained_pcm_across_growth_and_rebound() {
+    for remixed in [false, true] {
+        let (_, mixer) = rig_with_render_limit(256);
+        let layout = if remixed {
+            asio_layout(&[
+                (7, AsioPcmEncoding::Int16Lsb),
+                (3, AsioPcmEncoding::Float64Msb),
+            ])
+        } else {
+            asio_layout(&[(7, AsioPcmEncoding::Int24Lsb)])
+        };
+        let matrix = remixed.then(|| ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap());
+        let mut state = prepared_asio(mixer, layout, matrix.clone(), 64);
+        let channels = usize::from(layout.pcm().channels());
+        assert_eq!(
+            prepared_storage(&state),
+            (64 * channels, remixed.then_some((64, 64, 0)))
+        );
+        state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        let mut expected = cold_output_snapshot(&state);
+        state.reconfigure_asio(layout, matrix.clone(), 128).unwrap();
+        expected.max_frames = 128;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(
+            prepared_storage(&state),
+            (128 * channels, remixed.then_some((128, 128, 0)))
+        );
+        state.reconfigure_asio(layout, matrix, 2).unwrap();
+        expected.max_frames = 2;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(
+            prepared_storage(&state),
+            (128 * channels, remixed.then_some((2, 2, 0)))
+        );
+        assert_eq!(
+            state.mixer().configuration().limits().max_render_frames(),
+            256
+        );
+        state.admit(3).unwrap();
+        let (report, heap) = count_heap_calls(|| state.render_pending(2));
+        assert_eq!(report.unwrap().start_frame, 4);
+        assert_eq!(heap, 0);
+        assert_eq!(
+            &state.pending_samples()[..channels],
+            if remixed {
+                &[0.625, -0.3125][..]
+            } else {
+                &[0.625][..]
+            }
+        );
+    }
+}
+
+#[test]
+fn asio_actual_cold_allocation_refusals_preserve_original_owner_and_allow_retry() {
+    let layout = asio_layout(&[
+        (5, AsioPcmEncoding::Int24Lsb),
+        (2, AsioPcmEncoding::Float64Msb),
+    ]);
+    for index in 0..2 {
+        let (mut producer, mut mixer) = rig_with_render_limit(256);
+        mixer.enable_source_playback_history(8).unwrap();
+        let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+        let mut state = prepared_asio(mixer, layout, Some(matrix.clone()), 4);
+        state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(2),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(500_000_000),
+                gain: 0.5,
+            })
+            .unwrap();
+        let mut expected = cold_output_snapshot(&state);
+        let storage = prepared_storage(&state);
+        let counters = producer.counters();
+        let retry_matrix = matrix.clone();
+        assert_eq!(
+            fail_allocation(index, || state.reconfigure_asio(
+                layout,
+                Some(retry_matrix),
+                16
+            )),
+            Err(AudioError::AllocationFailed)
+        );
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(prepared_storage(&state), storage);
+        assert_eq!(producer.counters(), counters);
+        state.reconfigure_asio(layout, Some(matrix), 16).unwrap();
+        expected.max_frames = 16;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        state.admit(3).unwrap();
+        state.render_pending(2).unwrap();
+        // Queued voice starts at sample zero, not at the original voice's phase.
+        assert_eq!(state.pending_samples(), [0.6875, -0.34375, -0.875, 0.4375]);
+        assert_eq!(state.mixer().counters().commands_consumed, 2);
+    }
+}
+
+#[test]
+fn asio_pending_interleaved_output_cannot_be_silently_reinterpreted_as_planar() {
+    let (_, mixer) = rig();
+    let mut state = prepared(mixer, target(1), None, 4);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let before = cold_output_snapshot(&state);
+    let layout = asio_layout(&[(0, AsioPcmEncoding::Float32Lsb)]);
+    assert_eq!(
+        state.reconfigure_asio(layout, None, 4),
+        Err(AudioError::InvalidFormat)
+    );
+    assert_eq!(cold_output_snapshot(&state), before);
+    state.admit(3).unwrap();
+    state.reconfigure_asio(layout, None, 2).unwrap();
+    assert_eq!(state.format(), None);
+    assert_eq!(state.render_pending(2).unwrap().start_frame, 4);
+    assert_eq!(state.pending_samples(), [0.625, -0.75]);
+}
+
+#[test]
+fn asio_quarantine_and_paused_reports_preserve_exact_pcm_and_history_on_retry() {
+    let (mut producer, mut mixer) = rig();
+    mixer.enable_source_playback_history(8).unwrap();
+    let layout = asio_layout(&[
+        (5, AsioPcmEncoding::Int24Lsb),
+        (2, AsioPcmEncoding::Float64Msb),
+    ]);
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = prepared_asio(mixer, layout, Some(matrix.clone()), 4);
+    state.render_pending(2).unwrap();
+    producer.request_pause(true);
+    assert!(!state.paused_tail_admissible());
+    state.admit(2).unwrap();
+    let paused = state.render_pending(3).unwrap();
+    assert!(paused.paused);
+    assert_eq!(paused.playback_frames, 0);
+    assert_eq!(state.pending_samples(), [0.; 6]);
+    assert!(state.paused_tail_admissible());
+    state.admit(1).unwrap();
+    state.mark_admission_uncertain();
+    let before = cold_output_snapshot(&state);
+    let (result, heap) = count_heap_calls(|| {
+        (
+            state.validate_reconfigure_asio(&layout, Some(&matrix), 8),
+            state.render_pending(1),
+            state.admit(1),
+            state.prepare_native_source_history(4, 4),
+        )
+    });
+    assert_eq!(heap, 0);
+    assert_eq!(
+        result,
+        (
+            Err(AudioError::InvalidBuffer),
+            Err(AudioError::InvalidBuffer),
+            Err(AudioError::InvalidBuffer),
+            Err(AudioError::InvalidBuffer)
+        )
+    );
+    assert_eq!(
+        state.reconfigure_asio(layout, Some(matrix), 8),
+        Err(AudioError::InvalidBuffer)
+    );
+    assert_eq!(cold_output_snapshot(&state), before);
+    assert!(!state.paused_tail_admissible());
+    assert!(matches!(state.into_mixer(), Err(_)));
 }

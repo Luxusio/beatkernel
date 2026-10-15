@@ -66,7 +66,7 @@ pub use negotiation::{
 };
 #[cfg(test)]
 pub(crate) use output_state::output_state_fixtures::{count_heap_calls, fail_allocation};
-pub use output_state::NativeOutputState;
+pub use output_state::{AsioPlanarLayout, NativeOutputLayout, NativeOutputState};
 
 /// Native audio API selected by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
