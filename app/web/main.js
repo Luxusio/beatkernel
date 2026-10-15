@@ -12,12 +12,13 @@ import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, validateEnd, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay", "replay-speed"]) ui[id] = byId(id);
 for (const id of ["live-speed", "live-speed-control", "replay-speed-control", "replay-speed-hint"]) ui[id] = byId(id);
+for (const id of ["runtime-retained", "runtime-controls", "runtime-rate", "runtime-rate-apply", "runtime-pause", "runtime-start", "runtime-end", "runtime-region", "runtime-loop", "runtime-disable-loop", "runtime-restart-original", "runtime-status"]) ui[id] = byId(id);
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 for (const id of ["judge-preset", "judge-precedence", "judge-gauge", "settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
@@ -1189,6 +1190,7 @@ function cancelPreparation() {
 }
 ui["prepare-cancel"].addEventListener("click", cancelPreparation);
 function controls() {
+  runtimeControls();
   const playing = activePlay !== null;
   ui["prepare-cancel"].hidden = !preparing;
   ui["prepare-cancel"].disabled = !preparing || preparationTicket === null;
@@ -1267,6 +1269,9 @@ function controls() {
   historicalGradeControls();
 }
 function stop() {
+  if (activePlay?.retained && activePlay.phase === "custody" && !activePlay.workerReleased && closingOwner !== null) {
+    return stopPlay("Retrying retained recording custody.");
+  }
   audioSetupTicket = null;
   clearPreparation();
   ++startRequest;
@@ -1308,20 +1313,22 @@ function stop() {
     try {
       const recordsError = await recordsStopped;
       await Promise.all([sourcesStopped, playStopped]);
-      const errors = await Promise.all([disposeOwner(game, "Gameplay"), disposeOwner(graphics, "Renderer")]);
+      const custodyHeld = activePlay?.retained && !activePlay.workerReleased && worker === game;
+      const errors = await Promise.all([custodyHeld ? Promise.resolve("Gameplay recording custody remains pending.") : disposeOwner(game, "Gameplay"), disposeOwner(graphics, "Renderer")]);
       cleanupError = [recordsError, ...errors].filter(error => error !== null).join(" ") || null;
     } finally {
-      terminateOwner(game);
+      const custodyHeld = activePlay?.retained && !activePlay.workerReleased && worker === game;
+      if (!custodyHeld) terminateOwner(game);
       terminateOwner(graphics);
-      if (worker === game) worker = null;
+      if (worker === game && !custodyHeld) worker = null;
       if (renderer === graphics) renderer = null;
       rendererReady = false;
       submittedGeometry = null;
-      closingOwner = null;
-      shuttingDown = false;
+      if (!custodyHeld) { closingOwner = null; shuttingDown = false; }
       if (shutdown === closing) shutdown = null;
       controls();
-      if (cleanupError) status(`${cleanupError} Worker ownership was released by termination.`, true);
+      if (cleanupError) status(custodyHeld ? `${cleanupError} Retry Stop to complete the recording transfer.`
+        : `${cleanupError} Worker ownership was released by termination.`, true);
       settled(cleanupError);
     }
   })();
@@ -1815,10 +1822,57 @@ ui["local-release"].addEventListener("click", () => { if (!settingsOperation && 
 ui["local-page"].addEventListener("change", () => { void changeLocalPage(); });
 ui["captured-replay"].addEventListener("change", () => {
   if (settingsOperation || activePlay || recordsOperation) return;
-  lastReplay = capturedReplays.find(record => String(record.player ?? "solo") === ui["captured-replay"].value) ?? null;
+  lastReplay = capturedReplays.find(record => captureKey(record) === ui["captured-replay"].value) ?? null;
   ui.export.textContent = lastReplay ? `Download ${lastReplay.player === undefined ? "last replay" : `player ${lastReplay.player} replay`} (${lastReplay.complete ? "complete" : "prefix"})` : "Choose a captured replay";
   controls();
 });
+function runtimeWord(words, index) { return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n; }
+function runtimeCapability(session, words) {
+  if (!(words instanceof Uint32Array) || words.length !== 16 || !(words.buffer instanceof ArrayBuffer)
+    || words.buffer.resizable === true || words.byteOffset !== 0 || words.buffer.byteLength !== 64
+    || runtimeWord(words, 0) !== 1n || runtimeWord(words, 1) !== session.programId
+    || runtimeWord(words, 6) === 0n || runtimeWord(words, 7) === 0n) throw new Error("Invalid actual retained capability.");
+  return words;
+}
+function runtimeControls() {
+  const session = activePlay;
+  const available = session?.retained === true && session.phase === "playing" && session.runtimeCapability;
+  const pending = session?.runtimePending;
+  const transaction = pending && [...pending.values()].some(action => action !== "pause");
+  ui["runtime-retained"].disabled = !!session || !initialized || importing || preparing || !!settingsOperation;
+  ui["runtime-controls"].hidden = session?.retained !== true;
+  for (const id of ["runtime-rate", "runtime-start", "runtime-end", "runtime-loop"]) ui[id].disabled = !available;
+  for (const id of ["runtime-rate-apply", "runtime-region", "runtime-disable-loop", "runtime-restart-original"]) ui[id].disabled = !available || !!session?.rpc || !!pending?.size;
+  ui["runtime-pause"].disabled = !available || !!session?.rpc || !!pending && [...pending.values()].some(action => action === "pause")
+    || !!transaction && !(session.runtimePaused && [...pending.values()].every(action => action === "rate"));
+  ui["runtime-pause"].textContent = session?.runtimePaused ? "Resume" : "Pause";
+}
+async function requestRetained(action) {
+  const session = activePlay;
+  if (!session?.retained || session.phase !== "playing" || session.rpc) return;
+  const draft = action === "rate" ? { fraction: ui["runtime-rate"].value }
+    : action === "region" ? { startSeconds: ui["runtime-start"].value, endSeconds: ui["runtime-end"].value, repeat: ui["runtime-loop"].checked }
+      : action === "pause" ? { paused: !session.runtimePaused } : {};
+  try {
+    const result = await playRpc(session, "play-retained", { version: 1, action, ...draft });
+    if (activePlay !== session || session.phase !== "playing") return;
+    if (result?.kind !== "retained-pending" || result.version !== 1 || typeof result.id !== "bigint"
+      || result.id <= 0n || result.action !== action || session.runtimePending.has(result.id)) throw new Error("Invalid retained admission response.");
+    session.runtimeCapability = runtimeCapability(session, result.capability);
+    session.runtimePending.set(result.id, action);
+    ui["runtime-status"].textContent = `Pending ${action} · applied ${runtimeWord(result.capability, 6)}/${runtimeWord(result.capability, 7)}`;
+  } catch (error) {
+    if (activePlay === session) ui["runtime-status"].textContent = String(error.message).slice(0, 4096);
+  }
+  controls();
+}
+ui["runtime-rate-apply"].addEventListener("click", () => { void requestRetained("rate"); });
+ui["runtime-rate"].addEventListener("keydown", event => {
+  if (event.code === "Enter") { event.preventDefault(); if (!ui["runtime-rate-apply"].disabled) void requestRetained("rate"); }
+});
+for (const [id, action] of [["runtime-pause", "pause"], ["runtime-region", "region"], ["runtime-disable-loop", "disable-loop"], ["runtime-restart-original", "restart-original"]]) {
+  ui[id].addEventListener("click", () => { void requestRetained(action); });
+}
 function multiplayerSelectionChanged() {
   if (settingsOperation || activePlay) return;
   controls();
@@ -2350,8 +2404,13 @@ async function play(mode = "live") {
     if (session.localSources && !session.requestHid) session.hidSources = new Set();
     if (session.localSources && !session.requestGamepad) session.gamepadSources = new Set();
     session.workerStarted = true;
+    session.retained = mode === "live" && ui["runtime-retained"].checked === true;
+    session.runtimePending = new Map();
+    session.runtimePaused = false;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile, replaySpeed: session.replaySpeed.fraction }
       : { mode, liveSpeed: session.liveSpeed.fraction, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
+        ...(session.retained ? { retained: true, audioLimits: session.audioLimits,
+          ...(session.recordReplay ? { captureBudget: captureBudget() } : {}) } : {}),
         ...(session.timingPolicy === null ? {} : { timingPolicy: session.timingPolicy }),
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
@@ -2377,6 +2436,12 @@ async function play(mode = "live") {
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
+    if (session.retained) {
+      if (prepared.retained !== true || typeof prepared.programId !== "bigint" || prepared.programId <= 0n || prepared.programId > 18446744073709551615n) throw new Error("Preparation omitted the actual retained Program.");
+      session.programId = prepared.programId;
+      session.runtimeCapability = runtimeCapability(session, prepared.capability);
+      ui["runtime-status"].textContent = `Applied ${runtimeWord(prepared.capability, 6)}/${runtimeWord(prepared.capability, 7)}`;
+    } else if (prepared.retained !== undefined || prepared.programId !== undefined) throw new Error("Preparation unexpectedly changed retained mode.");
     if (session.localPlan) {
       const local = validateLocalPrepared(session.localPlan, prepared, session.recordReplay);
       session.localPage = local.page;
@@ -2456,8 +2521,10 @@ async function play(mode = "live") {
       || prepared.liveSpeedDenominator !== session.liveSpeed.denominator) {
       throw new Error("Prepared live speed differs from the selected session speed.");
     }
-    const output = playbackOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate,
-      mode === "replay" ? session.replaySpeed : session.liveSpeed);
+    const output = session.retained ? { endNs: validateEnd(preparedStart, prepared.endNs), endFrame: undefined }
+      : playbackOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate,
+        mode === "replay" ? session.replaySpeed : session.liveSpeed);
+    if (session.retained && prepared.endFrame !== undefined) throw new Error("Retained playback supplied an immutable output end frame.");
     if (mode === "live" && output.endNs !== session.requestedEndNs) throw new Error("Prepared live section end changed.");
     session.endNs = output.endNs;
     session.endFrame = output.endFrame;
@@ -2513,7 +2580,8 @@ async function play(mode = "live") {
       try { sampleDescriptor?.port?.close(); } catch {}
       throw error;
     }
-    if (session.endFrame === undefined) await session.audio.finish();
+    if (session.retained) await session.audio.finish(undefined, { mode: "retained" });
+    else if (session.endFrame === undefined) await session.audio.finish();
     else await session.audio.finish(session.endFrame);
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     const descriptor = await session.audio.openCommandPort();
@@ -2657,6 +2725,13 @@ function key(event, down) {
       if (current()) void stopPlay("Playback stopped.");
       return;
     }
+    if (session.retained && down && (code === "F5" || code === "F9")) {
+      event.preventDefault();
+      const control = code === "F5" ? "runtime-restart-original" : "runtime-pause";
+      if (!event.repeat && !ui[control].disabled) void requestRetained(code === "F5" ? "restart-original" : "pause");
+      return;
+    }
+    if (session.retained && [ui["runtime-rate"], ui["runtime-start"], ui["runtime-end"]].includes(event.target)) return;
     if (!live()) return;
     const binding = session.bindings.find(row => row[1] === code);
     if (!binding) return;
@@ -3155,6 +3230,37 @@ function receivePlay(data) {
     return;
   }
   if (!session || data.playId !== session.id) return;
+  if (data.kind === "play-retired-recordings") {
+    receiveRetiredRecordings(session, data);
+    return;
+  }
+  if (data.kind === "play-retained-result") {
+    const action = session.runtimePending?.get(data.id);
+    if (!session.retained || data.version !== 1 || action === undefined || action !== data.action) return;
+    try {
+      const event = data.event;
+      if (!(event instanceof Uint32Array) || !(event.buffer instanceof ArrayBuffer) || event.buffer.resizable === true
+        || event.length !== 80 || event.byteOffset !== 0 || event.buffer.byteLength !== 320
+        || runtimeWord(event, 0) !== 1n || runtimeWord(event, 2) !== session.programId
+        || runtimeWord(event, 3) <= (session.runtimeSerial ?? 0n) || runtimeWord(event, 4) !== data.id
+        || !["applied", "noop", "refused", "paused", "resumed"].includes(data.outcome)
+        || !(data.reason === null || typeof data.reason === "string" && data.reason.length <= 4096)) throw new Error("Invalid actual retained result.");
+      const tag = runtimeWord(event, 1);
+      const expectedTag = action === "rate" ? 2n : action === "restart-original" ? 3n : action === "pause" ? 4n : 1n;
+      const outcome = tag === 4n ? runtimeWord(event, 36) === 1n ? "paused" : "resumed"
+        : tag === 1n ? runtimeWord(event, 25) === 5n ? "refused" : "applied"
+          : ["applied", "noop", "refused"][Number(runtimeWord(event, 17))];
+      if (tag !== expectedTag || data.outcome !== outcome) throw new Error("Retained display outcome differs from its actual event.");
+      session.runtimeCapability = runtimeCapability(session, data.capability);
+      session.runtimeSerial = runtimeWord(event, 3);
+      if (data.outcome === "paused" || data.outcome === "resumed") session.runtimePaused = data.outcome === "paused";
+      session.runtimePending.delete(data.id);
+      ui["runtime-status"].textContent = `${data.outcome} · applied ${runtimeWord(data.capability, 6)}/${runtimeWord(data.capability, 7)}`
+        + (data.reason ? ` · ${data.reason}` : "");
+      controls();
+    } catch (error) { void stopPlay(error.message, true); }
+    return;
+  }
   if (data.kind === "play-preparation-progress") {
     if (session.phase === "preparing") showPreparation(data);
     return;
@@ -3199,16 +3305,19 @@ function receivePlay(data) {
     } else request.resolve(data.result);
   } else if (data.kind === "play-stopped") {
     session.finalScore = data;
-    replayReceipt(session, data);
+    if (!replayReceipt(session, data)) return;
     releasePlayWorker(session);
     if (session.phase !== "closing") void stopPlay("Gameplay stopped without the Window cleanup request.", true);
   } else if (data.kind === "play-error") {
     session.finalScore = data;
-    replayReceipt(session, data);
+    if (!replayReceipt(session, data)) return;
     if (data.released === false) {
       session.cleanupError = String(data.message).slice(0, 4096);
-      releasePlayWorker(session);
-      stop();
+      if (session.retained) {
+        if (session.workerStop) {
+          clearTimeout(session.workerStop.timer); session.workerStop.resolve(); session.workerStop = null;
+        }
+      } else { releasePlayWorker(session); stop(); }
     } else releasePlayWorker(session);
     void stopPlay(`Playback failed: ${data.message}` + (session.localPlan ? "" : ` · Hits ${data.hits}, misses ${data.misses}`), true);
   } else if (data.kind === "play-commands" && session.phase !== "closing") {
@@ -3317,6 +3426,11 @@ function stopPlay(reason, failed = false, completed = false) {
   if (session.workerStarted && !session.workerReleased && worker) {
     workerStopped = new Promise(resolve => {
       const timer = setTimeout(() => {
+        if (session.retained) {
+          session.cleanupError = "Recording custody is still owned by the gameplay Worker. Retry Stop to finish its transfer.";
+          session.workerStop = null; resolve();
+          return;
+        }
         // Termination establishes ownership release if the stop receipt never arrives.
         terminateOwner(worker);
         releasePlayWorker(session);
@@ -3327,7 +3441,11 @@ function stopPlay(reason, failed = false, completed = false) {
       session.workerStop = { timer, resolve };
     });
     try { worker.postMessage({ kind: "play-stop", playId: session.id, completed }); }
-    catch { terminateOwner(worker); releasePlayWorker(session); stop(); failed = true; reason = "Gameplay Worker could not stop. Reload the page."; }
+    catch {
+      if (session.retained) { clearTimeout(session.workerStop.timer); session.workerStop.resolve(); session.workerStop = null; session.cleanupError = "Gameplay Worker still owns recording custody."; }
+      else { terminateOwner(worker); releasePlayWorker(session); stop(); }
+      failed = true; reason = "Gameplay Worker could not stop. Reload the page.";
+    }
   }
   controls();
   status(reason, failed);
@@ -3377,6 +3495,12 @@ function stopPlay(reason, failed = false, completed = false) {
         reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;
       }
       if (activePlay === session) {
+        if (session.retained && !session.workerReleased) {
+          session.phase = "custody"; session.stopping = null;
+          status(session.cleanupError ?? "Recording custody remains on its owner. Retry Stop.", true);
+          controls();
+          return;
+        }
         if (session.owner === owner) {
           ui.title.textContent = session.preview.title;
           ui.details.textContent = session.preview.details;
@@ -3429,13 +3553,14 @@ function stopPlay(reason, failed = false, completed = false) {
             ui["local-status"].textContent = session.localPlan.automatic === true ? "Automatic input sources released."
               : "Local input sources released. Discover again before the next local session.";
           }
-        } else if (session.replay !== null) {
+        } else if (session.replay !== null && !session.retained) {
           revokeReplayURL();
           lastReplay = { replayFile: session.replay.file, players: [1], complete: session.replay.complete && !failed, id: session.id,
             chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null,
             ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: 1 } : {}) };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
-          capturedReplays = [lastReplay];
+          if (capturedReplays.some(row => row.programId !== undefined)) retainCapturedRows([lastReplay]);
+          else capturedReplays = [lastReplay];
           showCapturedReplays(true);
         }
         activePlay = null;
@@ -3470,21 +3595,52 @@ function archiveReceipt(session, data) {
 
 function replayReceipt(session, data) {
   archiveReceipt(session, data);
+  let captureFailure = null;
   if (session.localPlan) {
     session.localReplays = localReplayReceipt(session.localPlan, data, { recording: session.recordReplay,
       natural: session.naturalFinishRequested, bytesPerMember: Math.floor(64 * 1024 * 1024 / session.localPlan.players.length) });
     session.localScores = localScoreRows(session.localPlan, data.localScores);
-    return;
+    if (!session.retained) return true;
+    captureFailure = session.localReplays.find(row => row.replayError !== null)?.replayError ?? null;
+  } else {
+    try {
+      const capture = validateCapturedReplay(data, { playId: session.id, recording: session.recordReplay,
+        natural: session.naturalFinishRequested, mode: session.mode });
+      session.replay = capture.file === null ? null : { file: capture.file, complete: capture.complete };
+      if (capture.error !== null) session.replayError = capture.error;
+    } catch (error) {
+      session.replay = null;
+      session.replayError = String(error.message).slice(0, 4096);
+      captureFailure = session.replayError;
+    }
   }
-  try {
-    const capture = validateCapturedReplay(data, { playId: session.id, recording: session.recordReplay,
-      natural: session.naturalFinishRequested, mode: session.mode });
-    session.replay = capture.file === null ? null : { file: capture.file, complete: capture.complete };
-    if (capture.error !== null) session.replayError = capture.error;
-  } catch (error) {
-    session.replay = null;
-    session.replayError = String(error.message).slice(0, 4096);
+  if (session.retained && captureFailure !== null && data.released !== false) {
+    // Keep the original immutable handles reachable until their full receipt is accepted.
+    session.unacceptedCapture = data;
+    session.cleanupError = captureFailure;
+    status(`Recording File custody remains pending: ${captureFailure}`, true);
+    return false;
   }
+  if (session.retained && session.recordReplay && !session.currentCaptureAccepted && data.released !== false) {
+    try {
+      const source = session.localPlan ? session.localReplays : [{ player: 1, replay: session.replay?.file ?? null, replayComplete: session.replay?.complete ?? false }];
+      const scores = session.localScores ?? [data];
+      const rows = source.flatMap((row, index) => row.replay ? [{ id: session.id, player: row.player,
+        players: [...(session.localPlan?.players ?? [1])], programId: session.programId, boundarySerial: null,
+        replayFile: row.replay, complete: row.replayComplete, chartPath: session.chartPath,
+        hits: scores[index]?.hits ?? null, misses: scores[index]?.misses ?? null, combo: scores[index]?.combo ?? null,
+        ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: row.player } : {}) }] : []);
+      retainCapturedRows(rows);
+      session.currentCaptureAccepted = true;
+      session.unacceptedCapture = null;
+      showCapturedReplays();
+    } catch (error) {
+      session.cleanupError = String(error.message).slice(0, 4096);
+      status(`Recording File custody remains pending: ${session.cleanupError}`, true);
+      return false;
+    }
+  }
+  return true;
 }
 
 function localScoreRows(plan, rows) {
@@ -3506,10 +3662,67 @@ function localScoreRows(plan, rows) {
 function showCapturedReplays(selectSolo = false) {
   ui["captured-replay"].replaceChildren(new Option("Choose a captured replay", ""));
   for (const record of capturedReplays) {
-    ui["captured-replay"].append(new Option(`${record.player === undefined ? "Solo" : `Player ${record.player}`} · ${record.complete ? "complete" : "prefix"}`, String(record.player ?? "solo")));
+    ui["captured-replay"].append(new Option(`${record.player === undefined ? "Solo" : `Player ${record.player}`} · ${record.complete ? "complete" : "prefix"}`
+      + (record.boundarySerial ? ` · attempt boundary ${record.boundarySerial}` : ""), captureKey(record)));
   }
-  ui["captured-replay"].value = selectSolo ? "solo" : "";
+  ui["captured-replay"].value = selectSolo && lastReplay ? captureKey(lastReplay) : "";
   if (!selectSolo) { lastReplay = null; ui.export.textContent = "Choose a captured replay"; }
+}
+
+function captureKey(record) {
+  return record.programId === undefined ? String(record.player ?? "solo")
+    : `${record.programId}:${record.boundarySerial === null ? "current" : record.boundarySerial}:${record.player ?? 1}`;
+}
+function captureBudget() {
+  return { remainingRecords: 128 - capturedReplays.length,
+    remainingBytes: 256 * 1024 * 1024 - capturedReplays.reduce((total, row) => total + row.replayFile.size, 0) };
+}
+function retainCapturedRows(rows) {
+  const keys = new Set(capturedReplays.filter(row => row.programId !== undefined).map(captureKey));
+  let bytes = 0;
+  for (const row of rows) {
+    if (!(row.replayFile instanceof File) || !Number.isSafeInteger(row.replayFile.size) || row.replayFile.size < 1
+      || row.replayFile.size > 64 * 1024 * 1024) throw new Error("Invalid captured recording File.");
+    const key = captureKey(row);
+    if (row.programId !== undefined && keys.has(key)) throw new Error("Duplicate retained recording tuple.");
+    keys.add(key); bytes += row.replayFile.size;
+  }
+  const budget = captureBudget();
+  if (rows.length > budget.remainingRecords || bytes > budget.remainingBytes) throw new Error("Captured recording File capacity exhausted.");
+  capturedReplays.push(...rows);
+}
+function receiveRetiredRecordings(session, data) {
+  let error = null;
+  try {
+    const players = session.localPlan?.players ?? [1];
+    if (Reflect.ownKeys(data).length !== 8 || !session.retained || !session.recordReplay || data.version !== 1 || data.programId !== session.programId
+      || typeof data.boundarySerial !== "bigint" || data.boundarySerial <= 0n || data.boundarySerial > 18446744073709551615n
+      || !Array.isArray(data.players) || data.players.length !== players.length || data.players.some((player, index) => player !== players[index])
+      || !Array.isArray(data.replays) || data.replays.length !== players.length || !Number.isSafeInteger(data.bytes)
+      || data.bytes < 0 || data.bytes > 64 * 1024 * 1024) throw new Error("Invalid retired recording cohort.");
+    const rows = [];
+    let bytes = 0;
+    for (let index = 0; index < players.length; index++) {
+      const row = data.replays[index];
+      if (!row || Reflect.ownKeys(row).length !== 4 || row.player !== players[index] || row.replayComplete !== false
+        || !(row.replayError === null || typeof row.replayError === "string" && row.replayError.length <= 4096)
+        || !(row.replay === null || row.replay instanceof File)
+        || row.replay && row.replay.size > Math.floor(64 * 1024 * 1024 / players.length)) throw new Error("Invalid retired member recording.");
+      if (row.replay !== null) {
+        bytes += row.replay.size;
+        rows.push({ id: session.id, player: row.player, players: [...players], programId: data.programId,
+          boundarySerial: data.boundarySerial, replayFile: row.replay, complete: false, chartPath: session.chartPath,
+          hits: null, misses: null, combo: null });
+      }
+    }
+    if (bytes !== data.bytes) throw new Error("Retired cohort File sizes differ from the actual export.");
+    const budget = captureBudget();
+    if (budget.remainingRecords < rows.length + players.length || budget.remainingBytes < bytes + 64 * 1024 * 1024) throw new Error("Retired cohort would consume final current recording custody.");
+    retainCapturedRows(rows);
+    showCapturedReplays();
+  } catch (cause) { error = String(cause.message).slice(0, 4096); }
+  worker.postMessage({ kind: "play-retired-recordings-ack", version: 1, playId: session.id, programId: data.programId,
+    boundarySerial: data.boundarySerial, accepted: error === null, error, ...captureBudget() });
 }
 
 function showLocalResults(session, failed, publish = true) {
@@ -3532,9 +3745,10 @@ function showLocalResults(session, failed, publish = true) {
       ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: player } : {}) });
   }
   if (publish) ui["local-results"].replaceChildren(rows);
-  if (session.recordReplay) {
+  if (session.recordReplay && !session.retained) {
     revokeReplayURL();
-    capturedReplays = recordings;
+    if (capturedReplays.some(row => row.programId !== undefined)) retainCapturedRows(recordings);
+    else capturedReplays = recordings;
     showCapturedReplays(); // A member recording is never selected by aliasing the first row.
   }
 }
@@ -4045,6 +4259,11 @@ async function recordAction(action, menuTicket = null) {
           players: captured.players, player: captured.player ?? 1 } });
         if (!recordCurrent(operation)) return;
         committed = operation.committed = "Recording saved. ";
+        if (captured.programId !== undefined) {
+          capturedReplays = capturedReplays.filter(row => row !== captured);
+          if (lastReplay === captured) lastReplay = null;
+          showCapturedReplays();
+        }
       } else if (action === "delete") {
         const { removed } = await requestRecords(operation, "remove", { recordId: id });
         if (!recordCurrent(operation)) return;

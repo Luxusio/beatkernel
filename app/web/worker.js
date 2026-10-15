@@ -2,7 +2,7 @@ import { RenderClient, validateRenderLimits, unsignedIdentity, snapshotMenuMotio
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot, normalizedPath } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, sectionFromSeconds, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -36,6 +36,7 @@ let geometryVersion = 0n;
 let surfaceSentVersion = 0n;
 let disposed = false;
 let capturesPending = 0;
+let retiredCaptureOwner = null;
 let deferredFatal = null;
 let libraryContext = null;
 let preparationOwner = null;
@@ -1330,7 +1331,7 @@ function preparationProgress(record, stage = record.job?.stage ?? "file-read") {
     sharedAssets: job?.shared_asset_count ?? 0, beginMs: record.beginMs, maxStepMs: record.maxStepMs,
   });
 }
-async function prepareChartJob(context, path, current, kind, id, begin) {
+async function prepareChartJob(context, path, current, kind, id, begin, configure = null) {
   releasePreparation();
   const record = { context, path, current, kind, id, job: null, cancelled: false,
     channel: null, queued: false, wake: null, beginMs: 0, maxStepMs: 0 };
@@ -1341,6 +1342,7 @@ async function prepareChartJob(context, path, current, kind, id, begin) {
     if (!await acquireLibraryFile(context, path, alive, record) || !alive()) return null;
     const started = performance.now();
     record.job = begin();
+    configure?.(record.job);
     record.beginMs = performance.now() - started;
     while (alive()) {
       const pending = record.job.pending_asset_path();
@@ -2410,7 +2412,60 @@ function roomRequest(state, request) {
   }
 }
 
+function disposeRetainedGame(state) {
+  state.sampleClient?.close(); state.sampleClient = null;
+  state.commandClient?.close(); state.commandClient = null;
+  state.audioPumping = state.commandPumping = false;
+  state.renderObservation = null;
+  const game = state.game;
+  const result = { cleanupError: null, replay: null, replayError: null, completedArchive: null,
+    archivePlayers: null, archiveError: null,
+    ...(state.localPlan ? { replays: retainedPlayers(state).map(player => ({ player, replay: null, replayError: null, replayComplete: false })) } : {}) };
+  if (!game) return result;
+  try { captureCompletedResults(state); } catch (error) { result.cleanupError = error; }
+  const cache = state.currentCaptures ??= { rows: [], archive: null, archiveAttempted: false };
+  if (state.recordReplay && !cache.archiveAttempted) {
+    try {
+      const bytes = game.completed_archive();
+      if (bytes != null) {
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > 5 * 1024 * 1024) throw new Error("Invalid bounded completed archive.");
+        cache.archive = new Blob([bytes], { type: "application/octet-stream" });
+      }
+      cache.archiveAttempted = true;
+    } catch (error) { result.archiveError = message(error); }
+  }
+  result.completedArchive = cache.archive;
+  if (cache.archive) result.archivePlayers = retainedPlayers(state);
+  try { game.stop(); } catch (error) { result.cleanupError ??= error; }
+  if (state.recordReplay) for (const player of retainedPlayers(state)) {
+    let row = cache.rows.find(row => row.player === player);
+    if (!row) { row = { player, bytes: null, file: null, exported: false }; cache.rows.push(row); }
+    try {
+      if (!row.exported) {
+        row.bytes = state.localPlan ? game.take_replay(player) : game.take_replay();
+        row.exported = true;
+      }
+      if (row.bytes != null && row.file === null) {
+        if (!(row.bytes instanceof Uint8Array) || !(row.bytes.buffer instanceof ArrayBuffer) || row.bytes.buffer.resizable === true
+          || row.bytes.byteLength === 0 || row.bytes.byteLength > (state.recordLimits?.bytes ?? 64 * 1024 * 1024)) throw new Error("Invalid retained current recording bytes.");
+        row.file = new File([row.bytes], "recording.bkr", { type: "application/octet-stream" });
+      }
+      if (state.localPlan) result.replays.find(value => value.player === player).replay = row.file;
+      else result.replay = row.file;
+    } catch (error) {
+      result.cleanupError ??= error;
+      if (state.localPlan) result.replays.find(value => value.player === player).replayError = message(error);
+      else result.replayError = message(error);
+    }
+  }
+  if (state.retiredCohort) result.cleanupError ??= new Error("Retired recording custody is still owned by this Worker.");
+  if (result.cleanupError === null) {
+    try { game.free(); state.game = null; } catch (error) { result.cleanupError = error; }
+  }
+  return result;
+}
 function disposeGame(state) {
+  if (state.retained) return disposeRetainedGame(state);
   if (preparationOwner?.kind === "play" && preparationOwner.id === state.id) releasePreparation();
   const sampleClient = state.sampleClient;
   state.sampleClient = null;
@@ -2503,8 +2558,28 @@ function disposeGame(state) {
 }
 
 
+function retainedCustodyFailure(state, error) {
+  state.retiredClosing = false;
+  if (state.retiredCohort) {
+    clearTimeout(state.retiredCohort.timer);
+    state.retiredCohort.promise = null;
+  }
+  const score = statistics(state);
+  const { cleanupError, ...captures } = disposeRetainedGame(state);
+  state.active = false;
+  fenceVisual();
+  report("play-error", { playId: state.id, released: false, message: message(error),
+    ...captures, replayComplete: false, ...score });
+}
 function failPlay(state, error, request = null) {
   if (play !== state) return;
+  if (state.retained && state.retiredCohort && !state.retiredClosing) {
+    state.retiredClosing = true;
+    void drainRetiredRecordings(state, state.retiredCohort.boundarySerial).then(() => {
+      state.retiredClosing = false; failPlay(state, error, request);
+    }, cause => retainedCustodyFailure(state, cause));
+    return;
+  }
   ++capturesPending;
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
@@ -2515,6 +2590,7 @@ function failPlay(state, error, request = null) {
   closeNetwork(state.network);
   const roomClosing = state.room ? finishRoom(state, false) : null;
   const { cleanupError, replay, replayError, replays, completedArchive, archivePlayers, archiveError } = disposeGame(state);
+  if (state.retained && cleanupError && state.game) { play = state; state.active = false; }
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
   const pending = new Set([request?.rpcId, state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
@@ -2544,6 +2620,14 @@ function failPlay(state, error, request = null) {
 function stopPlay(state, request) {
   if (request.completed !== undefined && typeof request.completed !== "boolean") throw new Error("Invalid stopped-play completion choice.");
   const completed = request.completed === true;
+  if (state.retained && state.retiredCohort) {
+    if (state.retiredClosing) return;
+    state.retiredClosing = true;
+    void drainRetiredRecordings(state, state.retiredCohort.boundarySerial).then(() => {
+      state.retiredClosing = false; stopPlay(state, request);
+    }, cause => retainedCustodyFailure(state, cause));
+    return;
+  }
   if (completed && (!state.completed || commandsPending(state) || state.audioPumping
     || state.renderObservation !== null)) throw new Error("Natural stop has no current completion evidence.");
   ++capturesPending;
@@ -2560,6 +2644,7 @@ function stopPlay(state, request) {
   }
   const roomClosing = state.room ? finishRoom(state, completed) : null;
   const { cleanupError, replay, replayError, replays, completedArchive, archivePlayers, archiveError } = disposeGame(state);
+  if (state.retained && cleanupError && state.game) { play = state; state.active = false; }
   const pending = new Set([state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
   state.sampleRpcId = null;
@@ -2842,7 +2927,8 @@ async function preparePlay(state, request) {
         : requestedStart === 0n
         ? context.library.begin_prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
         : context.library.begin_prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
-          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES));
+          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES),
+        state.retained ? job => job.enable_retained_practice() : null);
     }
     if (!prepared || !currentLibrary(context) || !current()) return;
     const actualStart = prepared.start_ns;
@@ -2934,6 +3020,28 @@ async function preparePlay(state, request) {
           : requestedEnd === undefined
             ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
             : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+    if (state.retained) {
+      const limits = request.audioLimits;
+      if (!limits || !integer(limits.maxVoices, 1, 4096) || !integer(limits.maxCommandsPerRender, 1, 65536)) {
+        throw new Error("Retained playback requires the actual negotiated audio limits.");
+      }
+      state.game.configure_retained_limits(limits.maxVoices, limits.maxCommandsPerRender, 64, 64, 4096);
+      state.retainedSetup = retainedWords(state.game.retained_setup_words(), 32, "setup");
+      state.programId = retainedWord(state.retainedSetup, 1);
+      if (retainedWord(state.retainedSetup, 0) !== 1n || state.programId === 0n) throw new Error("Invalid retained Program identity.");
+      state.retainedGeneration = retainedWord(retainedCapability(state), 2);
+      metadata.retained = true;
+      metadata.programId = state.programId;
+      metadata.capability = retainedCapability(state);
+      if (request.recordReplay === true) {
+        const budget = request.captureBudget;
+        if (!budget || !integer(budget.remainingRecords, 0, 128) || !integer(budget.remainingBytes, 0, 256 * 1024 * 1024)) {
+          throw new Error("Retained recording requires the actual remaining File custody budget.");
+        }
+        state.captureBudget = { ...budget };
+        requireCaptureBudget(state, false);
+      }
+    }
     {
       const numerator = state.game.speed_numerator;
       const denominator = state.game.speed_denominator;
@@ -2985,8 +3093,12 @@ async function preparePlay(state, request) {
       }
       metadata.pointerDevices = devices;
     }
-    const output = playbackOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate, selectedSpeed);
+    const output = state.retained
+      ? { endNs: validateEnd(startNs, state.game.end_ns), endFrame: undefined }
+      : playbackOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate, selectedSpeed);
+    if (state.retained && state.game.playback_end_frame !== undefined) throw new Error("Retained playback cannot have an immutable output end frame.");
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
+    if (state.retained && output.endNs !== undefined) metadata.endNs = output.endNs;
     if (output.endFrame !== undefined) {
       metadata.endNs = output.endNs;
       metadata.endFrame = output.endFrame;
@@ -3089,6 +3201,7 @@ function nextSample(game) {
 }
 
 function samplePlay(state, request) {
+  if (state.retained) throw new Error("Retained original samples belong to the direct sample producer port.");
   if (state.active || state.commandClient !== null || state.sampleMode === "direct") {
     throw new Error("Samples belong to one setup producer before command handoff.");
   }
@@ -3170,6 +3283,10 @@ function uploadSamples(state, request) {
     void (async () => {
       let count = 0;
       let bytes = 0;
+      if (state.retained) {
+        await client.retainedSetup(state.retainedSetup.slice());
+        if (!current()) return;
+      }
       while (count < expected) {
         if (!current()) return;
         const sample = nextSample(game);
@@ -3201,6 +3318,14 @@ function uploadSamples(state, request) {
         throw new Error("Prepared PCM bank exceeds its declared sample count.");
       }
       if (!current()) return;
+      if (state.retained) {
+        const cues = game.retained_cue_count();
+        if (!integer(cues, 0, 1000000) || BigInt(cues) !== retainedWord(state.retainedSetup, 9)) throw new Error("Retained cue count differs from original setup.");
+        for (let index = 0; index < cues; index++) {
+          await client.retainedCue(index, retainedWords(game.retained_cue_words(index), 9, "cue"));
+          if (!current()) return;
+        }
+      }
       const ending = client.end();
       if (expected === 0) {
         ending.catch(() => {});
@@ -3238,7 +3363,8 @@ function attachAudio(state, request) {
     // Valid constructor admission owns cleanup even when starting the port fails.
     adopted = true;
     state.commandClient = new AudioCommandClient({ port: request.port, generation: request.generation,
-      queueCapacity: request.queueCapacity, timeoutMs: request.timeoutMs });
+      queueCapacity: request.queueCapacity, timeoutMs: request.timeoutMs,
+      ...(state.retained ? { programId: state.programId } : {}) });
     state.audioRpcId = request.rpcId;
     pumpAudio(state);
   } catch (error) {
@@ -3259,6 +3385,239 @@ function pendingInputs(state) {
   return pending;
 }
 
+function retainedWords(words, length, label) {
+  if (!(words instanceof Uint32Array) || !(words.buffer instanceof ArrayBuffer) || words.buffer.resizable === true
+    || words.length !== length || words.byteOffset !== 0 || words.byteLength !== words.buffer.byteLength) {
+    throw new Error(`Invalid retained ${label} words.`);
+  }
+  return words;
+}
+function retainedWord(words, index) {
+  return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;
+}
+function retainedCapability(state) {
+  const words = retainedWords(state.game.retained_capability_words(), 16, "capability");
+  if (retainedWord(words, 0) !== 1n || retainedWord(words, 1) !== state.programId
+    || retainedWord(words, 6) === 0n || retainedWord(words, 7) === 0n) throw new Error("Retained capability changed Program ownership.");
+  return words;
+}
+function retainedPlayers(state) { return state.localPlan ? state.localPlan.members.map(({ player }) => player) : [1]; }
+function requireCaptureBudget(state, fresh) {
+  if (!state.recordReplay && state.captureBudget === null) return;
+  const cohorts = fresh ? 2 : 1;
+  if (!state.captureBudget || state.captureBudget.remainingRecords < retainedPlayers(state).length * cohorts
+    || state.captureBudget.remainingBytes < cohorts * 64 * 1024 * 1024) {
+    throw new Error("Retained recording capacity exhausted; save captured recordings before starting another attempt.");
+  }
+}
+function prepareRetained(state, request) {
+  const fields = { rate: ["fraction"], region: ["startSeconds", "endSeconds", "repeat"],
+    "disable-loop": [], "restart-original": [], pause: ["paused"] };
+  const extra = fields[request.action];
+  if (!state.retained || !state.active || !state.commandClient || request.version !== 1 || !extra
+    || Reflect.ownKeys(request).length !== 5 + extra.length
+    || Reflect.ownKeys(request).some(key => !["kind", "version", "playId", "rpcId", "action", ...extra].includes(key))) {
+    throw new Error("Retained controls require the active retained Program and an exact version 1 draft.");
+  }
+  if (state.retainedSend || state.retainedPending.has(BigInt(request.rpcId))) throw new Error("A retained control admission is already pending.");
+  const pause = request.action === "pause";
+  const pending = [...state.retainedPending.values()];
+  if (pending.length && !(pause && request.paused === false && pending.length === 1 && pending[0].action === "rate")) {
+    throw new Error("Wait for the actual pending retained control result.");
+  }
+  if (request.action === "rate" && (state.opponentCount !== 0 || state.network || state.room)) {
+    throw new Error("Runtime rate changes are unavailable with an admitted fixed-condition saved or network opponent; start a separate practice session.");
+  }
+  const capability = retainedCapability(state);
+  const id = BigInt(request.rpcId), attempt = retainedWord(capability, 2), revision = retainedWord(capability, 5);
+  const entry = { request, id, action: request.action, attempt, revision, pause, preparation: null };
+  switch (request.action) {
+    case "rate": {
+      const speed = playbackSpeedFromFraction(request.fraction);
+      entry.preparation = retainedWords(state.game.retained_prepare_rate(id, speed.numerator, speed.denominator), 20, "rate preparation");
+      break;
+    }
+    case "region": {
+      if (typeof request.repeat !== "boolean") throw new Error("Choose whether this retained region repeats.");
+      const section = sectionFromSeconds(request.startSeconds, request.endSeconds);
+      entry.start = section.startNs;
+      entry.end = section.endNs ?? BigInt.asIntN(64, retainedWord(state.retainedSetup, 3));
+      entry.repeat = request.repeat;
+      requireCaptureBudget(state, true);
+      state.game.retained_prepare_region(id, entry.start, entry.end, entry.repeat);
+      break;
+    }
+    case "disable-loop": state.game.retained_prepare_disable_loop(id); break;
+    case "restart-original":
+      requireCaptureBudget(state, true);
+      entry.preparation = retainedWords(state.game.retained_prepare_original_restart(id), 20, "restart preparation");
+      break;
+    case "pause":
+      if (typeof request.paused !== "boolean") throw new Error("Invalid retained pause draft.");
+      entry.paused = request.paused;
+      state.game.retained_prepare_pause(id, entry.paused);
+      break;
+  }
+  state.retainedSend = entry;
+  state.retainedPending.set(id, entry);
+  pumpAudio(state);
+}
+async function sendRetained(state, entry, client) {
+  const request = { id: entry.id, attempt: entry.attempt, revision: entry.revision };
+  try {
+    switch (entry.action) {
+      case "rate": await client.retainedRate({ ...request, preparation: entry.preparation }); break;
+      case "region": await client.retainedRegion({ ...request, start: entry.start, end: entry.end, repeat: entry.repeat }); break;
+      case "disable-loop": await client.retainedDisableLoop(request); break;
+      case "restart-original": await client.retainedRestartOriginal({ ...request, preparation: entry.preparation }); break;
+      case "pause": await client.retainedPause({ id: entry.id, attempt: entry.attempt, paused: entry.paused }); break;
+    }
+  } catch (error) {
+    if (play !== state || state.commandClient !== client) return;
+    if (error?.terminal !== false) throw error;
+    state.game.retained_admission(entry.pause ? 1 : 0, entry.id, false, message(error));
+    if (!entry.pause) { try { state.game.retained_response_words(); } catch { /* Consumes the correlated Rust admission refusal. */ } }
+    state.retainedPending.delete(entry.id);
+    state.retainedSend = null;
+    report("play-reply", { playId: state.id, rpcId: entry.request.rpcId, error: message(error) });
+    return;
+  }
+  if (play !== state || state.commandClient !== client) return;
+  state.game.retained_admission(entry.pause ? 1 : 0, entry.id, true, "");
+  state.retainedSend = null;
+  reply(state, entry.request, { kind: "retained-pending", version: 1, id: entry.id,
+    action: entry.action, capability: retainedCapability(state) });
+}
+
+async function drainRetiredRecordings(state, boundarySerial) {
+  if (!state.retained || !state.recordReplay) return;
+  let cohort = state.retiredCohort;
+  if (cohort && cohort.boundarySerial !== boundarySerial) throw new Error("An earlier retired cohort still owns its File custody.");
+  if (!cohort) {
+    cohort = state.retiredCohort = { state, boundarySerial, players: retainedPlayers(state), rows: [], bytes: 0, promise: null };
+    retiredCaptureOwner = cohort;
+  }
+  for (const player of cohort.players) {
+    if (cohort.rows.some(row => row.player === player)) continue;
+    const bytes = state.localPlan ? state.game.take_retired_replay(player) : state.game.take_retired_replay();
+    if (bytes === undefined || bytes === null) {
+      cohort.rows.push({ player, replay: null, replayComplete: false, replayError: null });
+      continue;
+    }
+    const row = { player, bytes, replay: null, replayComplete: false, replayError: null };
+    cohort.rows.push(row);
+    if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable === true
+      || bytes.byteLength === 0 || bytes.byteLength > (state.recordLimits?.bytes ?? 64 * 1024 * 1024)
+      || cohort.bytes + bytes.byteLength > 64 * 1024 * 1024) throw new Error("Retired cohort exceeds its recording bounds.");
+    // Keep the actual exported bytes until File construction and Window acceptance succeed.
+    cohort.bytes += bytes.byteLength;
+  }
+  let total = 0;
+  for (const row of cohort.rows) if (row.bytes !== undefined) {
+    if (!(row.bytes instanceof Uint8Array) || !(row.bytes.buffer instanceof ArrayBuffer) || row.bytes.buffer.resizable === true
+      || row.bytes.byteLength === 0 || row.bytes.byteLength > (state.recordLimits?.bytes ?? 64 * 1024 * 1024)
+      || total + row.bytes.byteLength > 64 * 1024 * 1024) throw new Error("Retired cohort exceeds its recording bounds.");
+    total += row.bytes.byteLength;
+    if (row.replay === null) row.replay = new File([row.bytes], "recording.bkr", { type: "application/octet-stream" });
+  }
+  cohort.bytes = total;
+  if (!cohort.promise) cohort.promise = new Promise((resolve, reject) => {
+    cohort.resolve = resolve; cohort.reject = reject;
+    cohort.timer = setTimeout(() => reject(new Error("Retired recording custody acknowledgement timed out.")), 10000);
+    try {
+      report("play-retired-recordings", { version: 1, playId: state.id, programId: state.programId,
+        boundarySerial, players: cohort.players,
+        replays: cohort.rows.map(({ player, replay, replayComplete, replayError }) => ({ player, replay, replayComplete, replayError })), bytes: cohort.bytes });
+    } catch (error) { clearTimeout(cohort.timer); reject(error); }
+  });
+  await cohort.promise;
+  if (state.retiredCohort === cohort) state.retiredCohort = null;
+  if (retiredCaptureOwner === cohort) retiredCaptureOwner = null;
+}
+function acceptRetiredRecordings(request) {
+  const cohort = retiredCaptureOwner;
+  if (!cohort || request.playId !== cohort.state.id || request.programId !== cohort.state.programId
+    || request.boundarySerial !== cohort.boundarySerial) return;
+  if (Reflect.ownKeys(request).length !== 9 || request.version !== 1 || typeof request.accepted !== "boolean"
+    || !integer(request.remainingRecords, 0, 128) || !integer(request.remainingBytes, 0, 256 * 1024 * 1024)
+    || !(request.error === null || typeof request.error === "string" && request.error.length <= 4096)) return;
+  clearTimeout(cohort.timer);
+  if (!request.accepted || request.error !== null) cohort.reject(new Error(request.error ?? "Window refused retired recording custody."));
+  else {
+    cohort.state.captureBudget = { remainingRecords: request.remainingRecords, remainingBytes: request.remainingBytes };
+    cohort.resolve();
+  }
+}
+
+async function observeRetainedOutput(state, observation, snapshot, client) {
+  const game = state.game;
+  let completed = false;
+  if (snapshot !== null) {
+    const { report: output, retained } = snapshot;
+    if (!retained) throw new Error("Retained poll omitted its actual remote history.");
+    retainedWords(retained.metadata, 12, "metadata");
+    const history = retained.history;
+    if (!(history instanceof Uint32Array) || history.length < 20 || history.length > 20 + 10 * 4096
+      || history.length !== 20 + 10 * Number(retainedWord(history, 9))) throw new Error("Invalid bounded retained history.");
+    game.retained_history(history);
+    const event = retained.event;
+    if (event !== null) {
+      retainedWords(event, 80, "event");
+      if (retainedWord(event, 2) !== state.programId) throw new Error("Retained event changed Program identity.");
+      const fresh = retainedWord(event, 5) > state.retainedGeneration;
+      if (fresh) requireCaptureBudget(state, true);
+      game.retained_event(event);
+      state.retainedEvent = event;
+    }
+    // Service the held actual boundary before allowing the ordinary acquired-input drain.
+    completed = observeOutput(state, observation, output, false);
+  }
+  const serial = game.retained_service(currentWindowHost(state), state.audioNs);
+  if (serial !== undefined && serial !== null) {
+    const event = state.retainedEvent;
+    if (!event || retainedWord(event, 3) !== serial) throw new Error("Retained service returned an unowned commit serial.");
+    const capability = retainedCapability(state);
+    const generation = retainedWord(capability, 2);
+    if (generation !== state.retainedGeneration) {
+      fenceVisual();
+      await drainRetiredRecordings(state, serial);
+      state.retainedGeneration = generation;
+    }
+    if (play !== state || state.game !== game || state.commandClient !== client) return false;
+    const tag = retainedWord(event, 1), id = retainedWord(event, 4);
+    const pending = state.retainedPending.get(id);
+    if (pending) {
+      const outcome = tag === 4n ? retainedWord(event, 36) === 1n ? "paused" : "resumed"
+        : tag === 1n ? retainedWord(event, 25) === 5n ? "refused" : "applied"
+          : ["applied", "noop", "refused"][Number(retainedWord(event, 17))];
+      if (!outcome) throw new Error("Unknown retained result outcome.");
+      let response = event, reason = outcome === "refused" ? "The audio owner refused this retained control." : null;
+      if (tag !== 4n) {
+        try { response = retainedWords(game.retained_response_words(), 80, "response"); }
+        catch (error) { if (outcome !== "refused") throw error; reason = message(error); }
+      }
+      if (retainedWord(response, 3) !== serial) throw new Error("Retained result serial differs from actual committed event.");
+      report("play-retained-result", { version: 1, playId: state.id, id, action: pending.action,
+        event: response, capability, outcome, reason });
+      state.retainedPending.delete(id);
+    }
+    await client.retainedEventAck(serial);
+    if (play !== state || state.game !== game || state.commandClient !== client) return false;
+    game.retained_event_ack(serial);
+    state.retainedEvent = null;
+  }
+  serviceLiveAudio(state, currentWindowHost(state), state.audioNs);
+  const pin = game.retained_history_pin();
+  if (pin !== undefined && pin !== null && pin !== state.retainedPin) {
+    await client.retainedHistoryRetire(pin);
+    if (play !== state || state.game !== game || state.commandClient !== client) return false;
+    state.retainedPin = pin;
+  }
+  state.completed = game.evaluate_completion();
+  if (state.completed) captureCompletedResults(state);
+  return state.completed || completed;
+}
+
 function presentationUnavailable(state, reason) {
   if (state.presentationReason === reason) return;
   state.presentationReason = reason;
@@ -3274,7 +3633,7 @@ function serviceLiveAudio(state, now, audioNs) {
   return processed;
 }
 
-function observeOutput(state, observation, output) {
+function observeOutput(state, observation, output, service = true) {
   renderedCursor(output, state.startFrame);
   let completed;
   let replayEvidence;
@@ -3312,7 +3671,8 @@ function observeOutput(state, observation, output) {
     pair = availability.pair;
     state.game.admit_output(output.words, pair?.outputNs ?? null);
     if (pair !== null) {
-      state.game.observe_presentation(pair.outputNs, pair.hostNs);
+      if (state.retained) state.game.retained_observe_presentation(pair.outputNs, pair.hostNs);
+      else state.game.observe_presentation(pair.outputNs, pair.hostNs);
       state.lastPresentation = pair;
       if (state.presentationReason !== null) presentationUnavailable(state, null);
     } else if (availability.reason !== null) presentationUnavailable(state, availability.reason);
@@ -3320,8 +3680,8 @@ function observeOutput(state, observation, output) {
       const audioNs = audioScheduleFromFrame(reportWord(output.words, 24), state.startFrame, state.rate);
       if (audioNs > state.audioNs) state.audioNs = audioNs;
     }
-    serviceLiveAudio(state, now, state.audioNs);
-    completed = state.game.evaluate_completion();
+    if (service) serviceLiveAudio(state, now, state.audioNs);
+    completed = service ? state.game.evaluate_completion() : false;
   }
   if (typeof completed !== "boolean" || (completed && (state.batch !== null || state.commandPumping))) {
     throw new Error("Invalid completion with outstanding gameplay commands.");
@@ -3391,19 +3751,35 @@ async function drainAudio(state) {
   try {
     while (current()) {
       if (client.state !== "ready") throw client.failure ?? new Error("Direct audio command owner is unavailable.");
+      if (state.retainedSend) {
+        await sendRetained(state, state.retainedSend, client);
+        if (!current()) return;
+        continue;
+      }
       let batch;
       if (state.active && state.renderObservation !== null) {
         const observation = state.renderObservation;
-        const output = await client.poll();
+        const output = state.retained ? await client.retainedPoll() : await client.poll();
         if (!current()) return;
         // Input can advance during the read. Apply the original presentation
         // pair to the actual current game, retaining its latest input frontier.
-        const completed = observeOutput(state, observation, output);
+        const completed = state.retained ? await observeRetainedOutput(state, observation, output, client)
+          : observeOutput(state, observation, output);
+        if (!current()) return;
         state.renderObservation = null;
         batch = commandBatch(state);
         publishRender(state, observation, completed);
-      } else batch = commandBatch(state);
-      if (batch === null) break;
+      } else {
+        if (state.active && state.retainedEvent) {
+          await observeRetainedOutput(state, null, null, client);
+          if (!current()) return;
+        }
+        batch = commandBatch(state);
+      }
+      if (batch === null) {
+        if (state.retainedSend) continue;
+        break;
+      }
       state.commandPumping = true;
       let ack;
       try { ack = await client.commands(batch.commands); }
@@ -3638,7 +4014,7 @@ function stepPlay(state, request) {
     state.acquiredPrefix = request.watermark;
   }
   if (audioNs > state.audioNs) state.audioNs = audioNs;
-  serviceLiveAudio(state, currentWindowHost(state), state.audioNs);
+  if (!state.retained) serviceLiveAudio(state, currentWindowHost(state), state.audioNs);
   const score = statistics(state);
   pumpAudio(state);
   if (play !== state) return;
@@ -3665,6 +4041,8 @@ function handlePlay(request) {
     try {
       if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
       mode = request.mode ?? "live";
+      if (request.retained !== undefined && typeof request.retained !== "boolean") throw new Error("Invalid retained playback selection.");
+      if (request.retained === true && mode !== "live") throw new Error("Recorded replay cannot opt into retained live preparation.");
       replaySpeed = replaySpeedFromFraction(request.replaySpeed);
       liveSpeed = playbackSpeedFromFraction(request.liveSpeed);
       if (mode === "replay" && liveSpeed.numerator !== liveSpeed.denominator) {
@@ -3699,6 +4077,9 @@ function handlePlay(request) {
       hidSources: null, gamepadAdapter: null, pointerSources: null,
       rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
+      retained: request.retained === true, programId: null, retainedSetup: null, retainedGeneration: null,
+      retainedPending: new Map(), retainedSend: null, retainedEvent: null, retainedPin: null,
+      captureBudget: null, retiredCohort: null,
     };
     ++selectionEpoch;
     releasePreparation();
@@ -3786,7 +4167,7 @@ function handlePlay(request) {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
     const roomRpc = ["play-room-open", "play-room-seal", "play-room-ready", "play-room-leave", "play-room-page"].includes(request.kind);
-    const requiresRpc = roomRpc || ["play-sample", "play-samples-upload", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
+    const requiresRpc = roomRpc || ["play-retained", "play-sample", "play-samples-upload", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
     if (roomRpc) { roomRequest(state, request); return; }
@@ -3813,6 +4194,7 @@ function handlePlay(request) {
       return;
     }
     if (!state.game || !state.prepared) throw new Error("Wait for actual gameplay preparation.");
+    if (request.kind === "play-retained") { prepareRetained(state, request); return; }
     if (request.kind === "play-sample") samplePlay(state, request);
     else if (request.kind === "play-samples-upload") { audioHandled = true; uploadSamples(state, request); }
     else if (request.kind === "play-audio") { audioHandled = true; attachAudio(state, request); }
@@ -3821,6 +4203,7 @@ function handlePlay(request) {
         || !state.commandsDrained || commandsPending(state)) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
       void networkReady(state, request);
     } else if (request.kind === "play-commands") {
+      if (state.retained) throw new Error("Retained commands belong to the direct serial audio endpoint.");
       if (state.sampleMode === "direct" && (!state.samplesEnded || state.sampleRpcId !== null)) {
         throw new Error("Direct samples require their genuine end acknowledgement before commands.");
       }
@@ -3877,12 +4260,14 @@ function handlePlay(request) {
     } else throw new Error("Unknown gameplay request.");
   } catch (error) {
     if (!audioHandled) closeAudioHandoff(request);
-    failPlay(state, error, request);
+    if (request.kind === "play-retained") report("play-reply", { playId: state.id, rpcId: request.rpcId, error: message(error) });
+    else failPlay(state, error, request);
   }
 }
 
 self.addEventListener("message", event => {
   const request = event.data;
+  if (request?.kind === "play-retired-recordings-ack") { acceptRetiredRecordings(request); return; }
   if (request?.kind === "dispose") {
     recordsRetired = true;
     recordFence();

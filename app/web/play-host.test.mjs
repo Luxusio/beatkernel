@@ -524,6 +524,28 @@ async function harness(faults = {}) {
     "menu-open", "menu-editor", "menu-back", "prepare-cancel", "prepare-progress"]) {
     elements.set(id, new Element(["chart", "records", "local-page", "captured-replay", "multiplayer-mode"].includes(id) ? "select" : id, id));
   }
+  // Match the retained practice controls in index.html. These nodes are also
+  // used by the derived live-speed/local/loading Window fixtures.
+  for (const [id, tag] of [["runtime-retained", "input"], ["runtime-controls", "fieldset"],
+    ["runtime-rate", "input"], ["runtime-rate-apply", "button"], ["runtime-pause", "button"],
+    ["runtime-start", "input"], ["runtime-end", "input"], ["runtime-loop", "input"],
+    ["runtime-region", "button"], ["runtime-disable-loop", "button"], ["runtime-restart-original", "button"],
+    ["runtime-status", "output"]]) {
+    const field = new Element(tag, id);
+    field.disabled = tag === "input" || tag === "button";
+    elements.set(id, field);
+  }
+  elements.get("runtime-controls").hidden = true;
+  elements.get("runtime-retained").type = "checkbox";
+  elements.get("runtime-loop").type = "checkbox";
+  elements.get("runtime-rate").value = "1/1";
+  elements.get("runtime-start").value = "0";
+  elements.get("runtime-rate-apply").textContent = "Apply rate";
+  elements.get("runtime-pause").textContent = "Pause";
+  elements.get("runtime-region").textContent = "Apply region";
+  elements.get("runtime-disable-loop").textContent = "Disable loop";
+  elements.get("runtime-restart-original").textContent = "Restart original";
+  elements.get("runtime-status").textContent = "Waiting for an actual retained Program.";
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
   elements.get("seed").value = "7";

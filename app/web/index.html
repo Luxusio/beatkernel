@@ -58,8 +58,23 @@
       <p class="hint">Live play uses these original song positions with a short preroll. Leave the end blank to play through the song. Earlier notes and holds already in progress are excluded; overlapping music resumes from its original sound. Replay uses its recorded section.</p>
       <div id="live-speed-control">
         <div class="replay-controls"><label for="live-speed">Live speed (NUM/DEN) <input id="live-speed" type="text" value="1/1" maxlength="40" aria-describedby="live-speed-hint" disabled></label></div>
-        <p id="live-speed-hint" class="hint">Live play only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 changes playback speed and pitch for all local players. Fixed until this session ends.</p>
+        <p id="live-speed-hint" class="hint">Live play only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 changes playback speed and pitch for all local players.</p>
+        <label><input id="runtime-retained" type="checkbox" disabled> Enable runtime practice controls for live play</label>
+        <p class="hint">Choose before Play to retain original music and chart geometry for rate changes, regions and restart. Fixed-condition saved and network opponents refuse rate changes.</p>
       </div>
+      <fieldset id="runtime-controls" hidden aria-label="Runtime practice controls">
+        <legend>Current practice</legend>
+        <div class="replay-controls"><label>Rate (NUM/DEN) <input id="runtime-rate" type="text" value="1/1" maxlength="40" aria-describedby="runtime-status" disabled></label>
+          <button id="runtime-rate-apply" type="button" disabled>Apply rate</button>
+          <button id="runtime-pause" type="button" disabled>Pause</button></div>
+        <div class="replay-controls"><label>Start (seconds) <input id="runtime-start" type="text" inputmode="decimal" value="0" maxlength="20" disabled></label>
+          <label>End (seconds, optional) <input id="runtime-end" type="text" inputmode="decimal" value="" maxlength="20" disabled></label>
+          <label><input id="runtime-loop" type="checkbox" disabled> Repeat region</label>
+          <button id="runtime-region" type="button" disabled>Apply region</button>
+          <button id="runtime-disable-loop" type="button" disabled>Disable loop</button>
+          <button id="runtime-restart-original" type="button" disabled>Restart original</button></div>
+        <output id="runtime-status" role="status" aria-live="polite">Waiting for an actual retained Program.</output>
+      </fieldset>
       <div class="replay-controls"><label>Early window (ms) <input id="judge-early" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Late window (ms) <input id="judge-late" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Input offset (ms) <input id="judge-offset" type="text" inputmode="decimal" value="0" maxlength="21" disabled></label></div>
@@ -122,7 +137,7 @@
         <label>Captured replay <select id="captured-replay" disabled><option value="">No captured replay selected</option></select></label>
         <button id="export" type="button" disabled>Download last replay</button></div>
       <ul id="local-results" class="opponent-list" aria-label="Local player final results"></ul>
-      <p class="hint">Recording is optional. Interrupted plays export a replay prefix. The last captured record stays here until it is replaced or you close the page.</p>
+      <p class="hint">Recording is optional. Interrupted plays and retired practice attempts retain replay prefixes. Runtime practice keeps up to 128 Files and 256 MiB; Save releases a retained File after storage succeeds. Downloads do not release it.</p>
       <div class="replay-controls"><label>Local replay <input id="replay-file" type="file" accept=".bkr" disabled></label>
         <label id="replay-speed-control" for="replay-speed">Replay speed (NUM/DEN) <input id="replay-speed" type="text" value="1/1" maxlength="40" aria-describedby="replay-speed-hint" disabled></label>
         <button id="replay-play" type="button" disabled>Play replay</button></div>
