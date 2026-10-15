@@ -5663,7 +5663,7 @@ impl Desktop {
                 denominator: self
                     .ime_editor(ImeField::RateDenominator, &draft.denominator)
                     .clone(),
-                denominator_focused: draft.focus == Some(RATE_DENOMINATOR),
+                focused: draft.focus,
                 pending: draft.pending,
                 applied: draft.applied,
                 error: self

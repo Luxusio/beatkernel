@@ -8,7 +8,7 @@ fn frame(numerator: &str, denominator: &str) -> RateFrame {
     RateFrame {
         numerator: LineEditor::new(numerator, 64).unwrap(),
         denominator: LineEditor::new(denominator, 64).unwrap(),
-        denominator_focused: false,
+        focused: None,
         pending: false,
         applied: Some(crate::practice_control::PracticeRateState {
             revision: 7,
@@ -39,6 +39,109 @@ fn regions(hits: &[(ControlId, Bounds)]) -> Vec<(ControlId, [i64; 4])> {
     hits.iter()
         .map(|(id, b)| (*id, [b.x, b.y, b.width, b.height]))
         .collect()
+}
+
+fn rgba(color: u32) -> [f32; 4] {
+    [
+        ((color >> 16) & 255) as f32 / 255.0,
+        ((color >> 8) & 255) as f32 / 255.0,
+        (color & 255) as f32 / 255.0,
+        1.0,
+    ]
+}
+
+fn assert_editor_focus(
+    scene: &Scene,
+    hits: &[(ControlId, Bounds)],
+    control: ControlId,
+    focused: bool,
+    caret_column: i64,
+) {
+    let bounds = hits.iter().find(|(id, _)| *id == control).unwrap().1;
+    let background = scene
+        .rectangles()
+        .iter()
+        .filter(|rectangle| {
+            rectangle.bounds == [bounds.x, bounds.y, bounds.width, bounds.height].map(|n| n as f32)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(background.len(), 1, "one editor background for {control:?}");
+    assert_eq!(
+        background[0].color,
+        rgba(if focused { 0x354e6c } else { 0x263d59 }),
+        "editor focus background for {control:?}"
+    );
+    let carets = scene
+        .rectangles()
+        .iter()
+        .filter(|rectangle| {
+            let [x, y, width, height] = rectangle.bounds;
+            rectangle.color == rgba(0x74e5c5)
+                && x >= bounds.x as f32
+                && y >= bounds.y as f32
+                && x + width <= (bounds.x + bounds.width) as f32
+                && y + height <= (bounds.y + bounds.height) as f32
+        })
+        .map(|rectangle| rectangle.bounds)
+        .collect::<Vec<_>>();
+    let expected = if focused {
+        vec![[bounds.x + 8 + 12 * caret_column, bounds.y + 8, 2, 16].map(|n| n as f32)]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(carets, expected, "editor caret for {control:?}");
+}
+
+#[test]
+fn optional_focus_paints_only_the_actual_editor_and_clears_both_for_apply_or_none() {
+    let view = RateView::new(ScreenInstanceId(417), 960, 720).unwrap();
+    let mut state = frame("12", "8");
+    view.update(state.clone());
+    let original = compose(&view, 960, 720);
+    let identities = view.nodes.identities();
+    let original_hits = regions(&original.1);
+    for (focused, expected_repaints) in [
+        (None, 0),
+        (Some(NUMERATOR_CONTROL), 1),
+        (Some(DENOMINATOR_CONTROL), 2),
+        (Some(APPLY_CONTROL), 1),
+        (None, 0),
+    ] {
+        let before = view.nodes.paints();
+        state.focused = focused;
+        view.update(state.clone());
+        let (scene, hits) = compose(&view, 960, 720);
+        assert_editor_focus(
+            &scene,
+            &hits,
+            NUMERATOR_CONTROL,
+            focused == Some(NUMERATOR_CONTROL),
+            2,
+        );
+        assert_editor_focus(
+            &scene,
+            &hits,
+            DENOMINATOR_CONTROL,
+            focused == Some(DENOMINATOR_CONTROL),
+            1,
+        );
+        assert_eq!(regions(&hits), original_hits);
+        assert_eq!(view.nodes.identities(), identities);
+        let paints = view.nodes.paints();
+        assert_eq!(
+            paints.iter().zip(before).filter(|(a, b)| **a != *b).count(),
+            expected_repaints,
+            "focus {focused:?} must preserve unrelated retained packets"
+        );
+        if focused.is_none() || focused == Some(APPLY_CONTROL) {
+            assert_eq!(geometry(&scene), geometry(&original.0));
+        }
+        view.update(state.clone());
+        assert!(!view.dirty());
+        let idle = compose(&view, 960, 720);
+        assert_eq!(geometry(&idle.0), geometry(&scene));
+        assert_eq!(view.nodes.paints(), paints);
+    }
 }
 
 #[test]
@@ -95,7 +198,7 @@ fn unchanged_frames_and_idle_composition_do_not_repaint_or_rebuild_retained_pack
 fn pending_disables_apply_hit_without_rewriting_draft_or_applied_state() {
     let view = RateView::new(ScreenInstanceId(412), 960, 720).unwrap();
     let mut state = frame("6", "4");
-    state.denominator_focused = true;
+    state.focused = Some(DENOMINATOR_CONTROL);
     view.update(state.clone());
     let before = compose(&view, 960, 720);
     let apply = before
@@ -132,6 +235,7 @@ fn pending_disables_apply_hit_without_rewriting_draft_or_applied_state() {
 fn cursor_focus_errors_and_actual_rate_each_update_only_affected_retained_packets() {
     let view = RateView::new(ScreenInstanceId(413), 960, 720).unwrap();
     let mut state = frame("12", "8");
+    state.focused = Some(NUMERATOR_CONTROL);
     view.update(state.clone());
     compose(&view, 960, 720);
     let identities = view.nodes.identities();
@@ -151,7 +255,7 @@ fn cursor_focus_errors_and_actual_rate_each_update_only_affected_retained_packet
     view.update(state.clone());
     assert_partial(before);
     let before = view.nodes.paints();
-    state.denominator_focused = true;
+    state.focused = Some(DENOMINATOR_CONTROL);
     view.update(state.clone());
     assert_partial(before);
     let before = view.nodes.paints();
@@ -172,7 +276,7 @@ fn cursor_focus_errors_and_actual_rate_each_update_only_affected_retained_packet
     );
     assert_eq!(state.numerator.value(), "12");
     assert_eq!(state.denominator.value(), "8");
-    assert!(state.denominator_focused);
+    assert_eq!(state.focused, Some(DENOMINATOR_CONTROL));
 }
 
 #[test]
@@ -239,7 +343,7 @@ fn cropped_controls_use_the_same_geometry_for_rendering_and_finite_half_open_hit
 fn zero_extent_hides_child_and_restores_exact_draft_focus_error_and_node_identity() {
     let mut view = RateView::new(ScreenInstanceId(416), 960, 720).unwrap();
     let mut state = frame("invalid", "0");
-    state.denominator_focused = true;
+    state.focused = Some(DENOMINATOR_CONTROL);
     state.error = Some("invalid positive rate".into());
     view.update(state);
     let before = compose(&view, 960, 720);

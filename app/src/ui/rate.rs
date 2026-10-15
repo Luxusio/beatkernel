@@ -42,7 +42,7 @@ const PANEL: N = N::layer(
 pub struct RateFrame {
     pub numerator: LineEditor,
     pub denominator: LineEditor,
-    pub denominator_focused: bool,
+    pub focused: Option<ControlId>,
     pub pending: bool,
     pub applied: Option<PracticeRateState>,
     pub error: Option<String>,
@@ -55,7 +55,7 @@ pub struct RateView {
     scope: Scope,
     numerator: RwSignal<LineEditor>,
     denominator: RwSignal<LineEditor>,
-    denominator_focused: RwSignal<bool>,
+    focused: RwSignal<Option<ControlId>>,
     pending: RwSignal<bool>,
     applied: RwSignal<Option<PracticeRateState>>,
     error: RwSignal<Option<String>>,
@@ -82,7 +82,7 @@ impl RateView {
             scope,
             numerator: scope.create_rw_signal(numerator),
             denominator: scope.create_rw_signal(denominator),
-            denominator_focused: scope.create_rw_signal(false),
+            focused: scope.create_rw_signal(None),
             pending: scope.create_rw_signal(false),
             applied: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
@@ -127,10 +127,11 @@ impl RateView {
                     } else {
                         view.numerator
                     };
-                    let focused = view.denominator_focused;
+                    let focused = view.focused;
                     let font = view.input_font;
-                    let memo =
-                        scope.create_memo(move |_| (editor.get(), focused.get(), font.get()));
+                    let memo = scope.create_memo(move |_| {
+                        (editor.get(), focused.get() == Some(control), font.get())
+                    });
                     view.nodes.bind_layout(
                         scope,
                         memo,
@@ -141,7 +142,7 @@ impl RateView {
                                 scene,
                                 editor,
                                 geometry.bounds,
-                                denominator == *focused,
+                                *focused,
                                 font.as_ref(),
                             );
                             hits.push((control, geometry.bounds));
@@ -234,8 +235,8 @@ impl RateView {
         if self.denominator.get_untracked() != frame.denominator {
             self.denominator.set(frame.denominator);
         }
-        if self.denominator_focused.get_untracked() != frame.denominator_focused {
-            self.denominator_focused.set(frame.denominator_focused);
+        if self.focused.get_untracked() != frame.focused {
+            self.focused.set(frame.focused);
         }
         if self.pending.get_untracked() != frame.pending {
             self.pending.set(frame.pending);

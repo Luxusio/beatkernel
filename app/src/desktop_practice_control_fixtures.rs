@@ -88,6 +88,135 @@ fn replace_focused_rate_text(app: &mut Desktop, text: &str) {
     );
 }
 
+fn runtime_editor_geometry(
+    app: &Desktop,
+    control: ControlId,
+    focused: bool,
+) -> Vec<([f32; 4], [f32; 4], [f32; 4])> {
+    let rgba = |color: u32| {
+        [
+            ((color >> 16) & 255) as f32 / 255.0,
+            ((color >> 8) & 255) as f32 / 255.0,
+            (color & 255) as f32 / 255.0,
+            1.0,
+        ]
+    };
+    let bounds = app.hits.iter().find(|(id, _)| *id == control).unwrap().1;
+    let field = app
+        .scene
+        .rectangles()
+        .iter()
+        .filter(|rectangle| {
+            let [x, y, width, height] = rectangle.bounds;
+            x >= bounds.x as f32
+                && y >= bounds.y as f32
+                && x + width <= (bounds.x + bounds.width) as f32
+                && y + height <= (bounds.y + bounds.height) as f32
+        })
+        .map(|rectangle| (rectangle.bounds, rectangle.color, rectangle.uv))
+        .collect::<Vec<_>>();
+    let background = field
+        .iter()
+        .filter(|(rectangle, _, _)| {
+            *rectangle == [bounds.x, bounds.y, bounds.width, bounds.height].map(|n| n as f32)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(background.len(), 1, "one composed editor background");
+    assert_eq!(
+        background[0].1,
+        rgba(if focused { 0x354e6c } else { 0x263d59 }),
+        "Desktop must paint the actual focus of {control:?}"
+    );
+    let carets = field
+        .iter()
+        .filter(|(_, color, _)| *color == rgba(0x74e5c5))
+        .map(|(rectangle, _, _)| *rectangle)
+        .collect::<Vec<_>>();
+    let expected = if focused {
+        vec![[bounds.x + 20, bounds.y + 8, 2, 16].map(|n| n as f32)]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(carets, expected, "Desktop editor caret for {control:?}");
+    field
+}
+
+#[test]
+fn desktop_runtime_rate_composition_tracks_optional_tab_focus_without_a_phantom_editor() {
+    let (mut app, _publisher) = runtime_fixture();
+    let owner = app.navigator.active_id().unwrap();
+    let mut original_editors = None;
+    let mut original_controls = None;
+    for (step, focused) in [
+        None,
+        Some(RATE_NUMERATOR),
+        Some(RATE_DENOMINATOR),
+        Some(RATE_APPLY),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if step > 0 {
+            app.key(KeyCode::Tab, false);
+        }
+        app.draw_with_submission(false).unwrap();
+        app.scene.status().unwrap();
+        let draft = app.rate.as_ref().unwrap();
+        assert_eq!(draft.focus, focused);
+        assert_eq!(draft.view.id(), owner);
+        assert!(!draft.view.dirty());
+        assert_eq!(
+            app.text_target().map(|target| target.field),
+            match focused {
+                Some(RATE_NUMERATOR) => Some(TextField::RateNumerator),
+                Some(RATE_DENOMINATOR) => Some(TextField::RateDenominator),
+                _ => None,
+            }
+        );
+        let controls = [RATE_NUMERATOR, RATE_DENOMINATOR, RATE_APPLY].map(|control| {
+            let matching = app
+                .hits
+                .iter()
+                .filter(|(id, _)| *id == control)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            let bounds = matching[0].1;
+            (
+                draft.view.node_for_control(control).unwrap().unwrap(),
+                [bounds.x, bounds.y, bounds.width, bounds.height],
+            )
+        });
+        if let Some(original) = &original_controls {
+            assert_eq!(&controls, original);
+        } else {
+            original_controls = Some(controls);
+        }
+        let editors = (
+            runtime_editor_geometry(&app, RATE_NUMERATOR, focused == Some(RATE_NUMERATOR)),
+            runtime_editor_geometry(&app, RATE_DENOMINATOR, focused == Some(RATE_DENOMINATOR)),
+        );
+        if focused.is_none() || focused == Some(RATE_APPLY) {
+            if let Some(original) = &original_editors {
+                assert_eq!(&editors, original);
+            } else {
+                original_editors = Some(editors.clone());
+            }
+        }
+        app.draw_with_submission(false).unwrap();
+        assert!(!app.rate.as_ref().unwrap().view.dirty());
+        assert_eq!(
+            runtime_editor_geometry(&app, RATE_NUMERATOR, focused == Some(RATE_NUMERATOR)),
+            editors.0
+        );
+        assert_eq!(
+            runtime_editor_geometry(&app, RATE_DENOMINATOR, focused == Some(RATE_DENOMINATOR)),
+            editors.1
+        );
+    }
+    assert!(app.window.is_none() && app.renderer.is_none());
+}
+
 #[test]
 fn desktop_runtime_rate_keyboard_focus_edits_and_apply_keep_original_attempt_until_reply() {
     use beatkernel_bms_runtime::ui::rate::{APPLY_CONTROL, DENOMINATOR_CONTROL, NUMERATOR_CONTROL};
