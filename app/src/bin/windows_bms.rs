@@ -77,6 +77,32 @@ fn plan_retained_source_output(
     }
     Ok(plan)
 }
+/// Retained ASIO uses the existing target planner and preserves its Source family.
+#[cfg(any(target_os = "windows", test))]
+fn plan_retained_asio_source_output(
+    current: &beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
+    source: beatkernel::audio::AudioFormat,
+    matrix: Option<&beatkernel::audio::ChannelMatrix>,
+    args: &[String],
+    asio_available: bool,
+) -> std::result::Result<output_settings::AsioTargetPlan, String> {
+    if !current
+        .current_args
+        .chunks_exact(2)
+        .any(|pair| pair[0] == "--backend" && pair[1] == "asio")
+    {
+        return Err("retained ASIO replacement requires an ASIO output".into());
+    }
+    let output_settings::TargetPlan::Asio(plan) =
+        output_settings::plan_target(current, None, source, matrix, args, asio_available)?
+    else {
+        return Err("retained replacement cannot change the audio backend".into());
+    };
+    if plan.sample_rate != source.sample_rate() {
+        return Err("retained ASIO replacement requires unchanged Source rate".into());
+    }
+    Ok(plan)
+}
 #[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
 fn asio_pause_observation(
     observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
@@ -881,7 +907,14 @@ mod native {
     impl Window {
         #[cfg(feature = "asio-sdk")]
         pub(super) fn hidden() -> Result<Self> {
-            Self::with_visibility(false, "AsioSysref")
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT_SYSREF: AtomicU64 = AtomicU64::new(0);
+            let serial = NEXT_SYSREF
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value.checked_add(1)
+                })
+                .map_err(|_| "ASIO hidden window identities exhausted")?;
+            Self::with_visibility(false, &format!("AsioSysref{serial}"))
         }
         pub(super) fn with_visibility(visible: bool, role: &str) -> Result<Self> {
             let class: Vec<u16> = format!("BeatKernelBms{}{}", std::process::id(), role)
@@ -2942,3 +2975,7 @@ mod output_switch_fixtures;
 #[cfg(test)]
 #[path = "windows_bms/retained_source_output_fixtures.rs"]
 mod retained_source_output_fixtures;
+
+#[cfg(test)]
+#[path = "windows_bms/retained_asio_source_output_fixtures.rs"]
+mod retained_asio_source_output_fixtures;

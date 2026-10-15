@@ -415,6 +415,375 @@ impl OutputChannelRemixBackend for WindowsReplacementBackend {
         self.open_native(request, mixer, epoch, Some(matrix))
     }
 }
+#[cfg(feature = "asio-sdk")]
+use beatkernel_bms_runtime::gameplay::output::{
+    adapters::asio::{
+        AsioCompleteReplacementBackend, AsioCompleteReplacementOutput, AsioReplacementError,
+        AsioReplacementRequest,
+    },
+    ports::{
+        self as source_ports, ConditionalSourceRetirementNativeOutputBackend,
+        OriginalCoordinateNativeOutputBackend, OriginalNativeOutputBackend,
+        SourceHistoryRetirementNativeOutputBackend, SourcePlaybackNativeOutputBackend,
+    },
+};
+#[cfg(feature = "asio-sdk")]
+use beatkernel_platform::windows::asio::{control::TrustedAsioOpener, stream::AsioStream};
+
+/// Concrete native custody: the canonical adapter owns playback; this owns sysref.
+#[cfg(feature = "asio-sdk")]
+pub(super) struct WindowsAsioCompleteOutput {
+    native: AsioCompleteReplacementOutput,
+    window: Option<super::native::Window>,
+    live: super::live_output::AsioLiveConfig,
+    clock: QpcClock,
+}
+#[cfg(feature = "asio-sdk")]
+impl WindowsAsioCompleteOutput {
+    pub(super) fn stream(&self) -> &AsioStream {
+        self.native.stream()
+    }
+    pub(super) fn stream_mut(&mut self) -> &mut AsioStream {
+        self.native.stream_mut()
+    }
+    pub(super) fn channel_matrix(&self) -> Option<&ChannelMatrix> {
+        self.native.channel_matrix()
+    }
+    fn pump_messages(&self) -> std::result::Result<(), NativeOutputError> {
+        super::live_output::pump_asio_messages(self.window.as_ref().expect("ASIO sysref"))
+            .map_err(NativeOutputError)
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl Drop for WindowsAsioCompleteOutput {
+    fn drop(&mut self) {
+        let _ = self.native.stream_mut().stop();
+        if self.native.stream().native_release_unproved() {
+            if let Some(window) = self.window.take() {
+                std::mem::forget(window);
+            }
+        }
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl StoppedMixerSource<NativeOutputState> for WindowsAsioCompleteOutput {
+    type Error = NativeOutputError;
+    fn take_stopped_mixer(
+        &mut self,
+    ) -> std::result::Result<Option<NativeOutputState>, Self::Error> {
+        self.native
+            .take_stopped_mixer()
+            .map_err(|error| NativeOutputError(error.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+pub(super) struct WindowsAsioCompleteRequest {
+    native: AsioReplacementRequest,
+    window: super::native::Window,
+    live: super::live_output::AsioLiveConfig,
+}
+#[cfg(feature = "asio-sdk")]
+pub(super) struct WindowsAsioCompleteBackend {
+    native: AsioCompleteReplacementBackend,
+    clock: QpcClock,
+}
+#[cfg(feature = "asio-sdk")]
+impl WindowsAsioCompleteBackend {
+    fn map_open(
+        &mut self,
+        request: WindowsAsioCompleteRequest,
+        state: NativeOutputState,
+        epoch: u64,
+        matrix: Option<ChannelMatrix>,
+    ) -> std::result::Result<
+        WindowsAsioCompleteOutput,
+        OutputOpenFailure<NativeOutputError, WindowsAsioCompleteOutput, NativeOutputState>,
+    > {
+        let WindowsAsioCompleteRequest {
+            native,
+            window,
+            live,
+        } = request;
+        let result = match matrix {
+            Some(matrix) => self.native.open_remixed(native, state, epoch, matrix),
+            None => self.native.open(native, state, epoch),
+        };
+        match result {
+            Ok(native) => Ok(WindowsAsioCompleteOutput {
+                native,
+                window: Some(window),
+                live,
+                clock: self.clock,
+            }),
+            Err(failure) => {
+                let (error, state, pending, cleanup) = failure.into_parts();
+                let failure = match pending {
+                    Some(native) => OutputOpenFailure::pending_state(
+                        NativeOutputError(error.into()),
+                        WindowsAsioCompleteOutput {
+                            native,
+                            window: Some(window),
+                            live,
+                            clock: self.clock,
+                        },
+                    ),
+                    None => {
+                        // Failed IASIO init exposes no release proof. Preparation
+                        // failures with unproved release retain an actual stream.
+                        if cleanup.is_some() || matches!(&error,
+                            AsioReplacementError::Native(beatkernel_platform::windows::asio::stream::AsioStreamError::Control(_))) {
+                            std::mem::forget(window);
+                        }
+                        OutputOpenFailure::recovered_state(NativeOutputError(error.into()), state)
+                    }
+                };
+                Err(match cleanup {
+                    Some(error) => failure.with_cleanup_error(NativeOutputError(error.into())),
+                    None => failure,
+                })
+            }
+        }
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl OutputReplacementBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    type Presentation = PresentationDiscipline;
+    type Output = WindowsAsioCompleteOutput;
+    type Request = WindowsAsioCompleteRequest;
+    type Error = NativeOutputError;
+    fn open(
+        &mut self,
+        request: Self::Request,
+        state: NativeOutputState,
+        epoch: u64,
+    ) -> std::result::Result<
+        Self::Output,
+        OutputOpenFailure<Self::Error, Self::Output, NativeOutputState>,
+    > {
+        self.map_open(request, state, epoch, None)
+    }
+    fn retire(&mut self, output: &mut Self::Output) -> std::result::Result<(), Self::Error> {
+        self.native
+            .retire(&mut output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn start(&mut self, output: &mut Self::Output) -> std::result::Result<(), Self::Error> {
+        self.native
+            .start(&mut output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn epoch(&self, output: &Self::Output) -> u64 {
+        self.native.epoch(&output.native)
+    }
+    fn basis(&self, output: &Self::Output) -> OutputFrameBasis {
+        self.native.basis(&output.native)
+    }
+    fn observe(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+    ) -> std::result::Result<(), Self::Error> {
+        output.pump_messages()?;
+        self.native
+            .observe(&mut output.native, presentation)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn render_report(
+        &self,
+        output: &Self::Output,
+    ) -> std::result::Result<Option<RenderReport>, Self::Error> {
+        self.native
+            .render_report(&output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn observe_end(
+        &self,
+        output: &Self::Output,
+        end: &mut NativeEnd,
+        pair: ClockPair,
+        report: Option<RenderReport>,
+    ) -> beatkernel_bms_runtime::native_gameplay::NativeGameplayResult<Option<EndBoundary>> {
+        self.native.observe_end(&output.native, end, pair, report)
+    }
+    fn pause_observation(
+        &self,
+        output: &Self::Output,
+        pair: ClockPair,
+        now: ClockPoint,
+    ) -> std::result::Result<LivePauseObservation, Self::Error> {
+        self.native
+            .pause_observation(&output.native, pair, now)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl OutputChannelRemixBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    fn open_remixed(
+        &mut self,
+        request: Self::Request,
+        state: NativeOutputState,
+        epoch: u64,
+        matrix: ChannelMatrix,
+    ) -> std::result::Result<
+        Self::Output,
+        OutputOpenFailure<Self::Error, Self::Output, NativeOutputState>,
+    > {
+        self.map_open(request, state, epoch, Some(matrix))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl OriginalNativeOutputBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> std::result::Result<
+        Option<beatkernel_bms_runtime::native_audio_presentation::NativeAudioSnapshot>,
+        Self::Error,
+    > {
+        output.pump_messages()?;
+        self.native
+            .observe_native(&mut output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl OriginalCoordinateNativeOutputBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> std::result::Result<
+        Option<beatkernel_bms_runtime::native_output_coordinate::CoordinateNativeAudioSnapshot>,
+        Self::Error,
+    > {
+        output.pump_messages()?;
+        self.native
+            .observe_native_coordinate(&mut output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl SourcePlaybackNativeOutputBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    type NativeEvidence = beatkernel_platform::windows::asio::stream::AsioPlaybackPhaseSnapshot;
+    fn observe_native_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: source_ports::SourcePlaybackIdentity,
+    ) -> std::result::Result<
+        Option<source_ports::NativePlaybackObservation<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        output.pump_messages()?;
+        self.native
+            .observe_native_playback(&mut output.native, identity)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn observe_native_playback_replacement_at(
+        &mut self,
+        output: &mut Self::Output,
+        identity: source_ports::SourcePlaybackIdentity,
+        now: ClockPoint,
+    ) -> std::result::Result<
+        Option<source_ports::NativePlaybackObservation<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        output.pump_messages()?;
+        self.native
+            .observe_native_playback_replacement_at(&mut output.native, identity, now)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn source_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: source_ports::SourcePlaybackIdentity,
+    ) -> std::result::Result<
+        Option<source_ports::NativeSourcePlaybackQuery<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        self.native
+            .source_playback_at(&output.native, query, identity)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl SourceHistoryRetirementNativeOutputBackend<NativeOutputState> for WindowsAsioCompleteBackend {
+    fn request_source_history_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        expected_epoch: u64,
+        expected_basis: OutputFrameBasis,
+        identity: source_ports::SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> std::result::Result<Option<u64>, Self::Error> {
+        self.native
+            .request_source_history_retirement(
+                &mut output.native,
+                expected_epoch,
+                expected_basis,
+                identity,
+                source_pin,
+            )
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl ConditionalSourceRetirementNativeOutputBackend<NativeOutputState>
+    for WindowsAsioCompleteBackend
+{
+    type Ticket = beatkernel_platform::windows::asio::stream::SourceRetirementTicket;
+    fn is_source_native_io_error(&self, error: &Self::Error) -> bool {
+        error
+            .0
+            .downcast_ref::<AsioReplacementError>()
+            .is_some_and(|e| self.native.is_source_native_io_error(e))
+    }
+    fn created_source_coordinate_basis(
+        &self,
+        output: &Self::Output,
+    ) -> std::result::Result<
+        beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis,
+        Self::Error,
+    > {
+        self.native
+            .created_source_coordinate_basis(&output.native)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn submit_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+        matrix: Option<&ChannelMatrix>,
+    ) -> std::result::Result<Option<Self::Ticket>, Self::Error> {
+        self.native
+            .submit_source_conditional_retirement(&mut output.native, &request.native, matrix)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn poll_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> std::result::Result<source_ports::SourceRetirementStatus, Self::Error> {
+        self.native
+            .poll_source_conditional_retirement(&mut output.native, ticket)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+    fn cancel_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> std::result::Result<source_ports::SourceRetirementStatus, Self::Error> {
+        self.native
+            .cancel_source_conditional_retirement(&mut output.native, ticket)
+            .map_err(|e| NativeOutputError(e.into()))
+    }
+}
+#[cfg(feature = "asio-sdk")]
+type AsioCompleteOutputOwner = GameplayOutputOwner<
+    RemixedOutputBackend<WindowsAsioCompleteBackend>,
+    NativeOutputState,
+    OutputFrameBasis,
+    beatkernel_platform::windows::asio::stream::SourceRetirementTicket,
+>;
 type LegacyOutputOwner = GameplayOutputOwner<RemixedOutputBackend<WindowsReplacementBackend>>;
 type CompleteOutputOwner = GameplayOutputOwner<
     RemixedOutputBackend<WasapiCompleteReplacementBackend>,
@@ -426,6 +795,11 @@ pub(super) enum WindowsOutputOwner {
     Legacy(LegacyOutputOwner),
     Complete {
         owner: CompleteOutputOwner,
+        source: AudioFormat,
+    },
+    #[cfg(feature = "asio-sdk")]
+    AsioComplete {
+        owner: AsioCompleteOutputOwner,
         source: AudioFormat,
     },
 }
@@ -463,6 +837,142 @@ pub(super) fn complete_owner(
     )?;
     Ok(WindowsOutputOwner::Complete { owner, source })
 }
+#[cfg(feature = "asio-sdk")]
+pub(super) fn complete_asio_owner(
+    mut guard: super::live_output::AsioSetup,
+    format: AudioFormat,
+    mixer: Mixer,
+    options: &Options,
+    clock: QpcClock,
+) -> Result<WindowsOutputOwner> {
+    let source = mixer.configuration().format();
+    let live =
+        super::live_output::AsioLiveConfig::from_options(guard.registration(), options, format)?;
+    let anchor = live.anchor(clock)?;
+    let latency = live.clock_bounds().latency;
+    let backend = RemixedOutputBackend::new(WindowsAsioCompleteBackend {
+        clock,
+        native: AsioCompleteReplacementBackend::new(
+            clock,
+            anchor,
+            latency,
+            super::native::HOST,
+            beatkernel_bms_runtime::native_audio_startup::SOURCE_COORDINATE_HISTORY_HEADROOM,
+        ),
+    });
+    let prepared = AsioStream::prepare_state_recoverable(
+        guard.take_control(),
+        NativeOutputState::from_mixer(mixer),
+        live.channels.clone(),
+        live.buffer,
+        clock,
+        beatkernel_bms_runtime::native_audio_startup::SOURCE_COORDINATE_HISTORY_HEADROOM,
+    );
+    match prepared {
+        Ok(stream) => {
+            let output = WindowsAsioCompleteOutput {
+                native: AsioCompleteReplacementOutput::from_stream(stream, anchor, latency),
+                window: Some(guard.take_window()),
+                live,
+                clock,
+            };
+            Ok(WindowsOutputOwner::AsioComplete {
+                owner: AsioCompleteOutputOwner::new_with_ticket(backend, output),
+                source,
+            })
+        }
+        Err(failure) => {
+            let (error, state, pending, cleanup) = failure.into_parts();
+            let failure = match pending {
+                Some(stream) => OutputOpenFailure::pending_state(
+                    NativeOutputError(error.into()),
+                    WindowsAsioCompleteOutput {
+                        native: AsioCompleteReplacementOutput::from_stream(stream, anchor, latency),
+                        window: Some(guard.take_window()),
+                        live,
+                        clock,
+                    },
+                ),
+                None => {
+                    if cleanup.is_none() {
+                        guard.release_proved();
+                    }
+                    OutputOpenFailure::recovered_state(NativeOutputError(error.into()), state)
+                }
+            };
+            Err(Box::new(match cleanup {
+                Some(error) => failure.with_cleanup_error(NativeOutputError(error.into())),
+                None => failure,
+            }))
+        }
+    }
+}
+#[cfg(feature = "asio-sdk")]
+fn complete_asio_capability(
+    output: &WindowsAsioCompleteOutput,
+) -> std::result::Result<
+    beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
+    String,
+> {
+    let cap = super::output_settings::asio_capability(
+        &output.live.registration.id.clsid,
+        output.live.buffer,
+        &output.live.channels,
+        output.channel_matrix(),
+    )?;
+    let cap = super::output_settings::asio_clock_capability(cap, output.live.clock_bounds())?;
+    let view = match output.live.registration.id.view {
+        beatkernel_platform::windows::asio::AsioRegistryView::Native => AsioView::Native,
+        beatkernel_platform::windows::asio::AsioRegistryView::Bits32 => AsioView::Bits32,
+        beatkernel_platform::windows::asio::AsioRegistryView::Bits64 => AsioView::Bits64,
+    };
+    super::output_settings::switch_capability(cap, Backend::Asio, Some(view))
+}
+#[cfg(feature = "asio-sdk")]
+fn complete_asio_request(
+    plan: super::output_settings::AsioTargetPlan,
+    clock: QpcClock,
+) -> std::result::Result<
+    beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest<
+        WindowsAsioCompleteRequest,
+    >,
+    String,
+> {
+    use beatkernel_platform::windows::asio::{
+        enumerate_asio_drivers, AsioEnumerationLimits, AsioRegistryView,
+    };
+    let view = match plan.view {
+        AsioView::Native => AsioRegistryView::Native,
+        AsioView::Bits32 => AsioRegistryView::Bits32,
+        AsioView::Bits64 => AsioRegistryView::Bits64,
+    };
+    let drivers = enumerate_asio_drivers(view, AsioEnumerationLimits::default())
+        .map_err(|e| e.to_string())?;
+    let index = super::output_settings::asio_driver_index(
+        &plan.device,
+        drivers.iter().map(|d| d.id.clsid.as_str()),
+    )?;
+    let matrix = plan.matrix.clone();
+    let live = super::live_output::AsioLiveConfig::from_target(drivers[index].clone(), plan);
+    let anchor = live.anchor(clock).map_err(|e| e.to_string())?;
+    let window = super::native::Window::hidden().map_err(|e| e.to_string())?;
+    // SAFETY: this request owns the actual same-thread window; the successful
+    // or pending output takes it before this sealed capability can be discarded.
+    let opener =
+        unsafe { TrustedAsioOpener::new(live.registration.clone(), Some(window.hwnd as usize)) };
+    let native = AsioReplacementRequest::new(opener, live.channels.clone(), live.buffer)
+        .with_observation_bounds(anchor, live.clock_bounds().latency);
+    Ok(
+        beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
+            native: WindowsAsioCompleteRequest {
+                native,
+                window,
+                live,
+            },
+            matrix,
+        },
+    )
+}
 pub(super) fn stream(owner: &mut WindowsOutputOwner) -> Result<&mut Output> {
     let WindowsOutputOwner::Legacy(owner) = owner else {
         return Err("complete Source output cannot be borrowed as a legacy stream".into());
@@ -483,6 +993,12 @@ pub(super) fn basis(owner: &WindowsOutputOwner) -> Result<OutputFrameBasis> {
             .ok_or("current Windows complete output unavailable")?
             .stream()
             .frame_basis()),
+        #[cfg(feature = "asio-sdk")]
+        WindowsOutputOwner::AsioComplete { owner, .. } => Ok(owner
+            .current()
+            .ok_or("current Windows complete output unavailable")?
+            .stream()
+            .frame_basis()),
     }
 }
 
@@ -491,36 +1007,48 @@ impl WindowsOutputOwner {
         match self {
             Self::Legacy(o) => o.last_issued_epoch(),
             Self::Complete { owner, .. } => owner.last_issued_epoch(),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.last_issued_epoch(),
         }
     }
     pub(super) fn has_work(&self) -> bool {
         match self {
             Self::Legacy(o) => o.has_work(),
             Self::Complete { owner, .. } => owner.has_work(),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.has_work(),
         }
     }
     pub(super) fn replacement_pending(&self) -> bool {
         match self {
             Self::Legacy(o) => o.replacement_pending(),
             Self::Complete { owner, .. } => owner.replacement_pending(),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.replacement_pending(),
         }
     }
     pub(super) fn output_clock_suspended(&self) -> bool {
         match self {
             Self::Legacy(o) => o.output_clock_suspended(),
             Self::Complete { owner, .. } => owner.output_clock_suspended(),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.output_clock_suspended(),
         }
     }
     pub(super) fn render_report(&self) -> Option<RenderReport> {
         match self {
             Self::Legacy(o) => o.render_report(),
             Self::Complete { owner, .. } => owner.render_report(),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.render_report(),
         }
     }
     pub(super) fn stop(&mut self) -> Result<()> {
         match self {
             Self::Legacy(o) => Ok(o.stop()?),
             Self::Complete { owner, .. } => Ok(owner.stop()?),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => Ok(owner.stop()?),
         }
     }
     pub(super) fn start(&mut self) -> Result<()> {
@@ -535,6 +1063,12 @@ impl WindowsOutputOwner {
                 .ok_or("current Windows complete output unavailable")?
                 .stream_mut()
                 .start()?),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => Ok(owner
+                .current_mut()
+                .ok_or("current Windows complete output unavailable")?
+                .stream_mut()
+                .start()?),
         }
     }
     pub(super) fn description(&mut self) -> Option<String> {
@@ -545,6 +1079,14 @@ impl WindowsOutputOwner {
                     "WASAPI retained applied={:?} snapshot={:?}",
                     output.stream().configuration(),
                     output.stream().snapshot()
+                )
+            }),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner.current_mut().map(|output| {
+                format!(
+                    "ASIO retained applied_frames={} snapshot={:?}",
+                    output.stream().buffer_frames(),
+                    output.stream_mut().snapshot()
                 )
             }),
         }
@@ -562,6 +1104,12 @@ impl WindowsOutputOwner {
                 .stream()
                 .configuration()
                 .buffer_frames),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => Ok(owner
+                .current()
+                .ok_or("current Windows complete output unavailable")?
+                .stream()
+                .buffer_frames()),
         }
     }
     pub(super) fn audio_startup_bound(&mut self, rate: u32) -> Result<beatkernel::time::Duration> {
@@ -578,10 +1126,24 @@ impl WindowsOutputOwner {
         let period = (i128::from(self.startup_buffer_frames()?) * 1_000_000_000 + i128::from(rate)
             - 1)
             / i128::from(rate);
-        let bound = period
+        let mut bound = period
             .checked_mul(4)
             .and_then(|value| value.checked_add(2_000_000_000))
             .ok_or("native startup bound overflow")?;
+        #[cfg(feature = "asio-sdk")]
+        if let Self::AsioComplete { owner, .. } = self {
+            let output = owner
+                .current()
+                .ok_or("current Windows ASIO output unavailable")?;
+            let rate = i128::from(rate);
+            let latency =
+                (i128::from(output.stream().latencies().output_frames) * 1_000_000_000 + rate - 1)
+                    / rate;
+            bound = bound
+                .checked_add(latency)
+                .and_then(|value| value.checked_add(i128::from(output.live.clock_bounds().latency)))
+                .ok_or("ASIO startup latency bound overflow")?;
+        }
         Ok(beatkernel::time::Duration::from_nanos(i64::try_from(
             bound,
         )?))
@@ -605,6 +1167,14 @@ impl WindowsOutputOwner {
                     basis: stream.frame_basis(), frequency: stream.clock_frequency(),
                 }))
             }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => {
+                let stream = owner
+                    .current()
+                    .ok_or("current Windows complete output unavailable")?
+                    .stream();
+                Ok(Some(beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis::SourceFrame(stream.frame_basis())))
+            }
         }
     }
     pub(super) fn startup_render_report(&mut self) -> Result<Option<RenderReport>> {
@@ -615,6 +1185,8 @@ impl WindowsOutputOwner {
                 .native
                 .render_report(),
             Self::Complete { owner, .. } => Ok(owner.render_report()),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => Ok(owner.render_report()),
         }
     }
     pub(super) fn observe_native_control(
@@ -626,6 +1198,10 @@ impl WindowsOutputOwner {
         match self {
             Self::Legacy(o) => Ok(o.observe_native_control(presentation, identity)?),
             Self::Complete { owner, .. } => {
+                owner.observe_conditional_source_native_control(presentation, identity)
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => {
                 owner.observe_conditional_source_native_control(presentation, identity)
             }
         }
@@ -644,6 +1220,10 @@ impl WindowsOutputOwner {
             Self::Complete { .. } => {
                 Err("complete Source query requires the mutable conditional device port".into())
             }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source query requires the mutable conditional device port".into())
+            }
         }
     }
     pub(super) fn conditional_playback_mapping_at(
@@ -658,6 +1238,11 @@ impl WindowsOutputOwner {
                 .as_ref()
                 .map(NativePlaybackMapping::from_source)),
             Self::Complete { owner, .. } => Ok(owner
+                .conditional_source_playback_at(presentation, query, identity)?
+                .as_ref()
+                .map(NativePlaybackMapping::from_source)),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => Ok(owner
                 .conditional_source_playback_at(presentation, query, identity)?
                 .as_ref()
                 .map(NativePlaybackMapping::from_source)),
@@ -684,6 +1269,14 @@ impl WindowsOutputOwner {
                     identity,
                     source_minimum,
                 ),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { owner, .. } => owner
+                .request_conditional_source_history_retirement_with_source_pin(
+                    presentation,
+                    query,
+                    identity,
+                    source_minimum,
+                ),
         }
     }
     pub(super) fn observe_native(
@@ -693,6 +1286,10 @@ impl WindowsOutputOwner {
         match self {
             Self::Legacy(o) => Ok(o.observe_native(presentation)?),
             Self::Complete { .. } => {
+                Err("complete Source observation requires coordinate identity".into())
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
                 Err("complete Source observation requires coordinate identity".into())
             }
         }
@@ -707,6 +1304,10 @@ impl WindowsOutputOwner {
             Self::Complete { .. } => {
                 Err("complete Source pause requires coordinate control facts".into())
             }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source pause requires coordinate control facts".into())
+            }
         }
     }
     pub(super) fn observe_audio_end(
@@ -719,12 +1320,20 @@ impl WindowsOutputOwner {
             Self::Complete { .. } => {
                 Err("complete Source end uses retained practice end intent".into())
             }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source end uses retained practice end intent".into())
+            }
         }
     }
     pub(super) fn observe(&mut self, discipline: &mut PresentationDiscipline) -> Result<()> {
         match self {
             Self::Legacy(o) => Ok(o.observe(discipline)?),
             Self::Complete { .. } => Err("complete Source cannot use scalar presentation".into()),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source cannot use scalar presentation".into())
+            }
         }
     }
     pub(super) fn pause_observation(
@@ -735,12 +1344,20 @@ impl WindowsOutputOwner {
         match self {
             Self::Legacy(o) => Ok(o.pause_observation(pair, now)?),
             Self::Complete { .. } => Err("complete Source cannot use scalar pause evidence".into()),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source cannot use scalar pause evidence".into())
+            }
         }
     }
     pub(super) fn seed_resume(&mut self, discipline: &mut PresentationDiscipline) -> Result<()> {
         match self {
             Self::Legacy(o) => Ok(o.seed_resume(discipline)?),
             Self::Complete { .. } => {
+                Err("complete Source resume requires coordinate adoption".into())
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
                 Err("complete Source resume requires coordinate adoption".into())
             }
         }
@@ -753,6 +1370,10 @@ impl WindowsOutputOwner {
         match self {
             Self::Legacy(o) => o.observe_end(end, discipline),
             Self::Complete { .. } => Err("complete Source cannot use scalar end evidence".into()),
+            #[cfg(feature = "asio-sdk")]
+            Self::AsioComplete { .. } => {
+                Err("complete Source cannot use scalar end evidence".into())
+            }
         }
     }
 }
@@ -839,6 +1460,10 @@ impl WindowsOutputUi {
                 WindowsOutputOwner::Legacy(owner) => owner.current().map(capability).transpose()?,
                 WindowsOutputOwner::Complete { owner, .. } => {
                     owner.current().map(complete_capability).transpose()?
+                }
+                #[cfg(feature = "asio-sdk")]
+                WindowsOutputOwner::AsioComplete { owner, .. } => {
+                    owner.current().map(complete_asio_capability).transpose()?
                 }
             }
         } else {
@@ -967,7 +1592,7 @@ impl WindowsOutputUi {
     ) -> Result<bool> {
         match owner {
             WindowsOutputOwner::Legacy(owner) => {
-                // Retained ASIO keeps its existing explicit refusal.
+                // Scalar output retains its existing replacement path.
                 self.bridge.service_audio(
                     owner,
                     context,
@@ -1001,6 +1626,29 @@ impl WindowsOutputUi {
                         Ok(resolved)
                     },
                     &mut complete_capability,
+                )
+            }
+
+            #[cfg(feature = "asio-sdk")]
+            WindowsOutputOwner::AsioComplete { owner, source } => {
+                let source = *source;
+                self.bridge.service_coordinate_source_audio(
+                    owner,
+                    context,
+                    now,
+                    identity,
+                    practice_pending,
+                    &mut |request, output| {
+                        let plan = super::plan_retained_asio_source_output(
+                            &complete_asio_capability(output)?,
+                            source,
+                            output.channel_matrix(),
+                            &request.args,
+                            true,
+                        )?;
+                        complete_asio_request(plan, output.clock)
+                    },
+                    &mut complete_asio_capability,
                 )
             }
         }

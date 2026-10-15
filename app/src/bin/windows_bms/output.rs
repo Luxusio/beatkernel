@@ -52,10 +52,51 @@ pub(super) enum Setup {
     Wasapi(AudioStreamRequest),
     #[cfg(feature = "asio-sdk")]
     Asio {
-        control: AsioControl,
-        window: Window,
+        guard: AsioSetup,
         format: AudioFormat,
     },
+}
+/// The initialized driver may retain sysref even when a later probe fails.
+#[cfg(feature = "asio-sdk")]
+pub(super) struct AsioSetup {
+    control: Option<AsioControl>,
+    window: Option<Window>,
+    release_unproved: bool,
+}
+#[cfg(feature = "asio-sdk")]
+impl AsioSetup {
+    pub(super) fn take_control(&mut self) -> AsioControl {
+        self.release_unproved = true;
+        self.control
+            .take()
+            .expect("ASIO setup owns the unopened stream control")
+    }
+    pub(super) fn registration(&self) -> AsioDriverRegistration {
+        self.control
+            .as_ref()
+            .expect("ASIO setup control")
+            .registration()
+            .clone()
+    }
+    pub(super) fn take_window(&mut self) -> Window {
+        self.window.take().expect("ASIO setup owns sysref")
+    }
+    pub(super) fn release_proved(&mut self) {
+        self.release_unproved = false;
+    }
+}
+#[cfg(feature = "asio-sdk")]
+impl Drop for AsioSetup {
+    fn drop(&mut self) {
+        if let Some(control) = self.control.take() {
+            self.release_unproved |= control.close().is_err();
+        }
+        if self.release_unproved {
+            if let Some(window) = self.window.take() {
+                std::mem::forget(window);
+            }
+        }
+    }
 }
 impl Setup {
     pub(super) fn new(options: &Options, _clock: QpcClock) -> Result<Self> {
@@ -95,7 +136,20 @@ impl Setup {
             let window = Window::hidden()?;
             // SAFETY: selected installed driver is explicitly trusted. Hidden
             // owner-thread HWND is retained through control/stream Release.
-            let mut control = unsafe { AsioControl::open(driver, Some(window.hwnd as usize)) }?;
+            let control = match unsafe { AsioControl::open(driver, Some(window.hwnd as usize)) } {
+                Ok(control) => control,
+                Err(error) => {
+                    // The failed bridge init exposes no native Release proof.
+                    std::mem::forget(window);
+                    return Err(error.into());
+                }
+            };
+            let mut guard = AsioSetup {
+                control: Some(control),
+                window: Some(window),
+                release_unproved: false,
+            };
+            let control = guard.control.as_mut().expect("ASIO setup control");
             let rate = control.sample_rate()?;
             if !rate.is_finite() || rate <= 0.0 || rate.fract() != 0.0 || rate > f64::from(u32::MAX)
             {
@@ -115,11 +169,7 @@ impl Setup {
             println!(
                 "ASIO selected registration={driver:?}; actual format={format:?}; timer/latency bounds are supplied estimates, not native accuracy proof"
             );
-            Ok(Self::Asio {
-                control,
-                window,
-                format,
-            })
+            Ok(Self::Asio { guard, format })
         }
     }
     pub(super) fn format(&self) -> AudioFormat {
@@ -145,6 +195,10 @@ impl Setup {
                 ) =>
             {
                 super::owned_output::complete_owner(request, mixer, clock)
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio { guard, format } if retained_history => {
+                super::owned_output::complete_asio_owner(guard, format, mixer, options, clock)
             }
             setup => Ok(super::owned_output::owner(
                 setup.open(mixer, options, clock, retained_history)?,
@@ -176,14 +230,8 @@ impl Setup {
                 Ok(Output::Wasapi(stream))
             }
             #[cfg(feature = "asio-sdk")]
-            Self::Asio {
-                control,
-                window,
-                format,
-            } => {
-                // Keep the driver local newer than the HWND binding so every
-                // setup rejection drops/releases it before destroying sysref.
-                let mut control = control;
+            Self::Asio { mut guard, format } => {
+                let control = guard.control.as_mut().expect("ASIO setup control");
                 let registration = control.registration().clone();
                 let request = match options.buffer {
                     BufferRequest::DeviceDefault => AsioBufferRequest::DriverPreferred,
@@ -211,6 +259,7 @@ impl Setup {
                     latency_error: options.asio_latency_error,
                     age: options.asio_anchor_age,
                 };
+                let control = guard.take_control();
                 let mut stream = if retained_history {
                     AsioStream::prepare_with_clock_and_source_history(
                         control,
@@ -245,7 +294,7 @@ impl Setup {
                     stream,
                     buffer_frames: Some(buffer_frames),
                     sample_rate: format.sample_rate(),
-                    _window: window,
+                    _window: Some(guard.take_window()),
                     clock,
                     anchor: None,
                     timer_error: options.asio_timer_error,
@@ -585,7 +634,7 @@ impl Output {
                 };
                 if output
                     .buffer_frames
-                    .is_none_or(|frames| observation.render.frames != frames as usize)
+                    .is_none_or(|frames| observation.delivered_frames != frames as usize)
                     || observation.sample_rate != output.sample_rate
                 {
                     return Err("ASIO native render configuration changed".into());
@@ -642,7 +691,7 @@ impl Output {
                 };
                 if output
                     .buffer_frames
-                    .is_none_or(|frames| observation.render.frames != frames as usize)
+                    .is_none_or(|frames| observation.delivered_frames != frames as usize)
                     || observation.sample_rate != output.sample_rate
                 {
                     return Err("ASIO startup render configuration changed".into());
@@ -980,6 +1029,40 @@ pub(super) struct AsioLiveConfig {
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioLiveConfig {
+    pub(super) fn from_options(
+        registration: AsioDriverRegistration,
+        options: &Options,
+        format: AudioFormat,
+    ) -> Result<Self> {
+        Ok(Self {
+            registration,
+            channels: options
+                .output_channels
+                .clone()
+                .ok_or("ASIO output channels required")?,
+            buffer: match options.buffer {
+                BufferRequest::DeviceDefault => AsioBufferRequest::DriverPreferred,
+                BufferRequest::Frames(frames) => AsioBufferRequest::Frames(frames),
+                _ => return Err("ASIO buffer must be preferred or exact frames".into()),
+            },
+            sample_rate: format.sample_rate(),
+            timer_error: options.asio_timer_error,
+            drift_error: options.asio_drift_error,
+            latency_error: options.asio_latency_error,
+            age: options.asio_anchor_age,
+        })
+    }
+    pub(super) fn anchor(&self, clock: QpcClock) -> Result<MultimediaClockAnchor> {
+        let receipt = clock.sample_multimedia()?;
+        Ok(MultimediaClockAnchor::new(
+            receipt.milliseconds,
+            receipt.before.normalized,
+            receipt.after.normalized,
+            self.age,
+            self.timer_error,
+            self.drift_error,
+        )?)
+    }
     pub(super) fn from_target(
         registration: AsioDriverRegistration,
         plan: super::output_settings::AsioTargetPlan,
@@ -1010,7 +1093,7 @@ pub(super) struct AsioOutput {
     pub(super) stream: AsioStream,
     buffer_frames: Option<u32>,
     sample_rate: u32,
-    _window: Window,
+    _window: Option<Window>,
     clock: QpcClock,
     anchor: Option<MultimediaClockAnchor>,
     timer_error: u64,
@@ -1047,7 +1130,10 @@ impl AsioOutput {
         let control =
             match unsafe { AsioControl::open(&live.registration, Some(window.hwnd as usize)) } {
                 Ok(control) => control,
-                Err(error) => return Err(OutputOpenFailure::recovered(error.into(), Some(mixer))),
+                Err(error) => {
+                    std::mem::forget(window);
+                    return Err(OutputOpenFailure::recovered(error.into(), Some(mixer)));
+                }
             };
         let result = match matrix {
             Some(matrix) => AsioStream::prepare_remixed_recoverable(
@@ -1102,7 +1188,12 @@ impl AsioOutput {
                         error.into(),
                         Self::pending(stream, window, live, clock),
                     ),
-                    None => OutputOpenFailure::recovered(error.into(), mixer),
+                    None => {
+                        if cleanup.is_some() {
+                            std::mem::forget(window);
+                        }
+                        OutputOpenFailure::recovered(error.into(), mixer)
+                    }
                 };
                 Err(match cleanup {
                     Some(error) => failure.with_cleanup_error(error.into()),
@@ -1116,7 +1207,7 @@ impl AsioOutput {
             stream,
             buffer_frames: None,
             sample_rate: live.sample_rate,
-            _window: window,
+            _window: Some(window),
             clock,
             anchor: None,
             timer_error: live.timer_error,
@@ -1127,28 +1218,7 @@ impl AsioOutput {
         }
     }
     fn pump_driver_messages(&self) -> Result<()> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
-        };
-        // SAFETY: initialized POD message storage, owned by the native window
-        // thread. The filter retains physical-input messages for the common
-        // gameplay pump; this bounded pass only services the driver's sysref.
-        let mut message: MSG = unsafe { std::mem::zeroed() };
-        for _ in 0..64 {
-            if unsafe { PeekMessageW(&mut message, self._window.hwnd, 0, 0, PM_REMOVE) } == 0 {
-                break;
-            }
-            if message.message == WM_CLOSE || message.message == WM_QUIT {
-                return Err("ASIO driver host window requested stop".into());
-            }
-            // SAFETY: a real initialized native message on the owning thread;
-            // the registered procedure is stateless and does not unwind.
-            unsafe {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-        Ok(())
+        pump_asio_messages(self._window.as_ref().expect("ASIO sysref"))
     }
     fn checked(
         &mut self,
@@ -1227,5 +1297,36 @@ impl AsioOutput {
 impl Drop for AsioOutput {
     fn drop(&mut self) {
         let _ = self.stream.stop();
+        if self.stream.native_release_unproved() {
+            if let Some(window) = self._window.take() {
+                std::mem::forget(window);
+            }
+        }
     }
+}
+
+#[cfg(feature = "asio-sdk")]
+pub(super) fn pump_asio_messages(window: &Window) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
+    };
+    // SAFETY: initialized POD message storage, owned by the native window
+    // thread. The filter retains physical-input messages for the common
+    // gameplay pump; this bounded pass only services the driver's sysref.
+    let mut message: MSG = unsafe { std::mem::zeroed() };
+    for _ in 0..64 {
+        if unsafe { PeekMessageW(&mut message, window.hwnd, 0, 0, PM_REMOVE) } == 0 {
+            break;
+        }
+        if message.message == WM_CLOSE || message.message == WM_QUIT {
+            return Err("ASIO driver host window requested stop".into());
+        }
+        // SAFETY: a real initialized native message on the owning thread;
+        // the registered procedure is stateless and does not unwind.
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    Ok(())
 }

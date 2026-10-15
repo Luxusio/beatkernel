@@ -11,9 +11,9 @@ use beatkernel::{
 };
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio};
 use beatkernel_bms_runtime::native_cohort_setup::{
-    activate_audio_cohort_with_sounds, admit_cohort as admit_mode, finish_cohort,
-    finish_cohort_network, finish_cohort_with_results_and_network,
-    prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
+    activate_audio_cohort_with_sounds, admit_cohort as admit_mode,
+    finish_cohort_with_results_and_network_and_cleanup, prepare_audio_cohort_with_policy,
+    CohortPreparation, PreparedCohort,
 };
 use beatkernel_bms_runtime::native_start::{start_committed, NativeStartConfig};
 #[cfg(test)]
@@ -288,55 +288,55 @@ pub(super) fn run(
         )
     }?;
     let network_start = network.is_some();
-    if let Some((source, chart)) = original_source {
-        prepared.source = source;
-        prepared.compiled.chart = chart;
-        prepared.sounds = original_sounds.ok_or("retained cohort original sounds missing")?;
-        let first = reserved
-            .iter()
-            .map(|voice| voice.0)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or("cohort voice namespace overflow")?;
-        let mut allocator = beatkernel_bms_runtime::local_runtime::VoiceAllocator::new(first);
-        for member in &mut configs {
-            let mut sounds = Vec::new();
-            sounds.try_reserve_exact(prepared.sounds.len())?;
-            sounds.extend_from_slice(&prepared.sounds);
-            allocator.remap(&mut sounds)?;
-            member.sounds = sounds;
-        }
-        if options.end_ns.is_none() {
-            let template = completion_template
-                .as_ref()
-                .ok_or("retained cohort completion template missing")?;
-            let source = initial_completion_source
-                .as_ref()
-                .ok_or("retained cohort selected source missing")?;
-            for state in &mut states {
-                let member = configs
-                    .iter()
-                    .find(|member| member.player == state.player)
-                    .ok_or("retained completion player missing")?;
-                state.completion = Some(template.prepare_practice(source, &member.judge)?);
-            }
-        }
-        input_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_input_sounds(
-            &prepared, &configs, &reserved,
-        )?;
-        hazard_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_mine_sounds(
-            &prepared,
-            &configs,
-            &reserved,
-            &input_sounds,
-        )?;
-    }
     let audio_preparation: Result<(
         PreparedNativeAudio,
         Option<beatkernel_bms_runtime::practice_playback::PracticePlayback>,
         Option<beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity>,
     )> = (|| {
+        if let Some((source, chart)) = original_source {
+            prepared.source = source;
+            prepared.compiled.chart = chart;
+            prepared.sounds = original_sounds.ok_or("retained cohort original sounds missing")?;
+            let first = reserved
+                .iter()
+                .map(|voice| voice.0)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or("cohort voice namespace overflow")?;
+            let mut allocator = beatkernel_bms_runtime::local_runtime::VoiceAllocator::new(first);
+            for member in &mut configs {
+                let mut sounds = Vec::new();
+                sounds.try_reserve_exact(prepared.sounds.len())?;
+                sounds.extend_from_slice(&prepared.sounds);
+                allocator.remap(&mut sounds)?;
+                member.sounds = sounds;
+            }
+            if options.end_ns.is_none() {
+                let template = completion_template
+                    .as_ref()
+                    .ok_or("retained cohort completion template missing")?;
+                let source = initial_completion_source
+                    .as_ref()
+                    .ok_or("retained cohort selected source missing")?;
+                for state in &mut states {
+                    let member = configs
+                        .iter()
+                        .find(|member| member.player == state.player)
+                        .ok_or("retained completion player missing")?;
+                    state.completion = Some(template.prepare_practice(source, &member.judge)?);
+                }
+            }
+            input_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_input_sounds(
+                &prepared, &configs, &reserved,
+            )?;
+            hazard_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_mine_sounds(
+                &prepared,
+                &configs,
+                &reserved,
+                &input_sounds,
+            )?;
+        }
         let audio_config = NativeAudioConfig {
             output_origin,
             start: Timestamp::from_nanos(options.start_ns),
@@ -482,12 +482,17 @@ pub(super) fn run(
         Ok(prepared) => prepared,
         Err(error) => {
             drop(setup);
-            let mut failures = vec![format!("local audio preparation: {error}")];
-            if let Err(close) = input_owner.stop_and_join() {
-                failures.push(format!("input cleanup: {close}"));
-            }
-            finish_cohort_network(network.as_mut(), &states, &mut failures);
-            return finish_cohort(states, save_paths, failures, save_capture);
+            return finish_cohort_with_results_and_network_and_cleanup(
+                Err(error),
+                input_owner.stop_and_join(),
+                states,
+                network.as_mut(),
+                save_paths,
+                Vec::new(),
+                None,
+                save_capture,
+                |_, _| Ok(()),
+            );
         }
     };
     let PreparedNativeAudio {
@@ -499,24 +504,29 @@ pub(super) fn run(
     let mut output = match setup.open_owned(mixer, &options, clock, retained) {
         Ok(output) => output,
         Err(error) => {
-            let mut failures = vec![format!("native output open: {error}")];
-            if let Err(close) = input_owner.stop_and_join() {
-                failures.push(format!("input cleanup: {close}"));
-            }
-            finish_cohort_network(network.as_mut(), &states, &mut failures);
-            return finish_cohort(states, save_paths, failures, save_capture);
+            return finish_cohort_with_results_and_network_and_cleanup(
+                Err(error),
+                input_owner.stop_and_join(),
+                states,
+                network.as_mut(),
+                save_paths,
+                Vec::new(),
+                None,
+                save_capture,
+                |_, _| Ok(()),
+            );
         }
     };
-    let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
-    println!(
-        "local players={count}; shared output={}; independent judges/captures/scores",
-        output
-            .description()
-            .ok_or("initial Windows output unavailable")?
-    );
     let mut before_origin = 0u64;
-    let mut collected = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
+        let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
+        println!(
+            "local players={count}; shared output={}; independent judges/captures/scores",
+            output
+                .description()
+                .ok_or("initial Windows output unavailable")?
+        );
+        let mut collected = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
         let start_basis = super::owned_output::basis(&output)?;
         let creation_epoch = output.last_issued_epoch();
         input_owner.activate();
@@ -708,24 +718,38 @@ pub(super) fn run(
         eprintln!("Raw Input unregister error: {error}");
     }
     let mut failures = Vec::new();
-    if let Err(error) = stop {
-        failures.push(format!("output cleanup: {error}"));
-    }
-    if let Err(error) = close {
-        failures.push(format!("input cleanup: {error}"));
-    }
+    let cleanup = match (stop, close) {
+        (Err(error), Err(input_error)) => {
+            failures.push(format!("input cleanup: {input_error}"));
+            Err(error)
+        }
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    };
     let mut final_launch = launch.clone();
+    let mut final_base_ready = true;
     if let Some(practice) = practice.as_ref() {
         let attempt = practice.members()[0].launch.attempt();
         while final_launch.attempt() < attempt {
-            final_launch = final_launch.retry()?;
+            match final_launch.retry() {
+                Ok(next) => final_launch = next,
+                Err(error) => {
+                    failures.push(format!("final recording base preparation: {error}"));
+                    final_base_ready = false;
+                    break;
+                }
+            }
         }
     }
-    let final_base = final_launch
-        .args()
-        .chunks_exact(2)
-        .find(|pair| pair[0] == "--record-replay")
-        .map(|pair| PathBuf::from(&pair[1]));
+    let final_base = final_base_ready
+        .then(|| {
+            final_launch
+                .args()
+                .chunks_exact(2)
+                .find(|pair| pair[0] == "--record-replay")
+                .map(|pair| PathBuf::from(&pair[1]))
+        })
+        .flatten();
     if let Some(practice) = practice.as_ref() {
         for member in practice.members() {
             let path = member
@@ -734,16 +758,21 @@ pub(super) fn run(
                 .chunks_exact(2)
                 .find(|pair| pair[0] == "--record-replay")
                 .map(|pair| PathBuf::from(&pair[1]));
-            let target = save_paths
-                .iter_mut()
-                .find(|(id, _)| *id == member.player)
-                .ok_or("missing final practice recording member")?;
-            target.1 = path;
+            if let Some(target) = save_paths.iter_mut().find(|(id, _)| *id == member.player) {
+                target.1 = path;
+            } else {
+                failures.push(format!(
+                    "missing final practice recording member player{}",
+                    member.player.0
+                ));
+                save_paths.push((member.player, None));
+            }
         }
     }
     let archive_paths = save_paths.clone();
-    finish_cohort_with_results_and_network(
+    finish_cohort_with_results_and_network_and_cleanup(
         outcome,
+        cleanup,
         states,
         network.as_mut(),
         save_paths,
