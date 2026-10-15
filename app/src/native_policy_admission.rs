@@ -151,6 +151,12 @@ fn validate_header_in_domain_inner(
     {
         return Err("native policy header version, capacity or clock differs".into());
     }
+    let (_, source_rates) = crate::replay_speed_policy::split_schedule(&header.options)?;
+    if source_rates.is_variable() {
+        return Err(
+            "variable source speed is unsupported for fixed native policy admission".into(),
+        );
+    }
     let setup = crate::replay_playback::decode_section_setup(&header.options)?;
     if let Some(speed) = speed {
         validate_speed_config(config, section_start, speed)?;

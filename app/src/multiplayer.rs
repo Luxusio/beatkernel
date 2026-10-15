@@ -122,6 +122,13 @@ pub fn competition_identity(
     file.runtime_version = runtime_version.into();
     let identity = encode_replay(&file, limits)
         .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+    let (_, source_rates) = crate::replay_speed_policy::split_schedule(&file.header.options)
+        .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+    if source_rates.is_variable() {
+        return Err(MultiplayerError::Protocol(
+            "variable source speed is unsupported for fixed-condition network competition".into(),
+        ));
+    }
     validate_identity(&identity)?;
     Ok(identity)
 }

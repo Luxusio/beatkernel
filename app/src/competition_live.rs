@@ -778,6 +778,17 @@ impl LiveCompetition {
         if player.0 == 0 {
             return Err("competition player ID must be nonzero".into());
         }
+        for header in
+            std::iter::once(competition.expected_header()).chain(admitted_policy_header.as_ref())
+        {
+            let (_, schedule) = crate::replay_speed_policy::split_schedule(&header.options)?;
+            if schedule.is_variable() {
+                return Err(
+                    "variable source speed is unsupported for fixed-condition live competition"
+                        .into(),
+                );
+            }
+        }
         let network_status = network.as_ref().map(|_| NetworkStatus::Waiting);
         let mut prepared = Self {
             player,

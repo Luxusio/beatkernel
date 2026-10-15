@@ -1,6 +1,8 @@
 //! Bounded control-thread recording of the actual runtime's accepted operations.
 
 use crate::input_sounds::InputSoundIdentity;
+use crate::replay_speed::ReplaySpeed;
+use crate::replay_speed_policy::{self, SourceRateCut, SourceRateSchedule};
 use beatkernel::{
     input::encode_event,
     judge::JudgeEngine,
@@ -12,6 +14,7 @@ use beatkernel::{
     time::{ClockDomainId, Timestamp},
 };
 use beatkernel_bms::BmsInputMode;
+use std::sync::{Arc, Weak};
 
 #[path = "native_replay_capture.rs"]
 mod native_storage;
@@ -371,8 +374,32 @@ pub struct LiveReplayCapture {
     recorder: ReplayRecorder,
     limits: ReplayCodecLimits,
     header_bytes: usize,
+    fixed_header_bytes: usize,
     encoded_bytes: usize,
     end: Option<Timestamp>,
+    effective_header: ReplayHeader,
+    source_rates: SourceRateSchedule,
+    rate_owner: Arc<()>,
+    next_rate_reservation: u64,
+    pending_rate: Option<RateReservation>,
+}
+
+struct RateReservation {
+    id: u64,
+    lifetime: Weak<()>,
+    growth: usize,
+}
+
+/// Cold, owner-bound storage for one actual source-rate result.
+/// Dropping an uncommitted token releases its byte reservation.
+#[derive(Debug)]
+pub struct PreparedSourceRateChange {
+    owner: Arc<()>,
+    lifetime: Arc<()>,
+    id: u64,
+    requested: ReplaySpeed,
+    candidate: Option<(SourceRateSchedule, ReplayHeader)>,
+    filled: bool,
 }
 impl LiveReplayCapture {
     /// Fingerprints a pristine compiled judge setup, including its profile.
@@ -530,12 +557,19 @@ impl LiveReplayCapture {
             .map_err(CaptureError::SourceSpeed)?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
+        let effective_header = header.clone();
         Ok(Self {
             recorder: ReplayRecorder::new(header)?,
             limits,
             header_bytes,
+            fixed_header_bytes: header_bytes,
             encoded_bytes: header_bytes,
             end,
+            effective_header,
+            source_rates: SourceRateSchedule::fixed(source_speed),
+            rate_owner: Arc::new(()),
+            next_rate_reservation: 0,
+            pending_rate: None,
         })
     }
 
@@ -595,13 +629,190 @@ impl LiveReplayCapture {
         )?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
+        let effective_header = header.clone();
         Ok(Self {
             recorder: ReplayRecorder::new(header)?,
             limits,
             header_bytes,
+            fixed_header_bytes: header_bytes,
             encoded_bytes: header_bytes,
             end,
+            effective_header,
+            source_rates: SourceRateSchedule::fixed(source_speed),
+            rate_owner: Arc::new(()),
+            next_rate_reservation: 0,
+            pending_rate: None,
         })
+    }
+
+    /// Actual source conditions, separate from selected replay output speed.
+    pub fn source_rate_schedule(&self) -> &SourceRateSchedule {
+        &self.source_rates
+    }
+
+    fn pending_header_growth(&self) -> usize {
+        self.pending_rate
+            .as_ref()
+            .filter(|pending| pending.lifetime.strong_count() != 0)
+            .map_or(0, |pending| pending.growth)
+    }
+
+    fn validate_rate_token(&self, prepared: &PreparedSourceRateChange) -> Result<(), CaptureError> {
+        if !Arc::ptr_eq(&self.rate_owner, &prepared.owner)
+            || !self.pending_rate.as_ref().is_some_and(|pending| {
+                pending.id == prepared.id
+                    && pending.lifetime.as_ptr() == Arc::as_ptr(&prepared.lifetime)
+            })
+        {
+            return Err(CaptureError::SourceSpeed(
+                replay_speed_policy::PolicyError::Invalid(
+                    "stale or foreign source rate reservation",
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reserves complete header growth while the future actual cut is unknown.
+    /// Input reports admitted while pending include that reserved growth.
+    pub fn prepare_source_rate_change(
+        &mut self,
+        requested: ReplaySpeed,
+    ) -> Result<PreparedSourceRateChange, CaptureError> {
+        if self
+            .pending_rate
+            .as_ref()
+            .is_some_and(|pending| pending.lifetime.strong_count() != 0)
+        {
+            return Err(CaptureError::SourceSpeed(
+                replay_speed_policy::PolicyError::Invalid("source rate change already pending"),
+            ));
+        }
+        let id = self
+            .next_rate_reservation
+            .checked_add(1)
+            .ok_or(CaptureError::SourceSpeed(
+                replay_speed_policy::PolicyError::Invalid("source rate reservation overflow"),
+            ))?;
+        let candidate = if requested == self.source_rates.current_speed() {
+            None
+        } else {
+            let mut schedule = self
+                .source_rates
+                .try_copy()
+                .map_err(CaptureError::SourceSpeed)?;
+            // Only a cold placeholder; never published as actual execution evidence.
+            let previous = schedule.cuts().last().copied();
+            let cut = SourceRateCut::new(
+                previous.map_or(0, SourceRateCut::whole),
+                previous.map_or(0, SourceRateCut::numerator),
+                previous.map_or(1, SourceRateCut::denominator),
+                requested,
+            )
+            .map_err(CaptureError::SourceSpeed)?;
+            schedule.try_push(cut).map_err(CaptureError::SourceSpeed)?;
+            let mut inner = self.recorder.header().clone();
+            let (options, _) = replay_speed_policy::split_options(&inner.options)
+                .map_err(CaptureError::SourceSpeed)?;
+            inner.options = options.to_vec();
+            let header =
+                replay_speed_policy::wrap_header_with_schedule(inner, &schedule, self.limits)
+                    .map_err(CaptureError::SourceSpeed)?;
+            Some((schedule, header))
+        };
+        let growth = candidate.as_ref().map_or(0, |(_, header)| {
+            header.options.len() - self.effective_header.options.len()
+        });
+        if self
+            .encoded_bytes
+            .checked_add(growth)
+            .ok_or(ReplayCodecError::LengthOverflow)?
+            > self.limits.max_file_bytes()
+        {
+            return Err(ReplayCodecError::FileTooLarge.into());
+        }
+        let lifetime = Arc::new(());
+        let prepared = PreparedSourceRateChange {
+            owner: Arc::clone(&self.rate_owner),
+            lifetime: Arc::clone(&lifetime),
+            id,
+            requested,
+            candidate,
+            filled: false,
+        };
+        self.pending_rate = Some(RateReservation {
+            id,
+            lifetime: Arc::downgrade(&lifetime),
+            growth,
+        });
+        self.next_rate_reservation = id;
+        Ok(prepared)
+    }
+
+    /// Fills reserved storage from an owner-qualified actual cut, without allocation.
+    pub fn prepare_applied_source_rate_change(
+        &mut self,
+        prepared: &mut PreparedSourceRateChange,
+        cut: SourceRateCut,
+    ) -> Result<(), CaptureError> {
+        self.validate_rate_token(prepared)?;
+        if prepared.filled || cut.speed() != prepared.requested {
+            return Err(CaptureError::SourceSpeed(
+                replay_speed_policy::PolicyError::Invalid(
+                    "source rate result differs from reservation",
+                ),
+            ));
+        }
+        if let Some((schedule, header)) = &mut prepared.candidate {
+            self.source_rates
+                .validate_change(cut)
+                .map_err(CaptureError::SourceSpeed)?;
+            let offset = replay_speed_policy::prepared_cut_offset(self.source_rates.cuts().len());
+            cut.write_bytes(&mut header.options[offset..offset + 48]);
+            schedule.replace_prepared_cut(cut);
+        }
+        prepared.filled = true;
+        Ok(())
+    }
+
+    /// Commits an already filled candidate after every cohort member is prepared.
+    /// Byte accounting uses all reports admitted since the original reservation.
+    pub fn commit_source_rate_change(
+        &mut self,
+        prepared: PreparedSourceRateChange,
+    ) -> Result<(), CaptureError> {
+        self.validate_rate_token(&prepared)?;
+        if !prepared.filled {
+            return Err(CaptureError::SourceSpeed(
+                replay_speed_policy::PolicyError::Invalid("source rate result is not prepared"),
+            ));
+        }
+        let growth = self.pending_header_growth();
+        let encoded_bytes = self
+            .encoded_bytes
+            .checked_add(growth)
+            .ok_or(ReplayCodecError::LengthOverflow)?;
+        if encoded_bytes > self.limits.max_file_bytes() {
+            return Err(ReplayCodecError::FileTooLarge.into());
+        }
+        if let Some((schedule, header)) = prepared.candidate {
+            self.source_rates = schedule;
+            self.effective_header = header;
+            self.header_bytes += growth;
+            self.encoded_bytes = encoded_bytes;
+        }
+        self.pending_rate = None;
+        Ok(())
+    }
+
+    /// Cancels admission without changing the effective recording or source speed.
+    pub fn cancel_source_rate_change(
+        &mut self,
+        prepared: PreparedSourceRateChange,
+    ) -> Result<(), CaptureError> {
+        self.validate_rate_token(&prepared)?;
+        self.pending_rate = None;
+        Ok(())
     }
 
     /// Records one report in call order, atomically with respect to validation.
@@ -640,7 +851,10 @@ impl LiveReplayCapture {
             return Err(ReplayError::NonMonotonicSongTime.into());
         }
         // Validate every borrowed payload before ReplayRecorder clones it.
-        let mut minimum_bytes = self.encoded_bytes;
+        let mut minimum_bytes = self
+            .encoded_bytes
+            .checked_add(self.pending_header_growth())
+            .ok_or(ReplayCodecError::LengthOverflow)?;
         for input in &report.bound_inputs {
             if input.physical.meta().clock_domain != self.header().normalized_clock {
                 return Err(ReplayError::ClockDomainMismatch.into());
@@ -657,18 +871,22 @@ impl LiveReplayCapture {
         // Reuse the canonical codec, including tags and embedded event framing,
         // rather than duplicating wire-format sizes. Work scales with this
         // report, not the accumulated session; the envelope size is constant.
-        let mut candidate = ReplayRecorder::new(self.header().clone())?;
+        let mut candidate = ReplayRecorder::new(self.recorder.header().clone())?;
         candidate.record_report(report)?;
         let (header, records) = candidate.into_parts();
         let candidate_bytes = encode_replay(&ReplayFile::new(header, records), self.limits)?.len();
         let added = candidate_bytes
-            .checked_sub(self.header_bytes)
+            .checked_sub(self.fixed_header_bytes)
             .ok_or(ReplayCodecError::LengthOverflow)?;
         let encoded_bytes = self
             .encoded_bytes
             .checked_add(added)
             .ok_or(ReplayCodecError::LengthOverflow)?;
-        if encoded_bytes > self.limits.max_file_bytes() {
+        if encoded_bytes
+            .checked_add(self.pending_header_growth())
+            .ok_or(ReplayCodecError::LengthOverflow)?
+            > self.limits.max_file_bytes()
+        {
             return Err(ReplayCodecError::FileTooLarge.into());
         }
         self.recorder.record_report(report)?;
@@ -678,7 +896,7 @@ impl LiveReplayCapture {
 
     /// Application setup identity and normalized input domain.
     pub fn header(&self) -> &ReplayHeader {
-        self.recorder.header()
+        &self.effective_header
     }
     /// Ordered accepted operations retained so far.
     pub fn records(&self) -> &[ReplayRecord] {
@@ -690,8 +908,8 @@ impl LiveReplayCapture {
     }
     /// Transfers the accepted log without executing another judge.
     pub fn into_file(self) -> ReplayFile {
-        let (header, records) = self.recorder.into_parts();
-        ReplayFile::new(header, records)
+        let (_, records) = self.recorder.into_parts();
+        ReplayFile::new(self.effective_header, records)
     }
     /// Encodes the accepted prefix with its original limits, without file I/O.
     /// Consuming the capture makes this one export attempt; no judge is rerun.

@@ -69,7 +69,7 @@ impl RecordCatalog {
 }
 
 impl RecordPreview {
-    pub fn inspect(path: &Path, chart: &Path, settings: &NativeSettings) -> Result<Self, String> {
+    pub fn inspect(path: &Path, chart: &Path, _settings: &NativeSettings) -> Result<Self, String> {
         settings_path(path)?;
         let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
         if !metadata.is_file() {
@@ -90,7 +90,7 @@ impl RecordPreview {
         let source =
             load_chart_with_seed(chart, setup.chart_seed).map_err(|error| error.to_string())?;
         let header = file.header.clone();
-        let preview = Self::from_file(path, &source, settings, file)?;
+        let preview = Self::from_file_for_history(path, &source, file)?;
         #[cfg(not(target_arch = "wasm32"))]
         let preview = {
             let mut preview = preview;
@@ -108,6 +108,7 @@ impl RecordPreview {
         let _ = header;
         Ok(preview)
     }
+    #[cfg(test)]
     fn from_file(
         path: &Path,
         source: &beatkernel_bms::BmsChart,
@@ -124,6 +125,13 @@ impl RecordPreview {
         expected: &crate::replay_playback::RecordedSetup,
         file: ReplayFile,
     ) -> Result<Self, String> {
+        let (_, source_rates) = crate::replay_speed_policy::split_schedule(&file.header.options)
+            .map_err(|error| error.to_string())?;
+        if source_rates.is_variable() {
+            return Err(
+                "variable source speed is unsupported for fixed-condition comparison".into(),
+            );
+        }
         let setup =
             decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
         if setup.chart_seed != expected.chart_seed {
@@ -140,6 +148,18 @@ impl RecordPreview {
         {
             return Err("saved record profile or section differs from the current draft".into());
         }
+        Self::from_file_for_history(path, source, file)
+    }
+    /// Browses a valid recorded condition without admitting it as a fixed opponent.
+    /// Reconstructs the actual recorded setup, independently of the current draft.
+    pub fn from_file_for_history(
+        path: &Path,
+        source: &beatkernel_bms::BmsChart,
+        file: ReplayFile,
+    ) -> Result<Self, String> {
+        settings_path(path)?;
+        let setup =
+            decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
         let replay = reconstruct_section(
             source,
             file,

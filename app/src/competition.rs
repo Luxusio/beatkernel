@@ -173,7 +173,11 @@ impl std::error::Error for CompetitionError {}
 /// Exact setup compatibility except for the recording's capture clock domain.
 /// Identities are noncryptographic; matching is not proof of authenticity.
 pub fn compatible_headers(local: &ReplayHeader, other: &ReplayHeader) -> bool {
-    local.version == other.version
+    let fixed =
+        |header: &ReplayHeader| crate::replay_speed_policy::split_options(&header.options).is_ok();
+    fixed(local)
+        && fixed(other)
+        && local.version == other.version
         && local.chart_identity == other.chart_identity
         && local.rules_identity == other.rules_identity
         && local.options == other.options
@@ -314,6 +318,20 @@ impl Competition {
     ) -> Result<usize, CompetitionError> {
         if self.opponents.len() >= self.max_opponents {
             return Err(CompetitionError::TooManyOpponents);
+        }
+        if file.header.options.len() > limits.max_header_bytes() {
+            return Err(PlaybackError::from(
+                beatkernel::replay::codec::ReplayCodecError::HeaderTooLarge,
+            )
+            .into());
+        }
+        let (_, source_rates) = crate::replay_speed_policy::split_schedule(&file.header.options)
+            .map_err(PlaybackError::SourceSpeed)?;
+        if source_rates.is_variable() {
+            return Err(PlaybackError::Metadata(
+                "variable source speed is unsupported for fixed-condition competition",
+            )
+            .into());
         }
         if !compatible_headers(&self.expected_header, &file.header) {
             return Err(CompetitionError::IncompatibleSetup);
