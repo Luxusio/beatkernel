@@ -474,7 +474,12 @@ pub(crate) fn validate_audio_coordinate_start(
             beatkernel::transport::Rate::NORMAL,
         ),
     };
-    let pristine = Transport::new_with_output_phase(
+    let constructor = if transport.runtime_output_rate().is_some() {
+        Transport::new_with_runtime_output_phase
+    } else {
+        Transport::new_with_output_phase
+    };
+    let pristine = constructor(
         phase,
         epoch.logical_output(gameplay.playback_origin)?,
         config.audio.section_start,

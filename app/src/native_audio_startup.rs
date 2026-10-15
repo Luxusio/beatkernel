@@ -23,6 +23,21 @@ use beatkernel_platform::audio::presentation::validation::NativePresentationVali
 /// Slots for acquired input, retained practice receipts and native anchors.
 pub const SOURCE_COORDINATE_HISTORY_HEADROOM: usize = 4096 + 256 + 2;
 
+static NEXT_RUNTIME_PROGRAM_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// Identifies one immutable cold retained program, independently of its clocks.
+/// Exhaustion refuses preparation rather than reusing zero or an earlier identity.
+pub fn next_runtime_program_id() -> NativeGameplayResult<u64> {
+    NEXT_RUNTIME_PROGRAM_ID
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |next| next.checked_add(1),
+        )
+        .map_err(|_| "native retained runtime program identities exhausted".into())
+}
+
 /// Bounds Source history conservatively even when each callback contains one frame.
 pub fn source_coordinate_history_capacity(buffer_frames: u32) -> NativeGameplayResult<usize> {
     if buffer_frames == 0 {
@@ -97,6 +112,31 @@ pub fn initial_source_coordinate_transport(
         identity.hz(),
     )?;
     Ok(beatkernel::transport::Transport::new_with_output_phase(
+        basis,
+        logical_origin,
+        setup.start(),
+        setup.preroll(),
+        setup.speed().rate(),
+        setup.end(),
+    )?)
+}
+
+/// Builds the same actual creation phase with retained runtime-rate history.
+/// This opt-in does not establish presentation or input-cutoff authority.
+pub fn initial_source_coordinate_runtime_transport(
+    epoch: u64,
+    identity: SourcePlaybackIdentity,
+    logical_origin: ClockPoint,
+    setup: crate::live_speed::LiveSpeedSetup,
+) -> NativeGameplayResult<beatkernel::transport::Transport> {
+    let basis = beatkernel::transport::OutputPhaseBasis::new(
+        logical_origin.domain,
+        epoch,
+        1,
+        identity.initial_playback(),
+        identity.hz(),
+    )?;
+    Ok(beatkernel::transport::Transport::new_with_runtime_output_phase(
         basis,
         logical_origin,
         setup.start(),

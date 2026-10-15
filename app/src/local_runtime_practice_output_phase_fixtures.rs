@@ -415,26 +415,271 @@ fn malformed_and_nonpositive_phase_construction_cannot_reach_replacement() {
     let (group, mut queue) = group(&[1], Rate::NORMAL);
     let before = group.transport().clone();
     for rate in [Rate::new(0, 1).unwrap(), Rate::new(-1, 1).unwrap()] {
-        assert!(Transport::new_with_output_phase(
+        assert!(
+            Transport::new_with_output_phase(
+                basis(2, 10),
+                clock(1, 1200),
+                ts(0),
+                Duration::ZERO,
+                rate,
+                None
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        Transport::new_with_output_phase(
             basis(2, 10),
-            clock(1, 1200),
+            clock(3, 1200),
             ts(0),
             Duration::ZERO,
-            rate,
+            Rate::NORMAL,
             None
         )
-        .is_err());
-    }
-    assert!(Transport::new_with_output_phase(
-        basis(2, 10),
-        clock(3, 1200),
-        ts(0),
-        Duration::ZERO,
-        Rate::NORMAL,
-        None
-    )
-    .is_err());
+        .is_err()
+    );
     assert_eq!(group.transport(), &before);
     assert_eq!(group.audio_scope(), CommandScope(1));
+    assert_eq!(queue.try_pop(), Err(QueuePopError::Empty));
+}
+
+fn runtime_transport(b: OutputPhaseBasis, anchor: i64, rate: Rate) -> Transport {
+    Transport::new_with_runtime_output_phase(
+        b,
+        ClockPoint {
+            domain: b.domain(),
+            timestamp: ts(anchor),
+        },
+        ts(0),
+        Duration::ZERO,
+        rate,
+        None,
+    )
+    .unwrap()
+}
+fn runtime_group(ids: &[u32], paused: bool) -> (RuntimeGroup, CommandConsumer) {
+    let mut transport = runtime_transport(basis(1, 2), 1000, Rate::NORMAL);
+    let cut = phase(basis(1, 2), 1100, 3);
+    transport
+        .set_rate_at_output_phase(cut, Rate::new(3, 2).unwrap())
+        .unwrap();
+    if paused {
+        transport.pause_at_output_phase(cut).unwrap();
+    }
+    let (producer, consumer) = command_queue(32).unwrap();
+    let mut group = RuntimeGroup::new(
+        ClockDomainId(1),
+        ClockDomainId(2),
+        transport,
+        producer,
+        ids.iter().map(|id| member(*id, 3_000_000, 7)).collect(),
+        8,
+        &[],
+    )
+    .unwrap();
+    group.set_audio_scope(CommandScope(1));
+    group.set_song_end(ts(9_000_000)).unwrap();
+    group.set_processing_clock(RuntimeProcessingClock::Disabled);
+    (group, consumer)
+}
+
+#[test]
+fn runtime_region_replacement_preserves_current_rate_even_when_paused_anchor_has_zero_rate() {
+    for paused in [false, true] {
+        let (mut group, mut queue) = runtime_group(&[7, 29], paused);
+        let current = Rate::new(3, 2).unwrap();
+        assert_eq!(group.transport().runtime_output_rate(), Some(current));
+        if paused {
+            assert_eq!(group.transport().anchor().rate, Rate::new(0, 1).unwrap());
+        }
+        let before = group.transport().clone();
+        let hashes: Vec<_> = group
+            .members
+            .iter()
+            .map(|m| m.runtime.judge().stable_hash().unwrap())
+            .collect();
+        assert!(
+            group
+                .replace_practice_states_with_output_phase(
+                    judges(&[7, 29]),
+                    runtime_transport(basis(2, 10), 1200, Rate::NORMAL),
+                    Some(ts(9_000_000)),
+                    CommandScope(2),
+                )
+                .is_err(),
+            "a region cannot restore the immutable original rate"
+        );
+        assert_unchanged(&group, &before, &hashes, 0);
+        group
+            .replace_practice_states_with_output_phase(
+                judges(&[7, 29]),
+                runtime_transport(basis(2, 10), 1200, current),
+                Some(ts(9_000_000)),
+                CommandScope(2),
+            )
+            .unwrap();
+        assert_eq!(group.transport().runtime_output_rate(), Some(current));
+        assert_eq!(group.transport().output_phase_basis(), Some(basis(2, 10)));
+        assert!(!group.transport().is_paused());
+        assert_eq!(queue.try_pop(), Err(QueuePopError::Empty));
+    }
+}
+
+#[test]
+fn runtime_restart_rate_restore_keeps_all_original_identity_and_freshness_guards() {
+    for case in 0..10 {
+        let (mut group, mut queue) = runtime_group(&[7, 29], false);
+        let before = group.transport().clone();
+        let hashes: Vec<_> = group
+            .members
+            .iter()
+            .map(|m| m.runtime.judge().stable_hash().unwrap())
+            .collect();
+        let mut b = basis(2, 10);
+        let mut fresh = judges(&[7, 29]);
+        let mut rate = Rate::NORMAL;
+        let mut scope = CommandScope(2);
+        match case {
+            0 => b = OutputPhaseBasis::new(ClockDomainId(1), 18, 2, 10, 1000).unwrap(),
+            1 => b = OutputPhaseBasis::new(ClockDomainId(3), 17, 2, 10, 1000).unwrap(),
+            2 => b = OutputPhaseBasis::new(ClockDomainId(1), 17, 2, 10, 1001).unwrap(),
+            3 => b = basis(3, 10),
+            4 => {
+                fresh.pop();
+            }
+            5 => fresh.swap(0, 1),
+            6 => fresh[1].1 = member(29, 3_000_000, 8).judge,
+            7 => {
+                fresh[1].1.advance_to(ts(0)).unwrap();
+            }
+            8 => rate = Rate::new(1, 2).unwrap(),
+            9 => scope = CommandScope(1),
+            _ => unreachable!(),
+        }
+        assert!(
+            group
+                .replace_practice_states_with_runtime_restart(
+                    fresh,
+                    runtime_transport(b, 1200, rate),
+                    Some(ts(9_000_000)),
+                    scope,
+                    Rate::NORMAL,
+                )
+                .is_err(),
+            "runtime compound restart rejection case {case}"
+        );
+        assert_unchanged(&group, &before, &hashes, 0);
+        assert_eq!(queue.try_pop(), Err(QueuePopError::Empty));
+    }
+    let (mut group, _) = runtime_group(&[7, 29], false);
+    group
+        .replace_practice_states_with_runtime_restart(
+            judges(&[7, 29]),
+            runtime_transport(basis(2, 10), 1200, Rate::NORMAL),
+            Some(ts(9_000_000)),
+            CommandScope(2),
+            Rate::NORMAL,
+        )
+        .unwrap();
+    assert_eq!(group.transport().runtime_output_rate(), Some(Rate::NORMAL));
+    assert_eq!(group.audio_scope(), CommandScope(2));
+}
+
+#[test]
+fn fixed_and_runtime_phase_modes_cannot_mix_in_region_or_compound_restart() {
+    for old_runtime in [false, true] {
+        let (mut group, _) = if old_runtime {
+            runtime_group(&[7, 29], false)
+        } else {
+            let (mut group, queue) = group(&[7, 29], Rate::new(3, 2).unwrap());
+            group.set_song_end(ts(9_000_000)).unwrap();
+            (group, queue)
+        };
+        let before = group.transport().clone();
+        let hashes: Vec<_> = group
+            .members
+            .iter()
+            .map(|m| m.runtime.judge().stable_hash().unwrap())
+            .collect();
+        let candidate = if old_runtime {
+            transport(basis(2, 10), 1200, Rate::new(3, 2).unwrap())
+        } else {
+            runtime_transport(basis(2, 10), 1200, Rate::new(3, 2).unwrap())
+        };
+        assert!(
+            group
+                .replace_practice_states_with_output_phase(
+                    judges(&[7, 29]),
+                    candidate.clone(),
+                    Some(ts(9_000_000)),
+                    CommandScope(2),
+                )
+                .is_err()
+        );
+        assert_unchanged(&group, &before, &hashes, 0);
+        assert!(
+            group
+                .replace_practice_states_with_runtime_restart(
+                    judges(&[7, 29]),
+                    candidate,
+                    Some(ts(9_000_000)),
+                    CommandScope(2),
+                    Rate::new(3, 2).unwrap(),
+                )
+                .is_err()
+        );
+        assert_unchanged(&group, &before, &hashes, 0);
+    }
+}
+
+#[test]
+fn solo_runtime_compound_restart_forwards_original_rate_and_keeps_the_same_producer() {
+    let config = member(1, 3_000_000, 7);
+    let mut changed = runtime_transport(basis(1, 2), 1000, Rate::NORMAL);
+    changed
+        .set_rate_at_output_phase(phase(basis(1, 2), 1100, 3), Rate::new(3, 2).unwrap())
+        .unwrap();
+    let (producer, mut queue) = command_queue(8).unwrap();
+    let mut solo = SoloRuntime::new(
+        ClockDomainId(1),
+        ClockDomainId(2),
+        changed,
+        config.bindings,
+        config.judge,
+        producer,
+        config.sounds,
+        8,
+    )
+    .unwrap();
+    solo.set_audio_scope(CommandScope(1));
+    solo.replace_practice_state_with_runtime_restart(
+        member(1, 3_000_000, 7).judge,
+        runtime_transport(basis(2, 10), 1200, Rate::NORMAL),
+        None,
+        CommandScope(2),
+        Rate::NORMAL,
+    )
+    .unwrap();
+    let report = solo
+        .process_input_output_phase(
+            input(1, 300),
+            &Mapper,
+            clock(2, 777),
+            phase(basis(2, 10), 1300, 13),
+        )
+        .unwrap();
+    assert_eq!(report.song_time, ts(3_000_000));
+    assert_eq!(report.judge_events.len(), 1);
+    assert_eq!(
+        solo.transport_mut().runtime_output_rate(),
+        Some(Rate::NORMAL)
+    );
+    assert!(matches!(
+        queue.try_pop().unwrap(),
+        AudioCommand::Play {
+            voice: VoiceId(1),
+            ..
+        }
+    ));
     assert_eq!(queue.try_pop(), Err(QueuePopError::Empty));
 }

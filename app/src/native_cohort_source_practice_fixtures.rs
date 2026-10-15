@@ -16,10 +16,15 @@ use crate::{
     native_coordinate_control::CoordinateControlFacts,
     native_gameplay::InputBatch,
     native_output_coordinate::{CoordinateNativeAudioSnapshot, NativeOutputCoordinate},
-    native_playback_phase::{NativePlaybackMapping},
-    practice_control::{PracticeAction, PracticeCapability, PracticeReply, PracticeRequest},
-    practice_playback::{PracticeMember, PracticePlayback, PracticeRecordingPort},
-    practice_session::{prepare_attempt_with_speed, PracticeAttemptConfig},
+    native_playback_phase::NativePlaybackMapping,
+    practice_control::{
+        PracticeAction, PracticeCapability, PracticeReply, PracticeRequest,
+        PracticeTransactionCapability, PracticeTransactionReply, PracticeTransactionRequest,
+    },
+    practice_playback::{
+        PracticeMember, PracticePlayback, PracticeRecordingPort, PracticeRuntimeHeader,
+    },
+    practice_session::{PracticeAttemptConfig, prepare_attempt_with_speed},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
@@ -29,9 +34,9 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId,
     },
-    replay::{codec::ReplayCodecLimits, ReplaySession},
+    replay::{ReplaySession, codec::ReplayCodecLimits},
     runtime::{RuntimeProcessingClock, RuntimeReport},
-    time::{presentation::PresentationEstimator, ClockPair, Duration, ExtrapolationPolicy},
+    time::{ClockPair, Duration, ExtrapolationPolicy, presentation::PresentationEstimator},
     transport::{OutputPhaseBasis, Rate},
 };
 use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
@@ -245,6 +250,11 @@ struct Host {
     reports: Vec<PlayerReport>,
     replies: Vec<PracticeReply>,
     ends: Vec<Timestamp>,
+    transaction_capabilities: Vec<PracticeTransactionCapability>,
+    transaction_requests: VecDeque<PracticeTransactionRequest>,
+    transaction_replies: Vec<PracticeTransactionReply>,
+    transaction_taken: usize,
+    transaction_at: usize,
 }
 impl NativeGameplayHost for Host {
     fn cancelled(&self) -> bool {
@@ -287,6 +297,38 @@ impl NativeGameplayHost for Host {
     }
     fn commit_practice_reply(&mut self, reply: &PracticeReply) -> NativeGameplayResult<()> {
         self.replies.push(reply.clone());
+        Ok(())
+    }
+    fn advertise_practice_transactions(
+        &mut self,
+        cap: Option<PracticeTransactionCapability>,
+    ) -> NativeGameplayResult<()> {
+        if let Some(cap) = cap {
+            self.transaction_capabilities.push(cap);
+        }
+        Ok(())
+    }
+    fn take_practice_transaction(
+        &mut self,
+        active: bool,
+    ) -> NativeGameplayResult<Option<PracticeTransactionRequest>> {
+        if active
+            && !self.transaction_capabilities.is_empty()
+            && self.step.get() >= self.transaction_at
+            && self.transaction_taken == self.transaction_replies.len()
+        {
+            let next = self.transaction_requests.pop_front();
+            self.transaction_taken += usize::from(next.is_some());
+            Ok(next)
+        } else {
+            Ok(None)
+        }
+    }
+    fn commit_practice_transaction_reply(
+        &mut self,
+        reply: &PracticeTransactionReply,
+    ) -> NativeGameplayResult<()> {
+        self.transaction_replies.push(reply.clone());
         Ok(())
     }
     fn prepare_practice_presentation(
@@ -367,6 +409,28 @@ impl Fixture {
         rate: Rate,
         end_song: Timestamp,
     ) -> Self {
+        Self::new_mode(ids, repeat, scrub, rate, end_song, false, true)
+    }
+    fn new_runtime(ids: &[u32], record: bool) -> Self {
+        Self::new_mode(
+            ids,
+            false,
+            false,
+            Rate::new(3, 2).unwrap(),
+            Timestamp::from_nanos(100_000_000),
+            true,
+            record,
+        )
+    }
+    fn new_mode(
+        ids: &[u32],
+        repeat: bool,
+        scrub: bool,
+        rate: Rate,
+        end_song: Timestamp,
+        runtime_rates: bool,
+        record: bool,
+    ) -> Self {
         let speed = ReplaySpeed::new(rate).unwrap();
         let setup =
             LiveSpeedSetup::new(Timestamp::ZERO, Duration::ZERO, speed, Some(end_song)).unwrap();
@@ -379,14 +443,27 @@ impl Fixture {
             crate::play_policy::ResolvedPlayPolicy::builtin(10_000_000, 10_000_000, 0).unwrap();
         let format = AudioFormat::new(1000, 1).unwrap();
         let bank = SampleBank::new(format, PcmLimits::new(8, 256, 1).unwrap()).unwrap();
-        let program = PreparedPracticeProgram::new_with_speed(
-            &bank,
-            vec![],
-            PracticeLimits::new(8, 1, 64, 8, 256).unwrap(),
-            rate,
-            Duration::ZERO,
-            false,
-        )
+        let program_limits = PracticeLimits::new(8, 1, 64, 8, 256).unwrap();
+        let program = if runtime_rates {
+            PreparedPracticeProgram::new_with_runtime_rates(
+                &bank,
+                vec![],
+                program_limits,
+                rate,
+                Duration::ZERO,
+                false,
+                14102,
+            )
+        } else {
+            PreparedPracticeProgram::new_with_speed(
+                &bank,
+                vec![],
+                program_limits,
+                rate,
+                Duration::ZERO,
+                false,
+            )
+        }
         .unwrap();
         let (controller, endpoint) = practice_queue(&program).unwrap();
         let (producer, consumer) = command_queue(256).unwrap();
@@ -406,22 +483,28 @@ impl Fixture {
         mixer.enable_source_playback_history(128).unwrap();
         let source_basis = mixer.output_frame_basis();
         let basis = source_basis;
-        let report = mixer.render(&mut [0.0; 8]).unwrap();
+        let initial_report = if runtime_rates {
+            None
+        } else {
+            Some(mixer.render(&mut [0.0; 8]).unwrap())
+        };
         let phase = OutputPhaseBasis::new(ClockDomainId(3), 91, 1, 0, 1000).unwrap();
         let mut members = Vec::new();
+        let mut runtime_headers = Vec::new();
         let mut configs = Vec::new();
         let mut states = Vec::new();
         let mut transport = None;
         for &id in ids {
-            let launch = SessionLaunch::new(vec![
+            let mut args = vec![
                 "--chart".into(),
                 "practice.bms".into(),
                 "--speed".into(),
                 format!("{}/{}", rate.numerator(), rate.denominator()),
-                "--record-replay".into(),
-                format!("player-{id}.bkr"),
-            ])
-            .unwrap();
+            ];
+            if record {
+                args.extend(["--record-replay".into(), format!("player-{id}.bkr")]);
+            }
+            let launch = SessionLaunch::new(args).unwrap();
             let attempt = prepare_attempt_with_speed(
                 &original,
                 &policy,
@@ -431,12 +514,44 @@ impl Fixture {
                     end: Some(end_song),
                     domain: ClockDomainId(3),
                     chart_seed: 0,
-                    capture_limits: Some(limits()),
+                    capture_limits: record.then_some(limits()),
                 },
                 speed,
             )
             .unwrap();
-            transport = Some(attempt.transport_at_output_phase(phase, at(3, 0)).unwrap());
+            transport = Some(if runtime_rates {
+                attempt
+                    .transport_at_runtime_output_phase(phase, at(3, 0))
+                    .unwrap()
+            } else {
+                attempt.transport_at_output_phase(phase, at(3, 0)).unwrap()
+            });
+            if runtime_rates {
+                let header = if let Some(capture) = &attempt.capture {
+                    capture.header().clone()
+                } else {
+                    LiveReplayCapture::new_with_policy_and_speed(
+                        &attempt.judge,
+                        ClockDomainId(3),
+                        limits(),
+                        Timestamp::ZERO,
+                        0,
+                        Some(end_song),
+                        beatkernel_bms::BmsInputMode::ButtonOnly,
+                        None,
+                        &policy,
+                        speed,
+                    )
+                    .unwrap()
+                    .header()
+                    .clone()
+                };
+                runtime_headers.push(PracticeRuntimeHeader {
+                    player: PlayerId(id),
+                    header,
+                    limits: limits(),
+                });
+            }
             configs.push(MemberConfig {
                 player: PlayerId(id),
                 device: Some(DeviceId(u64::from(id))),
@@ -464,21 +579,36 @@ impl Fixture {
                     .unwrap(),
                 launch,
                 chart_seed: 0,
-                capture_limits: Some(limits()),
+                capture_limits: record.then_some(limits()),
             });
         }
-        let practice = PracticePlayback::new_with_speed(
-            controller,
-            original.clone(),
-            members,
-            region,
-            Timestamp::from_nanos(100_000_000),
-            source_basis,
-            2,
-            Some(end_song),
-            setup,
-        )
+        let practice = if runtime_rates {
+            PracticePlayback::new_with_runtime_rates(
+                controller,
+                original.clone(),
+                members,
+                region,
+                Timestamp::from_nanos(100_000_000),
+                source_basis,
+                Some(end_song),
+                setup,
+                runtime_headers,
+            )
+        } else {
+            PracticePlayback::new_with_speed(
+                controller,
+                original.clone(),
+                members,
+                region,
+                Timestamp::from_nanos(100_000_000),
+                source_basis,
+                2,
+                Some(end_song),
+                setup,
+            )
+        }
         .unwrap();
+        let report = initial_report.unwrap_or_else(|| mixer.render(&mut [0.0; 8]).unwrap());
         let mut group = RuntimeGroup::new(
             ClockDomainId(3),
             ClockDomainId(2),
@@ -584,6 +714,11 @@ impl Fixture {
                 reports: vec![],
                 replies: vec![],
                 ends: vec![],
+                transaction_capabilities: vec![],
+                transaction_requests: VecDeque::new(),
+                transaction_replies: vec![],
+                transaction_taken: 0,
+                transaction_at: 14,
             },
             practice,
             recordings: Recordings::default(),
@@ -837,4 +972,224 @@ fn source_visual_refusal_preserves_applied_whole_cohort_phase_identity() {
         Some(AudioAuthorityCoordinateBasis::SourceFrame(f.device.basis))
     );
     assert!(!f.group.poisoned());
+}
+
+fn request_runtime_rate(f: &mut Fixture, selected: Rate) {
+    f.host
+        .transaction_requests
+        .push_back(PracticeTransactionRequest::Rate {
+            id: 14102,
+            generation: f.practice.generation(),
+            expected: f.practice.rate_state().unwrap(),
+            requested_rate: selected,
+        });
+}
+fn applied_runtime_rate(f: &Fixture) -> PracticeRateEvent {
+    match &f.host.transaction_replies[..] {
+        [
+            PracticeTransactionReply::Rate {
+                id: 14102,
+                generation: 1,
+                result: Ok(event),
+            },
+        ] => *event,
+        replies => panic!("one actual cohort rate reply required: {replies:?}"),
+    }
+}
+#[test]
+fn runtime_source_cohort_shares_one_native_cut_and_effective_headers_with_or_without_capture() {
+    for ids in [&[7, 29][..], &[7, 29, 101, 409][..]] {
+        for record in [true, false] {
+            let mut f = Fixture::new_runtime(ids, record);
+            f.device.close_at = 27;
+            let initial = f.practice.current_speed();
+            let selected = Rate::new(1, 2).unwrap();
+            request_runtime_rate(&mut f, selected);
+            assert!(f.run().unwrap().is_none());
+            let event = applied_runtime_rate(&f);
+            assert_eq!(event.outcome, PracticeRateOutcome::Applied);
+            assert_eq!(event.previous_rate, initial.rate());
+            assert_eq!(event.applied_rate, selected);
+            assert_eq!(f.practice.generation(), 1);
+            assert_eq!(f.group.transport().output_phase_basis(), Some(f.phase));
+            assert_eq!(f.group.transport().anchor().rate, selected);
+            assert_eq!(f.group.audio_scope(), CommandScope(1));
+            assert!(
+                f.host.identities.is_empty(),
+                "no member score/held key reset"
+            );
+            assert!(f.host.commits.is_empty());
+            assert!(f.recordings.0.is_empty());
+            assert_eq!(f.device.scalar_calls, 0);
+            assert!(!f.group.poisoned());
+            let mut common_cut = None;
+            for state in &f.states {
+                let header = f.practice.effective_header(state.player).unwrap();
+                let (_, schedule) =
+                    crate::replay_speed_policy::split_schedule(&header.options).unwrap();
+                assert_eq!(schedule.initial_speed(), initial);
+                assert_eq!(schedule.current_speed().rate(), selected);
+                assert_eq!(schedule.cuts().len(), 1);
+                let cut = schedule.cuts()[0];
+                if let Some(previous) = common_cut {
+                    assert_eq!(cut, previous);
+                } else {
+                    common_cut = Some(cut);
+                }
+                assert!(
+                    state.score.hits + state.score.misses > 0,
+                    "existing judged stages survive the rate cut"
+                );
+                if record {
+                    let capture = state.capture.as_ref().unwrap();
+                    assert_eq!(capture.header(), header);
+                    let inputs: Vec<_> = capture
+                        .records()
+                        .iter()
+                        .filter_map(|r| match &r.operation {
+                            beatkernel::replay::ReplayOperation::Input(input) => Some(input),
+                            _ => None,
+                        })
+                        .collect();
+                    assert!(!inputs.is_empty());
+                    assert!(
+                        inputs.iter().all(|input| input.physical.meta().source
+                            == DeviceId(u64::from(state.player.0)))
+                    );
+                    let replay = crate::replay_playback::reconstruct_section(
+                        &f.original,
+                        beatkernel::replay::codec::ReplayFile::new(
+                            header.clone(),
+                            capture.records().to_vec(),
+                        ),
+                        limits(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        replay.engine().stable_hash().unwrap(),
+                        f.group
+                            .member_judge(state.player)
+                            .unwrap()
+                            .stable_hash()
+                            .unwrap()
+                    );
+                } else {
+                    assert!(state.capture.is_none());
+                }
+            }
+        }
+    }
+}
+#[test]
+fn runtime_source_cohort_noop_and_stale_revision_preserve_every_member_header() {
+    for stale in [false, true] {
+        let mut f = Fixture::new_runtime(&[7, 29, 101, 409], true);
+        f.device.close_at = 27;
+        let initial = f.practice.current_speed();
+        let before: Vec<_> = f
+            .states
+            .iter()
+            .map(|s| (s.player, s.capture.as_ref().unwrap().header().clone()))
+            .collect();
+        request_runtime_rate(
+            &mut f,
+            if stale {
+                Rate::new(1, 2).unwrap()
+            } else {
+                initial.rate()
+            },
+        );
+        if stale {
+            if let Some(PracticeTransactionRequest::Rate { expected, .. }) =
+                f.host.transaction_requests.front_mut()
+            {
+                expected.revision = 99;
+            }
+        }
+        f.run().unwrap();
+        assert_eq!(f.practice.current_speed(), initial);
+        assert_eq!(f.practice.generation(), 1);
+        assert_eq!(f.group.transport().output_phase_basis(), Some(f.phase));
+        assert!(f.recordings.0.is_empty());
+        assert!(f.host.identities.is_empty());
+        assert_eq!(f.host.transaction_replies.len(), 1);
+        match &f.host.transaction_replies[0] {
+            PracticeTransactionReply::Rate { result: Err(_), .. } if stale => {}
+            PracticeTransactionReply::Rate {
+                result: Ok(event), ..
+            } if !stale => assert_eq!(event.outcome, PracticeRateOutcome::Noop),
+            reply => panic!("unexpected shared noop/refusal: {reply:?}"),
+        }
+        for (id, header) in before {
+            assert_eq!(f.practice.effective_header(id), Some(&header));
+            assert_eq!(
+                f.states
+                    .iter()
+                    .find(|s| s.player == id)
+                    .unwrap()
+                    .capture
+                    .as_ref()
+                    .unwrap()
+                    .header(),
+                &header
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_source_cohort_f5_compound_restart_archives_rate_lineage_and_restores_original_speed_once()
+ {
+    let mut f = Fixture::new_runtime(&[7, 29], true);
+    f.device.close_at = 27;
+    let initial = f.practice.current_speed().rate();
+    let changed = Rate::new(1, 2).unwrap();
+    request_runtime_rate(&mut f, changed);
+    f.host
+        .transaction_requests
+        .push_back(PracticeTransactionRequest::RestartOriginal {
+            id: 14103,
+            generation: 1,
+            expected: crate::practice_control::PracticeRateState {
+                revision: 1,
+                rate: changed,
+            },
+        });
+    f.run().unwrap();
+    assert_eq!(f.host.transaction_replies.len(), 2);
+    assert!(matches!(
+        &f.host.transaction_replies[0],
+        PracticeTransactionReply::Rate {
+            result: Ok(PracticeRateEvent {
+                outcome: PracticeRateOutcome::Applied,
+                ..
+            }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &f.host.transaction_replies[1],
+        PracticeTransactionReply::RestartOriginal {
+            id: 14103,
+            result: Ok(_),
+            ..
+        }
+    ));
+    assert_eq!(f.practice.generation(), 2);
+    assert_eq!(f.practice.current_speed().rate(), initial);
+    assert_eq!(f.group.transport().anchor().rate, initial);
+    assert_eq!(f.host.identities, [2]);
+    assert_eq!(f.host.commits, [2]);
+    assert_eq!(f.recordings.0.len(), 2);
+    for (player, archived) in &f.recordings.0 {
+        let (_, old_schedule) =
+            crate::replay_speed_policy::split_schedule(&archived.header().options).unwrap();
+        assert_eq!(old_schedule.cuts().len(), 1);
+        assert_eq!(old_schedule.current_speed().rate(), changed);
+        let current = f.practice.effective_header(*player).unwrap();
+        let (_, fresh_schedule) =
+            crate::replay_speed_policy::split_schedule(&current.options).unwrap();
+        assert!(fresh_schedule.cuts().is_empty());
+        assert_eq!(fresh_schedule.current_speed().rate(), initial);
+    }
 }

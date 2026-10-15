@@ -35,7 +35,7 @@ use crate::{
     native_end::NativeEnd,
     native_gameplay::{
         AudioGameplayConfig, CoordinateGameplayConfig, NativeGameplayConfig, NativeGameplayResult,
-        MAX_PENDING_INPUT_EVENTS,
+        NativePracticeBoundary, MAX_PENDING_INPUT_EVENTS,
     },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
@@ -871,7 +871,11 @@ fn run_cohort_audio_practice_inner<
     );
     // The outer native finisher owns the last capture, completed result
     // sidecars and replay-save publication. Only retired attempts archive here.
-    let revoke = host.advertise_practice(None);
+    let revoke = if practice.rate_state().is_some() {
+        host.advertise_practice_transactions(None)
+    } else {
+        host.advertise_practice(None)
+    };
     match result {
         Err(error) => Err(error),
         Ok(value) => {
@@ -894,7 +898,7 @@ fn commit_cohort_practice<
     config: &mut NativeGameplayConfig,
     owner: &mut crate::practice_playback::PracticePlayback,
     recording: &mut R,
-    boundary: crate::native_audio_presentation::PreparedPracticeBoundary,
+    boundary: NativePracticeBoundary,
     now: ClockPoint,
     stop_evidence: &mut OwnedStopEvidence,
     host: &mut H,
@@ -906,7 +910,11 @@ fn commit_cohort_practice<
     };
     // Keep the exact native cut and its original phase owner before preparing
     // or retiring any attempt. A missing compound packet is still a wait.
-    let coordinate_query = if boundary.receipt().kind == PracticeBoundaryKind::Started {
+    let coordinate_query = if matches!(boundary, NativePracticeBoundary::RuntimeRate(_))
+        || boundary
+            .receipt()
+            .is_some_and(|receipt| receipt.kind == PracticeBoundaryKind::Started)
+    {
         None
     } else {
         boundary.coordinate_query()?
@@ -932,7 +940,39 @@ fn commit_cohort_practice<
     } else {
         None
     };
-    let mut prepared = owner.prepare_boundary(&boundary, host)?;
+    if let NativePracticeBoundary::RuntimeRate(cut) = boundary {
+        let phase = cut.phase();
+        let audio_at = schedule(device, session, *config, render_evidence, stop_evidence)?;
+        let result = session.group.advance_to_output_phase(
+            boundary.output(),
+            &ExplicitDomains,
+            audio_at,
+            phase,
+        );
+        observe_audio_group_result(result, session, |_, _, _, _| {}, stop_evidence, host)?;
+        let mut captures = Vec::new();
+        captures.try_reserve_exact(session.states.len())?;
+        captures.extend(
+            session
+                .states
+                .iter_mut()
+                .map(|state| (state.player, &mut state.capture)),
+        );
+        let prepared = owner.prepare_rate_event_at_cut(
+            &cut,
+            session.group.transport_mut(),
+            &mut captures,
+        )?;
+        boundary.commit(
+            session.discipline.audio_mut().expect("audio timing"),
+            now,
+            session.merger,
+        )?;
+        let applied = owner.apply_rate_event(prepared)?;
+        owner.publish_rate_event(&applied, host)?;
+        return Ok(true);
+    }
+    let mut prepared = boundary.prepare(owner, host)?;
     if matches!(
         prepared.receipt.kind,
         PracticeBoundaryKind::Requested | PracticeBoundaryKind::Looped
@@ -996,7 +1036,11 @@ fn commit_cohort_practice<
                 .first()
                 .expect("validated practice roster")
                 .1;
-            let transport = first.transport_at_output_phase(basis, boundary.output())?;
+            let transport = if owner.rate_state().is_some() {
+                first.transport_at_runtime_output_phase(basis, boundary.output())?
+            } else {
+                first.transport_at_output_phase(basis, boundary.output())?
+            };
             let fresh_phase = mapping.phase(
                 session.discipline.audio().expect("audio timing"),
                 identity,
@@ -1005,7 +1049,7 @@ fn commit_cohort_practice<
                 boundary.output(),
             )?;
             transport.position_at_output_phase(fresh_phase)?;
-            let selected = session.group.transport().anchor().rate;
+            let selected = first.speed().rate();
             for (_, attempt) in &prepared.attempts {
                 if attempt.speed().rate() != selected
                     || attempt.config.domain != basis.domain()
@@ -1016,7 +1060,14 @@ fn commit_cohort_practice<
                         "practice cohort differs from its selected phase and section".into(),
                     );
                 }
-                attempt.transport_at_output_phase(basis, boundary.output())?;
+                if owner.rate_state().is_some() {
+                    attempt.transport_at_runtime_output_phase(basis, boundary.output())?;
+                } else {
+                    if selected != session.group.transport().anchor().rate {
+                        return Err("practice cohort differs from its selected phase".into());
+                    }
+                    attempt.transport_at_output_phase(basis, boundary.output())?;
+                }
             }
             transport
         } else {
@@ -1090,7 +1141,15 @@ fn commit_cohort_practice<
                 recording.archive(state.player, &path, capture)?;
             }
         }
-        if coordinate.is_some() {
+        if boundary.restarts_original() {
+            session.group.replace_practice_states_with_runtime_restart(
+                judges,
+                transport,
+                song_end,
+                CommandScope(prepared.receipt.generation),
+                owner.speed().rate(),
+            )?;
+        } else if coordinate.is_some() {
             session.group.replace_practice_states_with_output_phase(
                 judges,
                 transport,
@@ -1132,11 +1191,11 @@ fn commit_cohort_practice<
         };
         observe_audio_group_result(result, session, |_, _, _, _| {}, stop_evidence, host)?;
     }
-    session
-        .discipline
-        .audio_mut()
-        .expect("audio timing")
-        .commit_practice_boundary(boundary, now, session.merger)?;
+    boundary.commit(
+        session.discipline.audio_mut().expect("audio timing"),
+        now,
+        session.merger,
+    )?;
     let applied = owner.apply_boundary(&mut prepared)?;
     config.end_song = owner.section_end();
     if let Some(mut presentation) = prepared.presentation.take() {
@@ -1398,7 +1457,11 @@ fn run_cohort_timed<
             .group
             .set_audio_scope(beatkernel::audio::CommandScope(owner.generation()));
         *session.end = None;
-        owner.advertise(host_port)?;
+        if owner.rate_state().is_some() {
+            owner.advertise_transactions(host_port)?;
+        } else {
+            owner.advertise(host_port)?;
+        }
     }
     let mut coordinate_controls = if let Some(identity) =
         source_history.filter(|_| config.pause_supported || session.end.is_some())
@@ -1602,7 +1665,7 @@ fn run_cohort_timed<
                 let (queued_source, target) = owner.queued_history_retention_pins();
                 queued_target = target;
                 source_minimum = queued_source;
-                owner.peek_receipt()?;
+                NativePracticeBoundary::pending(owner)?;
                 if let Some((held_source, target)) = owner.history_retention_pins() {
                     held_target = Some(target);
                     source_minimum =
@@ -1897,7 +1960,33 @@ fn run_cohort_timed<
         // A rendered receipt fences the old attempt immediately. Qualification
         // uses native presentation before any event can cross the original cut.
         let practice_boundary = if let Some((owner, _)) = practice.as_mut() {
-            if session.pause.phase() == PausePhase::Running {
+            if owner.rate_state().is_some() {
+                let fixed_competition = session
+                    .network
+                    .as_ref()
+                    .is_some_and(|competition| !competition.policy_agnostic())
+                    || session.states.iter().any(|state| {
+                        state
+                            .competition
+                            .as_ref()
+                            .is_some_and(|competition| !competition.policy_agnostic())
+                    });
+                let mut captures = Vec::new();
+                captures.try_reserve_exact(session.states.len())?;
+                captures.extend(
+                    session
+                        .states
+                        .iter_mut()
+                        .map(|state| (state.player, &mut state.capture)),
+                );
+                owner.service_transaction(
+                    host_port,
+                    session.pause.phase() == PausePhase::Running,
+                    session.group.transport_mut(),
+                    &mut captures,
+                    fixed_competition,
+                )?;
+            } else if session.pause.phase() == PausePhase::Running {
                 if let Some(report) = rendered {
                     owner.service_request(
                         host_port,
@@ -1908,9 +1997,15 @@ fn run_cohort_timed<
                     )?;
                 }
             }
-            let held = owner.peek_receipt()?.is_some();
-            let qualified =
-                owner.qualify(session.discipline.audio().expect("audio timing"), now)?;
+            let held = NativePracticeBoundary::pending(owner)?;
+            let qualified = NativePracticeBoundary::qualify(
+                owner,
+                device,
+                session.discipline.audio().expect("audio timing"),
+                session.discipline.source_playback_identity(),
+                session.group.transport().output_phase_basis(),
+                now,
+            )?;
             if (held || (owner.ended() && !owner.terminal_ready())) && qualified.is_none() {
                 control.wait(WallDuration::from_millis(1))?;
                 continue;
@@ -1921,6 +2016,9 @@ fn run_cohort_timed<
         };
         if T::AUDIO {
             let practice_end = practice.as_ref().and_then(|_| config.end_song);
+            let practice_source_cut = practice.as_ref().and_then(|(owner, _)| {
+                NativePracticeBoundary::unprojected_source_cut(owner)
+            });
             service_audio_cohort(
                 device,
                 &mut session,
@@ -1939,15 +2037,16 @@ fn run_cohort_timed<
                 &mut stop_evidence,
                 host_port,
                 practice_boundary.map(|boundary| boundary.host()),
+                practice_source_cut,
                 practice_end,
                 &mut render_evidence,
             )?;
             if let Some(boundary) = practice_boundary {
-                if !session
-                    .discipline
-                    .audio()
-                    .expect("audio timing")
-                    .practice_boundary_ready(&boundary, now, session.merger)?
+                if !boundary.ready(
+                    session.discipline.audio().expect("audio timing"),
+                    now,
+                    session.merger,
+                )?
                 {
                     control.wait(WallDuration::from_millis(1))?;
                     continue;
@@ -1969,15 +2068,17 @@ fn run_cohort_timed<
                     continue;
                 }
                 committed = Some(boundary.host());
-                if matches!(
-                    boundary.receipt().kind,
-                    beatkernel::audio::PracticeBoundaryKind::Requested
-                        | beatkernel::audio::PracticeBoundaryKind::Looped
-                ) {
-                    let elapsed = i128::from(boundary.receipt().playback_frame) * 1_000_000_000
+                if let Some(receipt) = boundary.receipt().filter(|receipt| {
+                    matches!(
+                        receipt.kind,
+                        beatkernel::audio::PracticeBoundaryKind::Requested
+                            | beatkernel::audio::PracticeBoundaryKind::Looped
+                    )
+                }) {
+                    let elapsed = i128::from(receipt.playback_frame) * 1_000_000_000
                         / i128::from(config.sample_rate);
                     pause_song_origin = Timestamp::from_nanos(i64::try_from(
-                        i128::from(boundary.receipt().applied_song_time.as_nanos()) - elapsed,
+                        i128::from(receipt.applied_song_time.as_nanos()) - elapsed,
                     )?);
                     keyboard = PauseKeyboard::new();
                     paused_boundary = None;
@@ -3343,6 +3444,7 @@ fn service_audio_cohort<
     stops: &mut OwnedStopEvidence,
     host: &mut H,
     practice_cut: Option<ClockPoint>,
+    practice_source_cut: Option<u64>,
     practice_end: Option<Timestamp>,
     render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
@@ -3508,6 +3610,11 @@ fn service_audio_cohort<
                     .ok_or("coordinate cohort lost output-phase binding")?,
                 prepared.output(),
             )?;
+            if let Some(cut) = practice_source_cut {
+                if !mapping.compare_physical_source_frame(cut)?.is_lt() {
+                    break;
+                }
+            }
             if let Some(end) = practice_end.filter(|_| practice_cut.is_none()) {
                 if session.group.transport().position_at_output_phase(phase)? >= end {
                     break;
@@ -3885,6 +3992,11 @@ fn service_audio_cohort<
                 .ok_or("coordinate cohort lost output-phase binding")?,
             frontier.output(),
         )?;
+        if let Some(cut) = practice_source_cut {
+            if !mapping.compare_physical_source_frame(cut)?.is_lt() {
+                return Ok(());
+            }
+        }
         if let Some(output) = frontier.advance() {
             if let Some(end) = practice_end {
                 if session.group.transport().position_at_output_phase(phase)? >= end {

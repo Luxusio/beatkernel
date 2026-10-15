@@ -9,8 +9,8 @@ use crate::{
 };
 use beatkernel::{
     audio::{
-        ConvertedPhaseSpan, InterpolatedTargetTime, OutputFrameBasis, SourcePlaybackSpan,
-        TargetFrameBasis, TargetTime,
+        ConvertedPhaseSpan, InterpolatedTargetTime, OutputFrameBasis, PracticeRateEvent,
+        SourcePlaybackSpan, SourcePlaybackState, TargetFrameBasis, TargetTime,
     },
     time::ClockPoint,
     transport::{OutputPhaseBasis, OutputPhasePoint},
@@ -173,6 +173,147 @@ impl NativePlaybackMapping {
     }
     pub const fn query(&self) -> InterpolatedTargetTime {
         self.query
+    }
+
+    /// Orders the stored exact physical query against a Source cut. This can
+    /// restrict progress but does not qualify presentation or an input prefix.
+    pub(crate) fn compare_physical_source_frame(
+        &self,
+        frame: u64,
+    ) -> Result<core::cmp::Ordering, NativePlaybackPhaseError> {
+        match self.mapping {
+            Mapping::Source { .. } => self
+                .query
+                .compare_source_time_frame(frame, self.identity.hz()),
+            Mapping::Converted { facts, .. } => facts
+                .phase
+                .compare_source_frame_at_interpolated_time(self.query, facts.segment_end, frame),
+        }
+        .map_err(|_| NativePlaybackPhaseError::Range)
+    }
+
+    /// Derives an exact integer Source cut without changing its first crossing
+    /// Target sample. The returned coordinates are arithmetic, not admission.
+    pub(crate) fn runtime_rate_cut(
+        &self,
+        presentation: &NativeAudioPresentation,
+        expected_identity: SourcePlaybackIdentity,
+        attempt: OutputPhaseBasis,
+        projected: (&InterpolatedTargetTime, ClockPoint),
+        event: PracticeRateEvent,
+    ) -> Result<(InterpolatedTargetTime, OutputPhasePoint), NativePlaybackPhaseError> {
+        use NativePlaybackPhaseError as Error;
+        // Revalidate the projected correspondence and its original logical
+        // point before deriving any earlier mathematical coordinate.
+        self.phase(
+            presentation,
+            expected_identity,
+            projected.0,
+            attempt,
+            projected.1,
+        )?;
+        if event.generation != attempt.generation()
+            || event.physical_frame < self.identity.initial_physical()
+            || event.playback_frame < self.identity.initial_playback()
+            || event.playback_frame < attempt.active_origin_frame()
+        {
+            return Err(Error::Identity);
+        }
+        let (query, origin, playback) = match self.mapping {
+            Mapping::Source { basis, facts } => {
+                if event.physical_frame < basis.start_physical_frame()
+                    || event.physical_frame > facts.submitted_source_end
+                    || event.physical_frame > facts.pulled_source_end
+                {
+                    return Err(Error::Range);
+                }
+                let time = TargetTime::from_frames(event.physical_frame, self.identity.hz())
+                    .map_err(|_| Error::Arithmetic)?;
+                let query = InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)
+                    .map_err(|_| Error::Arithmetic)?;
+                (query, basis.origin(), facts.playback)
+            }
+            Mapping::Converted { basis, facts } => {
+                let [hz, frame, numerator, denominator, seconds, n, d, state] =
+                    facts.phase.to_words();
+                if state != 0 || event.physical_frame > facts.pulled_source_end {
+                    return Err(Error::Range);
+                }
+                let delta = event.physical_frame.checked_sub(frame).ok_or(Error::Range)?;
+                let base = TargetTime::new(seconds, n, d).map_err(|_| Error::Arithmetic)?;
+                // base + delta/hz - numerator/(denominator*hz), retaining
+                // both fractions without rounding to a target sample or ns.
+                // Split a positive delta before the signed fraction so even
+                // delta+numerator outside u64 needs no narrowing or extra term.
+                let query = if delta == 0 {
+                    InterpolatedTargetTime::new(
+                        base,
+                        0,
+                        1,
+                        hz,
+                        -i128::from(numerator),
+                        denominator,
+                    )
+                } else {
+                    InterpolatedTargetTime::new(
+                        base,
+                        delta - 1,
+                        delta,
+                        hz,
+                        i128::from(denominator - numerator),
+                        denominator,
+                    )
+                }
+                .map_err(|_| Error::Arithmetic)?;
+                if query.compare_target_time(basis.start_time()).is_lt()
+                    || query.compare_target_time(facts.submitted_target_end).is_gt()
+                    || query.compare_target_time(facts.generated_target_end).is_gt()
+                    || !facts
+                        .phase
+                        .compare_source_frame_at_interpolated_time(
+                            query,
+                            facts.segment_end,
+                            event.physical_frame,
+                        )
+                        .map_err(|_| Error::Range)?
+                        .is_eq()
+                {
+                    return Err(Error::Range);
+                }
+                (query, basis.origin(), facts.playback)
+            }
+        };
+        if playback.state() != SourcePlaybackState::Running
+            || event.physical_frame < playback.physical_start()
+            || playback
+                .physical_end()
+                .is_some_and(|end| event.physical_frame >= end)
+            || query.compare_interpolated_time(self.query).is_gt()
+        {
+            return Err(Error::Range);
+        }
+        let playback_frame = playback
+            .playback_start()
+            .checked_add(event.physical_frame - playback.physical_start())
+            .ok_or(Error::Arithmetic)?;
+        if playback_frame != event.playback_frame {
+            return Err(Error::Phase);
+        }
+        let raw = query.point(origin).map_err(|_| Error::Arithmetic)?;
+        let logical = presentation
+            .authority()
+            .epoch()
+            .logical_output(raw)
+            .map_err(|_| Error::Arithmetic)?;
+        let cut_mapping = Self { query, ..*self };
+        let point = cut_mapping.phase(presentation, expected_identity, &query, attempt, logical)?;
+        let elapsed = i128::from(event.playback_frame - attempt.active_origin_frame())
+            * 1_000_000_000
+            / i128::from(self.identity.hz());
+        if point.elapsed_nanos() != elapsed || elapsed != event.active_elapsed_nanos {
+            return Err(Error::Phase);
+        }
+        Ok((query, point))
     }
 
     /// Validates original chronology separately from the once-floored active duration.

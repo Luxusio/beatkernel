@@ -320,7 +320,7 @@ pub fn prepare_retained_audio(
     config: NativeAudioConfig,
     practice: NativePracticeAudioConfig,
 ) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
-    prepare_retained_audio_inner(bank, original_commands, config, practice, None)
+    prepare_retained_audio_inner(bank, original_commands, config, practice, None, None)
 }
 
 /// Opt-in fixed-speed retained preparation in original song coordinates.
@@ -334,6 +334,41 @@ pub fn prepare_retained_audio_with_speed(
     speed: ReplaySpeed,
     completion_end: Option<Timestamp>,
 ) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
+    let setup = retained_speed_setup(config, practice, speed, completion_end)?;
+    prepare_retained_audio_inner(bank, original_commands, config, practice, Some(setup), None)
+}
+
+/// Retains original PCM and opts this immutable program into exact runtime rates.
+/// The caller supplies a nonzero identity for this program's cold custody.
+pub fn prepare_retained_audio_with_runtime_rates(
+    bank: SampleBank,
+    original_commands: Vec<AudioCommand>,
+    config: NativeAudioConfig,
+    practice: NativePracticeAudioConfig,
+    speed: ReplaySpeed,
+    completion_end: Option<Timestamp>,
+    program_id: u64,
+) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
+    if program_id == 0 {
+        return Err("retained runtime program identity must be nonzero".into());
+    }
+    let setup = retained_speed_setup(config, practice, speed, completion_end)?;
+    prepare_retained_audio_inner(
+        bank,
+        original_commands,
+        config,
+        practice,
+        Some(setup),
+        Some(program_id),
+    )
+}
+
+fn retained_speed_setup(
+    config: NativeAudioConfig,
+    practice: NativePracticeAudioConfig,
+    speed: ReplaySpeed,
+    completion_end: Option<Timestamp>,
+) -> NativeGameplayResult<LiveSpeedSetup> {
     let setup = LiveSpeedSetup::new(config.start, config.preroll, speed, completion_end)?;
     if practice.region.start != setup.start()
         || match completion_end {
@@ -345,7 +380,7 @@ pub fn prepare_retained_audio_with_speed(
     {
         return Err("retained speed region differs from original start/completion intent".into());
     }
-    prepare_retained_audio_inner(bank, original_commands, config, practice, Some(setup))
+    Ok(setup)
 }
 
 fn prepare_retained_audio_inner(
@@ -354,6 +389,7 @@ fn prepare_retained_audio_inner(
     config: NativeAudioConfig,
     practice: NativePracticeAudioConfig,
     setup: Option<LiveSpeedSetup>,
+    runtime_program_id: Option<u64>,
 ) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
     use beatkernel::audio::{practice_queue, PracticeCue, PreparedPracticeProgram};
     if config.playback_end_frame.is_some() {
@@ -412,8 +448,17 @@ fn prepare_retained_audio_inner(
             gain,
         });
     }
-    let program = match setup {
-        Some(setup) => PreparedPracticeProgram::new_with_speed(
+    let program = match (setup, runtime_program_id) {
+        (Some(setup), Some(program_id)) => PreparedPracticeProgram::new_with_runtime_rates(
+            &bank,
+            cues,
+            practice.limits,
+            setup.speed().rate(),
+            setup.preroll(),
+            setup.end().is_none(),
+            program_id,
+        )?,
+        (Some(setup), None) => PreparedPracticeProgram::new_with_speed(
             &bank,
             cues,
             practice.limits,
@@ -421,7 +466,7 @@ fn prepare_retained_audio_inner(
             setup.preroll(),
             setup.end().is_none(),
         )?,
-        None => PreparedPracticeProgram::new(&bank, cues, practice.limits)?,
+        (None, _) => PreparedPracticeProgram::new(&bank, cues, practice.limits)?,
     };
     program.validate_region(practice.region)?;
     let (controller, endpoint) = practice_queue(&program)?;

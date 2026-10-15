@@ -428,8 +428,36 @@ pub(super) fn run(
                 8,
                 256,
             )?;
+            let mut headers = Vec::new();
+            headers.try_reserve_exact(members.len())?;
+            let initial_source = initial_completion_source
+                .as_ref()
+                .ok_or("retained cohort selected source missing")?;
+            for member in &members {
+                let config = configs
+                    .iter()
+                    .find(|config| config.player == member.player)
+                    .ok_or("retained cohort runtime header player missing")?;
+                let limits = member.capture_limits
+                    .unwrap_or(beatkernel_bms_runtime::competition_live::replay_limits()?);
+                let header = beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
+                    initial_source,
+                    &config.judge,
+                    &member.policy,
+                    LOGICAL,
+                    options.live_speed.start(),
+                    member.chart_seed,
+                    options.live_speed.end(),
+                    options.live_speed.speed(),
+                )?;
+                headers.push(beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
+                    player: member.player,
+                    header,
+                    limits,
+                });
+            }
             let prepared_audio =
-                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_speed(
+                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_runtime_rates(
                     prepared.bank,
                     prepared.bgm_commands,
                     NativeAudioConfig {
@@ -442,18 +470,19 @@ pub(super) fn run(
                     },
                     options.live_speed.speed(),
                     options.live_speed.end(),
+                    beatkernel_bms_runtime::native_audio_startup::next_runtime_program_id()?,
                 )?;
             let practice =
-                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_speed(
+                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_runtime_rates(
                     prepared_audio.practice,
                     original,
                     members,
                     region,
                     max_target.unwrap(),
                     prepared_audio.audio.mixer.output_frame_basis(),
-                    0,
                     options.end_ns.map(Timestamp::from_nanos),
                     options.live_speed,
+                    headers,
                 )?;
             (prepared_audio.audio, Some(practice))
         } else {
@@ -580,7 +609,7 @@ pub(super) fn run(
                 )? else { return Ok(None); };
                 let playback_origin = started.query.point(start_basis.origin())?;
                 let logical_origin = presentation.authority().epoch().logical_output(playback_origin)?;
-                let transport = beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_transport(
+                let transport = beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_runtime_transport(
                     creation_epoch, identity, logical_origin, options.live_speed,
                 )?;
                 println!("shared exact Source gate={:?}; HOST acquisition={:?}; physical accuracy Unknown", started.query, started.host_origin);

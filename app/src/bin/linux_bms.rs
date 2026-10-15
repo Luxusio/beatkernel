@@ -475,7 +475,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("--speed NUM/DEN: positive fixed playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Local native playback supports fixed-speed retained practice/restart/seek/loop; runtime rate changes and network selected-speed play remain unavailable.");
+        println!("--speed NUM/DEN: initial positive playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Local native playback supports retained practice/restart/seek/loop and runtime rate controls; fixed saved/network competition rejects runtime rate changes. Network selected-speed play remains unavailable.");
         println!(
             "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --encoding float32|pcm16|pcm24|pcm32 --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --timing-preset PRESET_ID --rank-precedence rank-first|defexrank-first --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nTiming preset: optional beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1 requires explicit rank precedence and original RANK or supported positive integer DEFEXRANK; gauges remain independently selected. Uses numerical hit windows with BeatKernel Hold v1, not full source LN/CN/HCN semantics. Gauge timing without preset: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: encoding float32, gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native ALSA encoding follows --encoding, no fallback. Physical timing Unknown."
         );
@@ -484,7 +484,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let options = parse(&args)?;
     if options.selected_speed() {
         let rate = options.live_speed.speed().rate();
-        println!("live playback speed={}/{}; pitch changes; local native fixed-speed retained practice enabled; runtime rate changes unavailable", rate.numerator(), rate.denominator());
+        println!("live playback speed={}/{}; pitch changes; retained practice with runtime rate controls; fixed competition rejects rate changes", rate.numerator(), rate.denominator());
     }
     validate_finite_modes(&options, &competition_options)?;
     #[cfg(target_os = "linux")]
@@ -842,21 +842,12 @@ mod native {
         logical_origin: ClockPoint,
         setup: beatkernel_bms_runtime::live_speed::LiveSpeedSetup,
     ) -> Result<Transport> {
-        let basis = beatkernel::transport::OutputPhaseBasis::new(
-            LOGICAL,
+        beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_runtime_transport(
             epoch,
-            1,
-            identity.initial_playback(),
-            identity.hz(),
-        )?;
-        Ok(Transport::new_with_output_phase(
-            basis,
+            identity,
             logical_origin,
-            setup.start(),
-            setup.preroll(),
-            setup.speed().rate(),
-            setup.end(),
-        )?)
+            setup,
+        )
     }
 
     pub(super) fn observe_target_output(
@@ -1599,8 +1590,29 @@ mod native {
                 8,
                 256,
             )?;
+            let identity_limits = capture_limits(
+                options.record_replay.is_some(),
+                options.replay_max_bytes,
+                options.replay_max_records,
+            )?
+            .unwrap_or(beatkernel_bms_runtime::competition_live::replay_limits()?);
+            let initial_header = beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
+                &initial_source,
+                &judge,
+                &policy,
+                LOGICAL,
+                options.live_speed.start(),
+                options.chart_seed,
+                options.live_speed.end(),
+                options.live_speed.speed(),
+            )?;
+            let headers = vec![beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
+                player: beatkernel_bms_runtime::local_players::PlayerId(1),
+                header: initial_header,
+                limits: identity_limits,
+            }];
             let prepared_audio =
-                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_speed(
+                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_runtime_rates(
                     prepared.bank,
                     prepared.bgm_commands,
                     NativeAudioConfig {
@@ -1613,9 +1625,10 @@ mod native {
                     },
                     options.live_speed.speed(),
                     options.live_speed.end(),
+                    beatkernel_bms_runtime::native_audio_startup::next_runtime_program_id()?,
                 )?;
             let practice =
-                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_speed(
+                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_runtime_rates(
                     prepared_audio.practice,
                     original_source,
                     vec![beatkernel_bms_runtime::practice_playback::PracticeMember {
@@ -1632,9 +1645,9 @@ mod native {
                     region,
                     max_target.unwrap(),
                     prepared_audio.audio.mixer.output_frame_basis(),
-                    u64::from(options.buffer),
                     options.end_ns.map(Timestamp::from_nanos),
                     options.live_speed,
+                    headers,
                 )?;
             (prepared_audio.audio, Some(practice))
         } else {

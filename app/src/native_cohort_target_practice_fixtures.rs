@@ -17,9 +17,14 @@ use crate::{
     native_gameplay::InputBatch,
     native_output_coordinate::{CoordinateTargetNativeAudioSnapshot, NativeOutputCoordinate},
     native_playback_phase::{ConvertedPlaybackFacts, NativePlaybackMapping},
-    practice_control::{PracticeAction, PracticeCapability, PracticeReply, PracticeRequest},
-    practice_playback::{PracticeMember, PracticePlayback, PracticeRecordingPort},
-    practice_session::{prepare_attempt_with_speed, PracticeAttemptConfig},
+    practice_control::{
+        PracticeAction, PracticeCapability, PracticeReply, PracticeRequest,
+        PracticeTransactionCapability, PracticeTransactionReply, PracticeTransactionRequest,
+    },
+    practice_playback::{
+        PracticeMember, PracticePlayback, PracticeRecordingPort, PracticeRuntimeHeader,
+    },
+    practice_session::{PracticeAttemptConfig, prepare_attempt_with_speed},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
@@ -29,9 +34,9 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId,
     },
-    replay::{codec::ReplayCodecLimits, ReplaySession},
+    replay::{ReplaySession, codec::ReplayCodecLimits},
     runtime::{RuntimeProcessingClock, RuntimeReport},
-    time::{presentation::PresentationEstimator, ClockPair, Duration, ExtrapolationPolicy},
+    time::{ClockPair, Duration, ExtrapolationPolicy, presentation::PresentationEstimator},
     transport::{OutputPhaseBasis, Rate},
 };
 use beatkernel_platform::audio::{
@@ -72,8 +77,42 @@ struct Device {
     scalar_calls: usize,
     queries: RefCell<Vec<InterpolatedTargetTime>>,
     ids: Vec<u32>,
+    block_schedule: &'static [usize],
+    allow_exclusive_clock: bool,
+    auto_input_end: Option<u64>,
+    extra_events: VecDeque<PhysicalInputEvent>,
+    unprojected_at: Option<(u64, u64, u64)>,
+    projected_at: Option<(u64, u64, TargetTime)>,
+    acquired_extra: Vec<(u64, EventMeta)>,
 }
 impl Device {
+    fn generate(&mut self) -> NativeGameplayResult<()> {
+        self.frame = 1 + self.step.get() as u64;
+        while self.generated < self.frame
+            || (!self.allow_exclusive_clock && self.generated == self.frame)
+        {
+            let block = if let Some((&block, rest)) = self.block_schedule.split_first() {
+                self.block_schedule = rest;
+                block
+            } else {
+                8
+            };
+            self.converted = self.output.render_pending(block)?;
+            self.output.admit(block)?;
+            self.generated += block as u64;
+        }
+        match self.output.mixer().practice_history_retention_pins() {
+            (Some(source), None) => {
+                self.unprojected_at = Some((self.frame, self.generated, source));
+            }
+            (Some(source), Some(target)) => {
+                self.projected_at = Some((self.frame, source, target));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn observation(&self) -> CoordinateTargetNativeAudioSnapshot {
         CoordinateTargetNativeAudioSnapshot::new(
             TargetNativeAudioSnapshot {
@@ -165,12 +204,7 @@ impl GameplayDevice for Device {
         p: &mut NativeAudioPresentation,
         id: SourcePlaybackIdentity,
     ) -> NativeGameplayResult<Option<CoordinatePlaybackControlFacts>> {
-        self.frame = 1 + self.step.get() as u64;
-        while self.generated <= self.frame {
-            self.converted = self.output.render_pending(8)?;
-            self.output.admit(8)?;
-            self.generated += 8;
-        }
+        self.generate()?;
         let obs = self.observation();
         p.admit_target_coordinate(obs)?;
         let q = exact(
@@ -209,7 +243,10 @@ impl GameplayDevice for Device {
     ) -> NativeGameplayResult<InputBatch> {
         // Each input comes from a genuine new acquired HOST prefix. The initial
         // Started commit sees no event; subsequent attempts receive real input.
-        if self.step.get() > 10 && self.last_acquired_frame != Some(self.frame) {
+        if self.step.get() > 10
+            && self.last_acquired_frame != Some(self.frame)
+            && self.auto_input_end.is_none_or(|end| self.frame < end)
+        {
             self.last_acquired_frame = Some(self.frame);
             for &id in &self.ids {
                 events.push_back(PhysicalInputEvent::Button(ButtonEvent {
@@ -222,6 +259,13 @@ impl GameplayDevice for Device {
                     },
                 }));
             }
+        }
+        while self.extra_events.front().is_some_and(|event| {
+            event.meta().timestamp <= host(self.frame).timestamp
+        }) {
+            let event = self.extra_events.pop_front().unwrap();
+            self.acquired_extra.push((self.frame, *event.meta()));
+            events.push_back(event);
         }
         Ok(InputBatch {
             completed_through: Some(host(self.frame)),
@@ -237,12 +281,7 @@ impl GameplayDevice for Device {
         // With no pause or fixed NativeEnd owner the shared loop legitimately
         // acquires its sole native observation through this port. Preserve the
         // same genuine generated/admitted owner and original Target descriptor.
-        self.frame = 1 + self.step.get() as u64;
-        while self.generated <= self.frame {
-            self.converted = self.output.render_pending(8)?;
-            self.output.admit(8)?;
-            self.generated += 8;
-        }
+        self.generate()?;
         p.admit_target_coordinate(self.observation())?;
         Ok(())
     }
@@ -303,6 +342,11 @@ struct Host {
     reports: Vec<PlayerReport>,
     replies: Vec<PracticeReply>,
     ends: Vec<Timestamp>,
+    transaction_capabilities: Vec<PracticeTransactionCapability>,
+    transaction_requests: VecDeque<PracticeTransactionRequest>,
+    transaction_replies: Vec<PracticeTransactionReply>,
+    transaction_taken: usize,
+    transaction_at: usize,
 }
 impl NativeGameplayHost for Host {
     fn cancelled(&self) -> bool {
@@ -345,6 +389,38 @@ impl NativeGameplayHost for Host {
     }
     fn commit_practice_reply(&mut self, reply: &PracticeReply) -> NativeGameplayResult<()> {
         self.replies.push(reply.clone());
+        Ok(())
+    }
+    fn advertise_practice_transactions(
+        &mut self,
+        cap: Option<PracticeTransactionCapability>,
+    ) -> NativeGameplayResult<()> {
+        if let Some(cap) = cap {
+            self.transaction_capabilities.push(cap);
+        }
+        Ok(())
+    }
+    fn take_practice_transaction(
+        &mut self,
+        active: bool,
+    ) -> NativeGameplayResult<Option<PracticeTransactionRequest>> {
+        if active
+            && !self.transaction_capabilities.is_empty()
+            && self.step.get() >= self.transaction_at
+            && self.transaction_taken == self.transaction_replies.len()
+        {
+            let next = self.transaction_requests.pop_front();
+            self.transaction_taken += usize::from(next.is_some());
+            Ok(next)
+        } else {
+            Ok(None)
+        }
+    }
+    fn commit_practice_transaction_reply(
+        &mut self,
+        reply: &PracticeTransactionReply,
+    ) -> NativeGameplayResult<()> {
+        self.transaction_replies.push(reply.clone());
         Ok(())
     }
     fn prepare_practice_presentation(
@@ -413,6 +489,26 @@ impl Fixture {
         Self::new_with_end(ids, repeat, scrub, Timestamp::from_nanos(30_000_000))
     }
     fn new_with_end(ids: &[u32], repeat: bool, scrub: bool, end_song: Timestamp) -> Self {
+        Self::new_mode(ids, repeat, scrub, end_song, false, true)
+    }
+    fn new_runtime(ids: &[u32], record: bool) -> Self {
+        Self::new_mode(
+            ids,
+            false,
+            false,
+            Timestamp::from_nanos(100_000_000),
+            true,
+            record,
+        )
+    }
+    fn new_mode(
+        ids: &[u32],
+        repeat: bool,
+        scrub: bool,
+        end_song: Timestamp,
+        runtime_rates: bool,
+        record: bool,
+    ) -> Self {
         let rate = Rate::new(3, 2).unwrap();
         let speed = ReplaySpeed::new(rate).unwrap();
         let setup =
@@ -426,14 +522,27 @@ impl Fixture {
             crate::play_policy::ResolvedPlayPolicy::builtin(10_000_000, 10_000_000, 0).unwrap();
         let format = AudioFormat::new(1000, 1).unwrap();
         let bank = SampleBank::new(format, PcmLimits::new(8, 256, 1).unwrap()).unwrap();
-        let program = PreparedPracticeProgram::new_with_speed(
-            &bank,
-            vec![],
-            PracticeLimits::new(8, 1, 64, 8, 256).unwrap(),
-            rate,
-            Duration::ZERO,
-            false,
-        )
+        let program_limits = PracticeLimits::new(8, 1, 64, 8, 256).unwrap();
+        let program = if runtime_rates {
+            PreparedPracticeProgram::new_with_runtime_rates(
+                &bank,
+                vec![],
+                program_limits,
+                rate,
+                Duration::ZERO,
+                false,
+                14102,
+            )
+        } else {
+            PreparedPracticeProgram::new_with_speed(
+                &bank,
+                vec![],
+                program_limits,
+                rate,
+                Duration::ZERO,
+                false,
+            )
+        }
         .unwrap();
         let (controller, endpoint) = practice_queue(&program).unwrap();
         let (producer, consumer) = command_queue(256).unwrap();
@@ -462,23 +571,30 @@ impl Fixture {
         .unwrap_or_else(|_| panic!("valid converter"));
         output.enable_phase_history(128).unwrap();
         let basis = output.target_frame_basis();
-        let converted = output.render_pending(8).unwrap();
-        output.admit(8).unwrap();
+        let initial_report = if runtime_rates {
+            None
+        } else {
+            let converted = output.render_pending(8).unwrap();
+            output.admit(8).unwrap();
+            Some(converted)
+        };
         let phase = OutputPhaseBasis::new(ClockDomainId(3), 91, 1, 0, 1000).unwrap();
         let mut members = Vec::new();
+        let mut runtime_headers = Vec::new();
         let mut configs = Vec::new();
         let mut states = Vec::new();
         let mut transport = None;
         for &id in ids {
-            let launch = SessionLaunch::new(vec![
+            let mut args = vec![
                 "--chart".into(),
                 "practice.bms".into(),
                 "--speed".into(),
-                "3/2".into(),
-                "--record-replay".into(),
-                format!("player-{id}.bkr"),
-            ])
-            .unwrap();
+                format!("{}/{}", rate.numerator(), rate.denominator()),
+            ];
+            if record {
+                args.extend(["--record-replay".into(), format!("player-{id}.bkr")]);
+            }
+            let launch = SessionLaunch::new(args).unwrap();
             let attempt = prepare_attempt_with_speed(
                 &original,
                 &policy,
@@ -488,12 +604,44 @@ impl Fixture {
                     end: Some(end_song),
                     domain: ClockDomainId(3),
                     chart_seed: 0,
-                    capture_limits: Some(limits()),
+                    capture_limits: record.then_some(limits()),
                 },
                 speed,
             )
             .unwrap();
-            transport = Some(attempt.transport_at_output_phase(phase, at(3, 0)).unwrap());
+            transport = Some(if runtime_rates {
+                attempt
+                    .transport_at_runtime_output_phase(phase, at(3, 0))
+                    .unwrap()
+            } else {
+                attempt.transport_at_output_phase(phase, at(3, 0)).unwrap()
+            });
+            if runtime_rates {
+                let header = if let Some(capture) = &attempt.capture {
+                    capture.header().clone()
+                } else {
+                    LiveReplayCapture::new_with_policy_and_speed(
+                        &attempt.judge,
+                        ClockDomainId(3),
+                        limits(),
+                        Timestamp::ZERO,
+                        0,
+                        Some(end_song),
+                        beatkernel_bms::BmsInputMode::ButtonOnly,
+                        None,
+                        &policy,
+                        speed,
+                    )
+                    .unwrap()
+                    .header()
+                    .clone()
+                };
+                runtime_headers.push(PracticeRuntimeHeader {
+                    player: PlayerId(id),
+                    header,
+                    limits: limits(),
+                });
+            }
             configs.push(MemberConfig {
                 player: PlayerId(id),
                 device: Some(DeviceId(u64::from(id))),
@@ -521,21 +669,40 @@ impl Fixture {
                     .unwrap(),
                 launch,
                 chart_seed: 0,
-                capture_limits: Some(limits()),
+                capture_limits: record.then_some(limits()),
             });
         }
-        let practice = PracticePlayback::new_with_speed(
-            controller,
-            original.clone(),
-            members,
-            region,
-            Timestamp::from_nanos(100_000_000),
-            source_basis,
-            2,
-            Some(end_song),
-            setup,
-        )
+        let practice = if runtime_rates {
+            PracticePlayback::new_with_runtime_rates(
+                controller,
+                original.clone(),
+                members,
+                region,
+                Timestamp::from_nanos(100_000_000),
+                source_basis,
+                Some(end_song),
+                setup,
+                runtime_headers,
+            )
+        } else {
+            PracticePlayback::new_with_speed(
+                controller,
+                original.clone(),
+                members,
+                region,
+                Timestamp::from_nanos(100_000_000),
+                source_basis,
+                2,
+                Some(end_song),
+                setup,
+            )
+        }
         .unwrap();
+        let converted = initial_report.unwrap_or_else(|| {
+            let converted = output.render_pending(8).unwrap();
+            output.admit(8).unwrap();
+            converted
+        });
         let mut group = RuntimeGroup::new(
             ClockDomainId(3),
             ClockDomainId(2),
@@ -563,6 +730,13 @@ impl Fixture {
             scalar_calls: 0,
             queries: RefCell::new(vec![]),
             ids: ids.to_vec(),
+            block_schedule: &[],
+            allow_exclusive_clock: false,
+            auto_input_end: None,
+            extra_events: VecDeque::new(),
+            unprojected_at: None,
+            projected_at: None,
+            acquired_extra: vec![],
         };
         let mut p = new_coordinate_audio_presentation(
             7,
@@ -638,6 +812,11 @@ impl Fixture {
                 reports: vec![],
                 replies: vec![],
                 ends: vec![],
+                transaction_capabilities: vec![],
+                transaction_requests: VecDeque::new(),
+                transaction_replies: vec![],
+                transaction_taken: 0,
+                transaction_at: 14,
             },
             practice,
             recordings: Recordings::default(),
@@ -860,17 +1039,154 @@ fn equal_cut_input_belongs_to_fresh_cohort_with_original_fractional_source_overs
 }
 
 #[test]
+fn runtime_target_cohort_unprojected_cut_preserves_all_gap_inputs_and_effective_headers() {
+    for ids in [&[7, 29][..], &[7, 29, 101, 409][..]] {
+        for record in [true, false] {
+            let mut f = Fixture::new_runtime(ids, record);
+            // Preserve the original HOST100+4*Targetframe relation. The actual
+            // clock may reach exclusive26 before its next callback generates26.
+            f.device.block_schedule = &[8, 8, 2, 8];
+            f.device.allow_exclusive_clock = true;
+            f.device.auto_input_end = Some(25);
+            f.device.close_at = 28;
+            f.host.transaction_at = 22;
+            f.device.extra_events = VecDeque::with_capacity(ids.len());
+            let gap = at(1, 203);
+            for &id in ids {
+                f.device
+                    .extra_events
+                    .push_back(PhysicalInputEvent::Button(ButtonEvent {
+                        meta: EventMeta::new(DeviceId(u64::from(id)), gap, 10_000 + u64::from(id)),
+                        control: PhysicalControlId::keyboard(4),
+                        state: ButtonState::Up,
+                    }));
+            }
+            let changed = Rate::new(1, 2).unwrap();
+            request_runtime_rate(&mut f, changed);
+            assert!(f.run().unwrap().is_none());
+
+            // Source17 is Target25.5/HOST202; HOST203 is before Target26/HOST204.
+            // It maps to E17_166_666, so old3/2 would produce25_749_999 while
+            // the committed cut25_500_000 plus new1/2 produces25_583_333.
+            assert_eq!(f.device.unprojected_at, Some((26, 26, 17)));
+            assert_eq!(
+                f.device.projected_at,
+                Some((27, 17, TargetTime::from_frames(26, 1500).unwrap()))
+            );
+            assert_eq!(f.device.acquired_extra.len(), ids.len());
+            for (&id, (frame, meta)) in ids.iter().zip(&f.device.acquired_extra) {
+                assert_eq!(*frame, 26);
+                assert_eq!(
+                    *meta,
+                    EventMeta::new(DeviceId(u64::from(id)), gap, 10_000 + u64::from(id))
+                );
+            }
+            let event = applied_runtime_rate(&f);
+            assert_eq!(event.outcome, PracticeRateOutcome::Applied);
+            assert_eq!(event.physical_frame, 17);
+            assert_eq!(event.active_elapsed_nanos, 17_000_000);
+            assert_eq!(event.previous_rate, Rate::new(3, 2).unwrap());
+            assert_eq!(event.applied_rate, changed);
+            assert_eq!(f.practice.generation(), 1);
+            assert_eq!(f.group.audio_scope(), CommandScope(1));
+            assert_eq!(f.group.transport().runtime_output_rate(), Some(changed));
+            assert_eq!(f.group.transport().output_phase_basis(), Some(f.phase));
+            assert!(f.host.identities.is_empty());
+            assert!(f.host.commits.is_empty());
+            assert!(f.recordings.0.is_empty());
+            assert!(!f.group.poisoned());
+            assert_eq!(f.device.scalar_calls, 0);
+            assert!(!f.device.output.mixer().practice_finished());
+
+            let mut common_cut = None;
+            for state in &f.states {
+                let id = state.player;
+                let sequence = 10_000 + u64::from(id.0);
+                let reports = f
+                    .host
+                    .reports
+                    .iter()
+                    .filter(|report| {
+                        report.player == id
+                            && report
+                                .report
+                                .input
+                                .as_ref()
+                                .is_some_and(|input| input.meta().sequence == sequence)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    reports.len(),
+                    1,
+                    "each acquired physical release is processed once"
+                );
+                assert_eq!(
+                    reports[0].report.song_time,
+                    Timestamp::from_nanos(25_583_333)
+                );
+                let input = reports[0].report.input.as_ref().unwrap();
+                assert_eq!(input.meta().source, DeviceId(u64::from(id.0)));
+                assert_eq!(input.meta().original_clock_point, Some(gap));
+                assert!(matches!(input, PhysicalInputEvent::Button(button)
+                    if button.control == PhysicalControlId::keyboard(4) && button.state == ButtonState::Up));
+                let header = f.practice.effective_header(id).unwrap();
+                let (_, schedule) =
+                    crate::replay_speed_policy::split_schedule(&header.options).unwrap();
+                assert_eq!(schedule.cuts().len(), 1);
+                let cut = schedule.cuts()[0];
+                assert_eq!(
+                    (cut.whole(), cut.numerator(), cut.denominator()),
+                    (25_500_000, 0, 1)
+                );
+                assert_eq!(schedule.current_speed().rate(), changed);
+                if let Some(previous) = common_cut {
+                    assert_eq!(cut, previous);
+                } else {
+                    common_cut = Some(cut);
+                }
+                if record {
+                    let capture = state.capture.as_ref().unwrap();
+                    assert_eq!(capture.header(), header);
+                    let records = capture.records().iter().filter(|entry| {
+                        matches!(&entry.operation, beatkernel::replay::ReplayOperation::Input(input)
+                            if input.physical.meta().sequence == sequence)
+                    }).collect::<Vec<_>>();
+                    assert_eq!(records.len(), 1);
+                    assert_eq!(records[0].song_time, Timestamp::from_nanos(25_583_333));
+                    let replay = crate::replay_playback::reconstruct_section(
+                        &f.original,
+                        beatkernel::replay::codec::ReplayFile::new(
+                            header.clone(),
+                            capture.records().to_vec(),
+                        ),
+                        limits(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        replay.engine().stable_hash().unwrap(),
+                        f.group.member_judge(id).unwrap().stable_hash().unwrap()
+                    );
+                } else {
+                    assert!(state.capture.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn genuine_scrub_installs_selected_phase_for_two_and_four_members() {
     for ids in [&[7, 29][..], &[7, 29, 101, 409][..]] {
         let mut f = Fixture::new(ids, false, true);
         f.device.close_at = 25;
         assert!(f.run().unwrap().is_none());
         f.assert_fresh();
-        assert!(f
-            .host
-            .replies
-            .iter()
-            .any(|r| r.id == 12 && r.result.is_ok()));
+        assert!(
+            f.host
+                .replies
+                .iter()
+                .any(|r| r.id == 12 && r.result.is_ok())
+        );
         assert_eq!(f.recordings.0.len(), ids.len());
         assert!(f.host.commits.contains(&2));
     }
@@ -923,9 +1239,173 @@ fn visual_refusal_after_application_keeps_whole_fresh_cohort_identity() {
     let basis = f.group.transport().output_phase_basis().unwrap();
     assert_eq!(basis.generation(), 2);
     assert_eq!(basis.owner(), f.phase.owner());
-    assert!(f
-        .states
-        .iter()
-        .all(|state| state.capture.as_ref().unwrap().records().is_empty()));
+    assert!(
+        f.states
+            .iter()
+            .all(|state| state.capture.as_ref().unwrap().records().is_empty())
+    );
     assert!(!f.group.poisoned());
+}
+
+fn request_runtime_rate(f: &mut Fixture, selected: Rate) {
+    f.host
+        .transaction_requests
+        .push_back(PracticeTransactionRequest::Rate {
+            id: 14102,
+            generation: f.practice.generation(),
+            expected: f.practice.rate_state().unwrap(),
+            requested_rate: selected,
+        });
+}
+fn applied_runtime_rate(f: &Fixture) -> PracticeRateEvent {
+    match &f.host.transaction_replies[..] {
+        [
+            PracticeTransactionReply::Rate {
+                id: 14102,
+                generation: 1,
+                result: Ok(event),
+            },
+        ] => *event,
+        replies => panic!("one actual cohort rate reply required: {replies:?}"),
+    }
+}
+#[test]
+fn runtime_target_cohort_shares_one_native_cut_and_effective_headers_with_or_without_capture() {
+    for ids in [&[7, 29][..], &[7, 29, 101, 409][..]] {
+        for record in [true, false] {
+            let mut f = Fixture::new_runtime(ids, record);
+            f.device.close_at = 27;
+            let initial = f.practice.current_speed();
+            let selected = Rate::new(1, 2).unwrap();
+            request_runtime_rate(&mut f, selected);
+            assert!(f.run().unwrap().is_none());
+            let event = applied_runtime_rate(&f);
+            assert_eq!(event.outcome, PracticeRateOutcome::Applied);
+            assert_eq!(event.previous_rate, initial.rate());
+            assert_eq!(event.applied_rate, selected);
+            assert_eq!(f.practice.generation(), 1);
+            assert_eq!(f.group.transport().output_phase_basis(), Some(f.phase));
+            assert_eq!(f.group.transport().anchor().rate, selected);
+            assert_eq!(f.group.audio_scope(), CommandScope(1));
+            assert!(
+                f.host.identities.is_empty(),
+                "no member score/held key reset"
+            );
+            assert!(f.host.commits.is_empty());
+            assert!(f.recordings.0.is_empty());
+            assert_eq!(f.device.scalar_calls, 0);
+            assert!(!f.group.poisoned());
+            let mut common_cut = None;
+            for state in &f.states {
+                let header = f.practice.effective_header(state.player).unwrap();
+                let (_, schedule) =
+                    crate::replay_speed_policy::split_schedule(&header.options).unwrap();
+                assert_eq!(schedule.initial_speed(), initial);
+                assert_eq!(schedule.current_speed().rate(), selected);
+                assert_eq!(schedule.cuts().len(), 1);
+                let cut = schedule.cuts()[0];
+                if let Some(previous) = common_cut {
+                    assert_eq!(cut, previous);
+                } else {
+                    common_cut = Some(cut);
+                }
+                assert!(
+                    state.score.hits + state.score.misses > 0,
+                    "existing judged stages survive the rate cut"
+                );
+                if record {
+                    let capture = state.capture.as_ref().unwrap();
+                    assert_eq!(capture.header(), header);
+                    let inputs: Vec<_> = capture
+                        .records()
+                        .iter()
+                        .filter_map(|r| match &r.operation {
+                            beatkernel::replay::ReplayOperation::Input(input) => Some(input),
+                            _ => None,
+                        })
+                        .collect();
+                    assert!(!inputs.is_empty());
+                    assert!(
+                        inputs.iter().all(|input| input.physical.meta().source
+                            == DeviceId(u64::from(state.player.0)))
+                    );
+                    let replay = crate::replay_playback::reconstruct_section(
+                        &f.original,
+                        beatkernel::replay::codec::ReplayFile::new(
+                            header.clone(),
+                            capture.records().to_vec(),
+                        ),
+                        limits(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        replay.engine().stable_hash().unwrap(),
+                        f.group
+                            .member_judge(state.player)
+                            .unwrap()
+                            .stable_hash()
+                            .unwrap()
+                    );
+                } else {
+                    assert!(state.capture.is_none());
+                }
+            }
+        }
+    }
+}
+#[test]
+fn runtime_target_cohort_noop_and_stale_revision_preserve_every_member_header() {
+    for stale in [false, true] {
+        let mut f = Fixture::new_runtime(&[7, 29, 101, 409], true);
+        f.device.close_at = 27;
+        let initial = f.practice.current_speed();
+        let before: Vec<_> = f
+            .states
+            .iter()
+            .map(|s| (s.player, s.capture.as_ref().unwrap().header().clone()))
+            .collect();
+        request_runtime_rate(
+            &mut f,
+            if stale {
+                Rate::new(1, 2).unwrap()
+            } else {
+                initial.rate()
+            },
+        );
+        if stale {
+            if let Some(PracticeTransactionRequest::Rate { expected, .. }) =
+                f.host.transaction_requests.front_mut()
+            {
+                expected.revision = 99;
+            }
+        }
+        f.run().unwrap();
+        assert_eq!(f.practice.current_speed(), initial);
+        assert_eq!(f.practice.generation(), 1);
+        assert_eq!(f.group.transport().output_phase_basis(), Some(f.phase));
+        assert!(f.recordings.0.is_empty());
+        assert!(f.host.identities.is_empty());
+        assert_eq!(f.host.transaction_replies.len(), 1);
+        match &f.host.transaction_replies[0] {
+            PracticeTransactionReply::Rate { result: Err(_), .. } if stale => {}
+            PracticeTransactionReply::Rate {
+                result: Ok(event), ..
+            } if !stale => assert_eq!(event.outcome, PracticeRateOutcome::Noop),
+            reply => panic!("unexpected shared noop/refusal: {reply:?}"),
+        }
+        for (id, header) in before {
+            assert_eq!(f.practice.effective_header(id), Some(&header));
+            assert_eq!(
+                f.states
+                    .iter()
+                    .find(|s| s.player == id)
+                    .unwrap()
+                    .capture
+                    .as_ref()
+                    .unwrap()
+                    .header(),
+                &header
+            );
+        }
+    }
 }

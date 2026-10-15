@@ -117,6 +117,13 @@ impl Drop for OwnerGuard<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PracticeTransportMode {
+    Normal,
+    OutputPhase,
+    RuntimeRestart(Rate),
+}
+
 impl RuntimeGroup {
     /// Explicit identity for commands admitted to the retained shared output.
     /// This never reads or adopts a callback's current generation.
@@ -161,7 +168,13 @@ impl RuntimeGroup {
         song_end: Option<Timestamp>,
         scope: CommandScope,
     ) -> Result<(), String> {
-        self.replace_practice_states_inner(judges, transport, song_end, scope, false)
+        self.replace_practice_states_inner(
+            judges,
+            transport,
+            song_end,
+            scope,
+            PracticeTransportMode::Normal,
+        )
     }
 
     /// Installs a fresh attempt's mathematical phase after the caller qualifies
@@ -174,7 +187,34 @@ impl RuntimeGroup {
         song_end: Option<Timestamp>,
         scope: CommandScope,
     ) -> Result<(), String> {
-        self.replace_practice_states_inner(judges, transport, song_end, scope, true)
+        self.replace_practice_states_inner(
+            judges,
+            transport,
+            song_end,
+            scope,
+            PracticeTransportMode::OutputPhase,
+        )
+    }
+
+    /// Restore the original selected rate only after the caller qualifies an
+    /// actual compound restart. Both attempts must opt into runtime rates;
+    /// ordinary region replacement continues to preserve the current rate.
+    /// This mathematical installation grants no output or native authority.
+    pub fn replace_practice_states_with_runtime_restart(
+        &mut self,
+        judges: Vec<(PlayerId, JudgeEngine)>,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+        original_rate: Rate,
+    ) -> Result<(), String> {
+        self.replace_practice_states_inner(
+            judges,
+            transport,
+            song_end,
+            scope,
+            PracticeTransportMode::RuntimeRestart(original_rate),
+        )
     }
 
     fn replace_practice_states_inner(
@@ -183,13 +223,13 @@ impl RuntimeGroup {
         transport: Transport,
         song_end: Option<Timestamp>,
         scope: CommandScope,
-        output_phase: bool,
+        mode: PracticeTransportMode,
     ) -> Result<(), String> {
         if judges.len() != self.members.len() {
             return Err("practice judge count differs from cohort".into());
         }
         let anchor = transport.anchor();
-        if output_phase {
+        if !matches!(mode, PracticeTransportMode::Normal) {
             let old = self
                 .transport
                 .output_phase_basis()
@@ -197,9 +237,33 @@ impl RuntimeGroup {
             let new = transport
                 .output_phase_basis()
                 .ok_or("practice replacement must have an output phase")?;
+            let old_runtime = self.transport.runtime_output_rate();
+            let new_runtime = transport.runtime_output_rate();
+            let expected_rate = match mode {
+                PracticeTransportMode::RuntimeRestart(original) => {
+                    if original.numerator() <= 0
+                        || old_runtime.is_none()
+                        || new_runtime != Some(original)
+                    {
+                        return Err(
+                            "practice restart requires runtime transports at the original rate"
+                                .into(),
+                        );
+                    }
+                    original
+                }
+                PracticeTransportMode::OutputPhase => {
+                    if old_runtime.is_some() != new_runtime.is_some() {
+                        return Err("practice runtime rate mode must remain unchanged".into());
+                    }
+                    old_runtime.unwrap_or(self.transport.anchor().rate)
+                }
+                PracticeTransportMode::Normal => unreachable!("output-phase branch checked"),
+            };
             if transport.anchors().len() != 1
                 || anchor.rate.numerator() <= 0
-                || anchor.rate != self.transport.anchor().rate
+                || anchor.rate != expected_rate
+                || new_runtime.is_some_and(|rate| rate != anchor.rate)
             {
                 return Err(
                     "practice transport must be a fresh anchor at the selected running rate".into(),
@@ -930,6 +994,24 @@ impl SoloRuntime {
             transport,
             song_end,
             scope,
+        )
+    }
+
+    /// One-player forwarding for a caller-qualified compound original restart.
+    pub fn replace_practice_state_with_runtime_restart(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+        original_rate: Rate,
+    ) -> Result<(), String> {
+        self.0.replace_practice_states_with_runtime_restart(
+            vec![(PlayerId(1), judge)],
+            transport,
+            song_end,
+            scope,
+            original_rate,
         )
     }
 

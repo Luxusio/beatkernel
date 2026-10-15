@@ -69,7 +69,7 @@ impl RecordCatalog {
 }
 
 impl RecordPreview {
-    pub fn inspect(path: &Path, chart: &Path, _settings: &NativeSettings) -> Result<Self, String> {
+    pub fn inspect(path: &Path, chart: &Path, settings: &NativeSettings) -> Result<Self, String> {
         settings_path(path)?;
         let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
         if !metadata.is_file() {
@@ -90,7 +90,7 @@ impl RecordPreview {
         let source =
             load_chart_with_seed(chart, setup.chart_seed).map_err(|error| error.to_string())?;
         let header = file.header.clone();
-        let preview = Self::from_file_for_history(path, &source, file)?;
+        let preview = Self::from_file(path, &source, settings, file)?;
         #[cfg(not(target_arch = "wasm32"))]
         let preview = {
             let mut preview = preview;
@@ -108,7 +108,6 @@ impl RecordPreview {
         let _ = header;
         Ok(preview)
     }
-    #[cfg(test)]
     fn from_file(
         path: &Path,
         source: &beatkernel_bms::BmsChart,

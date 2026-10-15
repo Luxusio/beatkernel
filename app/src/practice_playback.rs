@@ -6,6 +6,7 @@ use crate::{
     local_players::PlayerId,
     native_audio_presentation::{
         NativeAudioPresentation, PreparedPracticeBoundary, PreparedPracticeEventBoundary,
+        PreparedPracticeRateCut,
     },
     native_gameplay::NativeGameplayResult,
     native_gameplay_host::NativeGameplayHost,
@@ -176,6 +177,49 @@ impl RuntimePractice {
             owner_id,
         })
     }
+    /// Fresh attempts retain the controller's cumulative revision while their
+    /// original-song phase and recording schedule start at the selected rate.
+    pub(crate) fn new_at_state(
+        headers: Vec<PracticeRuntimeHeader>,
+        capture_players: &[PlayerId],
+        phase: PositiveRatePhase,
+        state: PracticeRateState,
+    ) -> NativeGameplayResult<Self> {
+        if state.rate != phase.rate() {
+            return Err("runtime rate business state differs from its fresh phase".into());
+        }
+        let mut runtime = Self::new(headers, capture_players, phase)?;
+        runtime.rate = state;
+        Ok(runtime)
+    }
+
+    /// Prepare a fresh attempt while preserving custody of an admitted control
+    /// whose actual stale-generation refusal may follow an autonomous boundary.
+    pub(crate) fn candidate_for_attempt(
+        &self,
+        headers: Vec<PracticeRuntimeHeader>,
+        capture_players: &[PlayerId],
+        phase: PositiveRatePhase,
+        state: PracticeRateState,
+    ) -> NativeGameplayResult<Self> {
+        let mut candidate = Self::new_at_state(headers, capture_players, phase, state)?;
+        candidate.owner_id = self.owner_id;
+        Ok(candidate)
+    }
+
+    /// A qualified nonfresh region control changes neither phase nor identity.
+    pub(crate) fn commit_control_revision(
+        &mut self,
+        expected: PracticeRateState,
+        applied_revision: u64,
+    ) -> NativeGameplayResult<()> {
+        if self.rate != expected || expected.revision.checked_add(1) != Some(applied_revision) {
+            return Err("runtime control revision differs from committed state".into());
+        }
+        self.rate.revision = applied_revision;
+        Ok(())
+    }
+
     pub(crate) fn rate_state(&self) -> PracticeRateState {
         self.rate
     }
@@ -1692,16 +1736,51 @@ impl PracticePlayback {
     where
         'capture: 'live,
     {
+        if point.logical() != boundary.output() {
+            return Err("practice rate native proof differs from actual cut".into());
+        }
+        self.prepare_rate_event_inner(boundary.projected_event(), point, transport, captures)
+    }
+
+    /// Native-only rate preparation retains the actual first Target event
+    /// while applying the exact Source cut qualified by its opaque token.
+    pub(crate) fn prepare_rate_event_at_cut<'live, 'capture>(
+        &mut self,
+        cut: &PreparedPracticeRateCut,
+        transport: &'live mut Transport,
+        captures: &'live mut [(PlayerId, &'capture mut Option<LiveReplayCapture>)],
+    ) -> NativeGameplayResult<PreparedPracticeRateCommit<'live, 'capture>>
+    where
+        'capture: 'live,
+    {
+        self.prepare_rate_event_inner(
+            cut.projected_boundary().projected_event(),
+            cut.phase(),
+            transport,
+            captures,
+        )
+    }
+
+    fn prepare_rate_event_inner<'live, 'capture>(
+        &mut self,
+        original_projected: ProjectedPracticeEvent,
+        point: OutputPhasePoint,
+        transport: &'live mut Transport,
+        captures: &'live mut [(PlayerId, &'capture mut Option<LiveReplayCapture>)],
+    ) -> NativeGameplayResult<PreparedPracticeRateCommit<'live, 'capture>>
+    where
+        'capture: 'live,
+    {
         let projected = self
             .held_event
             .ok_or("no actual typed practice event is held")?;
-        if boundary.projected_event() != projected || point.logical() != boundary.output() {
+        if original_projected != projected {
             return Err("practice rate native proof differs from actual cut".into());
         }
         self.runtime
             .as_ref()
             .ok_or("practice runtime rates are not enabled")?
-            .validate_logical_domain(boundary.output().domain)?;
+            .validate_logical_domain(point.logical().domain)?;
         let PracticeEvent::Rate(event) = projected.event else {
             return Err("held event is not a rate result".into());
         };

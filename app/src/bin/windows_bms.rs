@@ -834,7 +834,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("--speed NUM/DEN: positive fixed playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Local play supports retained practice/restart/seek/loop at any positive fixed speed; runtime rate changes remain unavailable. Network play retains its existing speed and section restrictions.");
+        println!("--speed NUM/DEN: initial positive playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Local native playback supports retained practice/restart/seek/loop and runtime rate controls; fixed saved/network competition rejects runtime rate changes. Network play retains its existing speed and section restrictions.");
         println!(
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network local groups share one connection and start agreement; saved ghosts remain per-player. Native commands compose the graphical player's actual runtime."
         );
@@ -846,7 +846,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let options = parse(&args)?;
     if options.selected_speed() {
         let rate = options.live_speed.speed().rate();
-        println!("live playback speed={}/{}; pitch changes; local retained practice/restart/seek/loop; runtime rate changes unavailable", rate.numerator(), rate.denominator());
+        println!("live playback speed={}/{}; pitch changes; retained practice with runtime rate controls; fixed competition rejects rate changes", rate.numerator(), rate.denominator());
     }
     #[cfg(target_os = "windows")]
     {
@@ -1857,8 +1857,29 @@ mod native {
                 8,
                 256,
             )?;
+            let identity_limits = capture_limits(
+                options.record_replay.is_some(),
+                options.replay_max_bytes,
+                options.replay_max_records,
+            )?
+            .unwrap_or(beatkernel_bms_runtime::competition_live::replay_limits()?);
+            let initial_header = beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
+                &initial_source,
+                &judge,
+                &policy,
+                LOGICAL,
+                options.live_speed.start(),
+                options.chart_seed,
+                options.live_speed.end(),
+                options.live_speed.speed(),
+            )?;
+            let headers = vec![beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
+                player: beatkernel_bms_runtime::local_players::PlayerId(1),
+                header: initial_header,
+                limits: identity_limits,
+            }];
             let prepared_audio =
-                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_speed(
+                beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_runtime_rates(
                     prepared.bank,
                     prepared.bgm_commands,
                     NativeAudioConfig {
@@ -1871,9 +1892,10 @@ mod native {
                     },
                     options.live_speed.speed(),
                     options.live_speed.end(),
+                    beatkernel_bms_runtime::native_audio_startup::next_runtime_program_id()?,
                 )?;
             let practice =
-                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_speed(
+                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_runtime_rates(
                     prepared_audio.practice,
                     original_source,
                     vec![beatkernel_bms_runtime::practice_playback::PracticeMember {
@@ -1890,9 +1912,9 @@ mod native {
                     region,
                     max_target.unwrap(),
                     prepared_audio.audio.mixer.output_frame_basis(),
-                    0,
                     options.end_ns.map(Timestamp::from_nanos),
                     options.live_speed,
+                    headers,
                 )?;
             (prepared_audio.audio, Some(practice))
         } else {
@@ -2075,7 +2097,7 @@ mod native {
                         .authority()
                         .epoch()
                         .logical_output(playback_origin)?;
-                    let transport = beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_transport(
+                    let transport = beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_runtime_transport(
                         presentation.authority().epoch().id, identity, logical_origin, options.live_speed,
                     )?;
                     println!("Source startup original observations={:?}; HOST acquisition={:?}; physical accuracy Unknown", started.seeded.observations(), started.host_origin);

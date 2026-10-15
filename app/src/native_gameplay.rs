@@ -571,6 +571,167 @@ enum PracticeService {
     Committed { fresh: bool, terminal: bool },
 }
 
+/// Preserve the actual presentation proof while sharing the legacy and opt-in
+/// pumps. A rate event never becomes a synthetic attempt boundary.
+#[derive(Clone, Copy)]
+pub(crate) enum NativePracticeBoundary {
+    Fixed(crate::native_audio_presentation::PreparedPracticeBoundary),
+    Runtime(crate::native_audio_presentation::PreparedPracticeEventBoundary),
+    RuntimeRate(crate::native_audio_presentation::PreparedPracticeRateCut),
+}
+
+impl NativePracticeBoundary {
+    pub(crate) fn pending(
+        owner: &mut crate::practice_playback::PracticePlayback,
+    ) -> NativeGameplayResult<bool> {
+        if owner.rate_state().is_some() {
+            Ok(owner.peek_event()?.is_some())
+        } else {
+            Ok(owner.peek_receipt()?.is_some())
+        }
+    }
+
+    /// After the projected-event poll, an actual unprojected PCM receipt may
+    /// restrict progress. This pin grants no presentation or control authority.
+    pub(crate) fn unprojected_source_cut(
+        owner: &crate::practice_playback::PracticePlayback,
+    ) -> Option<u64> {
+        if owner.rate_state().is_none() || owner.history_retention_pins().is_some() {
+            return None;
+        }
+        let (source, target) = owner.queued_history_retention_pins();
+        source.filter(|_| target.is_none())
+    }
+
+    pub(crate) fn qualify<D: crate::gameplay_presentation::GameplayDevice>(
+        owner: &mut crate::practice_playback::PracticePlayback,
+        device: &mut D,
+        presentation: &NativeAudioPresentation,
+        identity: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
+        attempt: Option<beatkernel::transport::OutputPhaseBasis>,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<Option<Self>> {
+        if owner.rate_state().is_some() {
+            let Some(boundary) = owner.qualify_event(presentation, now)? else {
+                return Ok(None);
+            };
+            if matches!(
+                boundary.projected_event().event,
+                beatkernel::audio::PracticeEvent::Rate(_)
+            ) {
+                let identity = identity.ok_or("runtime rate lacks original source identity")?;
+                let attempt = attempt.ok_or("runtime rate lacks its output phase basis")?;
+                let query = boundary
+                    .coordinate_query()?
+                    .ok_or("runtime rate lacks its original projected query")?;
+                let Some(mapping) =
+                    device.conditional_playback_mapping_at(presentation, &query, identity)?
+                else {
+                    return Ok(None);
+                };
+                Ok(presentation
+                    .prepare_practice_rate_cut(boundary, mapping, identity, attempt, now)?
+                    .map(Self::RuntimeRate))
+            } else {
+                Ok(Some(Self::Runtime(boundary)))
+            }
+        } else {
+            Ok(owner.qualify(presentation, now)?.map(Self::Fixed))
+        }
+    }
+
+    pub(crate) fn receipt(self) -> Option<beatkernel::audio::PracticeReceipt> {
+        match self {
+            Self::Fixed(boundary) => Some(boundary.receipt()),
+            Self::Runtime(boundary) => match boundary.projected_event().event {
+                beatkernel::audio::PracticeEvent::Boundary(receipt) => Some(receipt),
+                beatkernel::audio::PracticeEvent::Restart(event) => Some(event.boundary),
+                beatkernel::audio::PracticeEvent::Rate(_) => None,
+            },
+            Self::RuntimeRate(_) => None,
+        }
+    }
+
+    pub(crate) fn restarts_original(self) -> bool {
+        match self {
+            Self::Fixed(_) | Self::RuntimeRate(_) => false,
+            Self::Runtime(boundary) => matches!(
+                boundary.projected_event().event,
+                beatkernel::audio::PracticeEvent::Restart(event)
+                    if event.outcome == beatkernel::audio::PracticeRateOutcome::Applied
+            ),
+        }
+    }
+
+    pub(crate) fn output(self) -> ClockPoint {
+        match self {
+            Self::Fixed(boundary) => boundary.output(),
+            Self::Runtime(boundary) => boundary.output(),
+            Self::RuntimeRate(cut) => cut.output(),
+        }
+    }
+
+    pub(crate) fn host(self) -> ClockPoint {
+        match self {
+            Self::Fixed(boundary) => boundary.host(),
+            Self::Runtime(boundary) => boundary.host(),
+            Self::RuntimeRate(cut) => cut.host(),
+        }
+    }
+
+    pub(crate) fn coordinate_query(
+        self,
+    ) -> NativeGameplayResult<Option<beatkernel::audio::InterpolatedTargetTime>> {
+        match self {
+            Self::Fixed(boundary) => boundary.coordinate_query(),
+            Self::Runtime(boundary) => boundary.coordinate_query(),
+            Self::RuntimeRate(cut) => Ok(Some(cut.coordinate_query())),
+        }
+    }
+
+    pub(crate) fn ready(
+        self,
+        presentation: &NativeAudioPresentation,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<bool> {
+        match self {
+            Self::Fixed(boundary) => presentation.practice_boundary_ready(&boundary, now, merger),
+            Self::Runtime(boundary) => {
+                presentation.practice_event_boundary_ready(&boundary, now, merger)
+            }
+            Self::RuntimeRate(cut) => presentation.practice_rate_cut_ready(&cut, now, merger),
+        }
+    }
+
+    pub(crate) fn prepare<H: NativeGameplayHost>(
+        self,
+        owner: &crate::practice_playback::PracticePlayback,
+        host: &mut H,
+    ) -> NativeGameplayResult<crate::practice_playback::PreparedPracticeCommit> {
+        match self {
+            Self::Fixed(boundary) => owner.prepare_boundary(&boundary, host),
+            Self::Runtime(boundary) => owner.prepare_event_boundary(&boundary, host),
+            Self::RuntimeRate(_) => Err("runtime rate requires same-attempt preparation".into()),
+        }
+    }
+
+    pub(crate) fn commit(
+        self,
+        presentation: &mut NativeAudioPresentation,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        match self {
+            Self::Fixed(boundary) => presentation.commit_practice_boundary(boundary, now, merger),
+            Self::Runtime(boundary) => {
+                presentation.commit_practice_event_boundary(boundary, now, merger)
+            }
+            Self::RuntimeRate(cut) => presentation.commit_practice_rate_cut(cut, now, merger),
+        }
+    }
+}
+
 /// The same audio pump with an installed recurring program and retained output.
 /// Archives retired attempts; the session retains its final capture on every
 /// outcome for the native finisher's replay, result and score publication.
@@ -690,7 +851,11 @@ fn run_gameplay_audio_with_practice_and_ports_impl<
     );
     // The native finisher owns the final capture and derives its completed
     // result sidecar from the same evidence. Only retired attempts archive here.
-    let revoke = host.advertise_practice(None);
+    let revoke = if practice.rate_state().is_some() {
+        host.advertise_practice_transactions(None)
+    } else {
+        host.advertise_practice(None)
+    };
     match result {
         Err(error) => Err(error),
         Ok(value) => {
@@ -1157,7 +1322,7 @@ fn run_gameplay_timed<
                 // Capture queue pins before transferring its first receipt
                 // into the app owner. The later service peek is idempotent.
                 let (queued_source, queued_target) = owner.playback.queued_history_retention_pins();
-                owner.playback.peek_receipt()?;
+                NativePracticeBoundary::pending(owner.playback)?;
                 let held = owner.playback.history_retention_pins();
                 (
                     queued_source,
@@ -1452,7 +1617,7 @@ fn run_gameplay_timed<
                 // Receipts fence input and advancement before any ordinary pump
                 // work. A render cursor alone never authorizes an input cut.
                 let mut waiting = false;
-                while owner.playback.peek_receipt()?.is_some() {
+                while NativePracticeBoundary::pending(owner.playback)? {
                     match service_practice_solo(
                         device,
                         &mut session,
@@ -1509,7 +1674,20 @@ fn run_gameplay_timed<
                     control.wait(WallDuration::from_millis(1))?;
                     continue;
                 }
-                if session.pause.phase() == PausePhase::Running {
+                if owner.playback.rate_state().is_some() {
+                    let fixed_competition = session
+                        .competition
+                        .as_ref()
+                        .is_some_and(|competition| !competition.policy_agnostic());
+                    let mut captures = [(crate::local_players::PlayerId(1), &mut *session.capture)];
+                    owner.playback.service_transaction(
+                        host_port,
+                        session.pause.phase() == PausePhase::Running,
+                        session.runtime.transport_mut(),
+                        &mut captures,
+                        fixed_competition,
+                    )?;
+                } else if session.pause.phase() == PausePhase::Running {
                     if let Some(report) =
                         render_evidence.validate(device.render_report()?, &stop_evidence)?
                     {
@@ -1524,6 +1702,9 @@ fn run_gameplay_timed<
                 }
             }
             let practice_end = practice.as_ref().and_then(|_| config.end_song);
+            let practice_source_cut = practice.as_ref().and_then(|owner| {
+                NativePracticeBoundary::unprojected_source_cut(owner.playback)
+            });
             service_audio_solo(
                 device,
                 &mut session,
@@ -1542,6 +1723,7 @@ fn run_gameplay_timed<
                 &mut stop_evidence,
                 host_port,
                 None,
+                practice_source_cut,
                 practice_end,
                 &mut render_evidence,
                 Some(&mut coordinate_controls),
@@ -2427,13 +2609,21 @@ fn service_practice_solo<
     render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<PracticeService> {
     use beatkernel::audio::{CommandScope, PracticeBoundaryKind};
-    let Some(boundary) = owner
-        .playback
-        .qualify(session.discipline.audio().expect("audio timing"), now)?
+    let Some(boundary) = NativePracticeBoundary::qualify(
+        owner.playback,
+        device,
+        session.discipline.audio().expect("audio timing"),
+        session.discipline.source_playback_identity(),
+        session.runtime.transport_mut().output_phase_basis(),
+        now,
+    )?
     else {
         return Ok(PracticeService::Waiting);
     };
-    let coordinate = if let Some(query) = boundary.coordinate_query()? {
+    let coordinate = if let Some(query) = boundary
+        .coordinate_query()?
+        .filter(|_| !matches!(boundary, NativePracticeBoundary::RuntimeRate(_)))
+    {
         let identity = session
             .discipline
             .source_playback_identity()
@@ -2454,7 +2644,10 @@ fn service_practice_solo<
         if basis.source_hz() != identity.hz() {
             return Err("coordinate practice source grid differs from output phase".into());
         }
-        let phase = if boundary.receipt().kind != PracticeBoundaryKind::Started {
+        let phase = if boundary
+            .receipt()
+            .is_none_or(|receipt| receipt.kind != PracticeBoundaryKind::Started)
+        {
             let phase = mapping.phase(
                 session.discipline.audio().expect("audio timing"),
                 identity,
@@ -2493,24 +2686,47 @@ fn service_practice_solo<
         host,
         Some(boundary.host()),
         None,
+        None,
         render_evidence,
         None,
         &mut None,
         &mut false,
     )?;
     if backlog
-        || !session
-            .discipline
-            .audio()
-            .expect("audio timing")
-            .practice_boundary_ready(&boundary, now, merger)?
+        || !boundary.ready(session.discipline.audio().expect("audio timing"), now, merger)?
     {
         return Ok(PracticeService::Waiting);
     }
     if session.pause.phase() != PausePhase::Running || transition.is_some() || paused.is_some() {
         return Err("practice boundary conflicts with an actual pause transition".into());
     }
-    let mut prepared = owner.playback.prepare_boundary(&boundary, host)?;
+    if let NativePracticeBoundary::RuntimeRate(cut) = boundary {
+        let phase = cut.phase();
+        let audio_at = schedule(device, session, *config, render_evidence, stops)?;
+        let report = session.runtime.advance_to_output_phase(
+            boundary.output(),
+            &ExplicitDomains,
+            audio_at,
+            phase,
+        )?;
+        *last_song = report.song_time;
+        *last_host_operation = boundary.host();
+        publish_with_host(session, report, stops, host)?;
+        let mut captures = [(crate::local_players::PlayerId(1), &mut *session.capture)];
+        let prepared = owner.playback.prepare_rate_event_at_cut(
+            &cut,
+            session.runtime.transport_mut(),
+            &mut captures,
+        )?;
+        boundary.commit(session.discipline.audio_mut().expect("audio timing"), now, merger)?;
+        let applied = owner.playback.apply_rate_event(prepared)?;
+        owner.playback.publish_rate_event(&applied, host)?;
+        return Ok(PracticeService::Committed {
+            fresh: false,
+            terminal: owner.playback.terminal_ready(),
+        });
+    }
+    let mut prepared = boundary.prepare(owner.playback, host)?;
     let receipt = prepared.receipt;
     let fresh = matches!(
         receipt.kind,
@@ -2529,7 +2745,8 @@ fn service_practice_solo<
             if receipt.generation <= old.generation()
                 || receipt.playback_frame < old.active_origin_frame()
                 || boundary.output().timestamp < current.anchor().host_time
-                || attempt.speed().rate() != current.anchor().rate
+                || (owner.playback.rate_state().is_none()
+                    && attempt.speed().rate() != current.anchor().rate)
                 || attempt.config.start != receipt.applied_song_time
             {
                 return Err("practice attempt differs from retained output phase".into());
@@ -2541,7 +2758,11 @@ fn service_practice_solo<
                 receipt.playback_frame,
                 old.source_hz(),
             )?;
-            let transport = attempt.transport_at_output_phase(basis, boundary.output())?;
+            let transport = if owner.playback.rate_state().is_some() {
+                attempt.transport_at_runtime_output_phase(basis, boundary.output())?
+            } else {
+                attempt.transport_at_output_phase(basis, boundary.output())?
+            };
             let phase = mapping.phase(
                 session.discipline.audio().expect("audio timing"),
                 identity,
@@ -2633,7 +2854,15 @@ fn service_practice_solo<
         archive_practice_capture(session, owner)?;
         let (_, attempt) = prepared.attempts.pop().expect("prepared solo attempt");
         let transport = fresh_transport.expect("prepared fresh transport");
-        if coordinate.is_some() {
+        if boundary.restarts_original() {
+            session.runtime.replace_practice_state_with_runtime_restart(
+                attempt.judge,
+                transport,
+                attempt.config.end,
+                CommandScope(receipt.generation),
+                owner.playback.speed().rate(),
+            )?;
+        } else if coordinate.is_some() {
             session.runtime.replace_practice_state_with_output_phase(
                 attempt.judge,
                 transport,
@@ -2663,11 +2892,7 @@ fn service_practice_solo<
         *last_host_operation = boundary.host();
         owner.last_playback_frame = receipt.playback_frame;
     }
-    session
-        .discipline
-        .audio_mut()
-        .expect("audio timing")
-        .commit_practice_boundary(boundary, now, merger)?;
+    boundary.commit(session.discipline.audio_mut().expect("audio timing"), now, merger)?;
     // Applied attempt identity is authoritative before fallible publication.
     // In particular, final cleanup must archive the installed fresh capture
     // under its new ordinal even when a screen observer refuses or cancels.
@@ -3076,6 +3301,7 @@ fn service_audio_solo<
     stops: &mut OwnedStopEvidence,
     host: &mut H,
     practice_cut: Option<ClockPoint>,
+    practice_source_cut: Option<u64>,
     practice_end: Option<Timestamp>,
     render_evidence: &mut NativeRenderEvidence,
     mut coordinate_controls: Option<&mut SoloCoordinateControls>,
@@ -3207,6 +3433,11 @@ fn service_audio_solo<
                     .ok_or("coordinate Runtime lacks output phase")?,
                 prepared.output(),
             )?;
+            if let Some(cut) = practice_source_cut {
+                if !mapping.compare_physical_source_frame(cut)?.is_lt() {
+                    break;
+                }
+            }
             if let Some(end) = practice_end {
                 if session
                     .runtime
@@ -3525,6 +3756,11 @@ fn service_audio_solo<
                 .ok_or("coordinate Runtime lacks output phase")?,
             frontier.output(),
         )?;
+        if let Some(cut) = practice_source_cut {
+            if !mapping.compare_physical_source_frame(cut)?.is_lt() {
+                return Ok(());
+            }
+        }
         let report = if let Some(output) = frontier.advance() {
             if let Some(end) = practice_end {
                 if session

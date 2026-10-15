@@ -4,8 +4,10 @@ use crate::{
         AudioAuthority, AudioAuthorityCoordinateBasis, AudioAuthorityEpoch,
         PreparedPrimedCorrelation,
     },
+    gameplay::output::ports::SourcePlaybackIdentity,
     local_input::InputMerger,
     native_gameplay::NativeGameplayResult,
+    native_playback_phase::NativePlaybackMapping,
     native_output_coordinate::{
         CoordinateNativeAudioSnapshot, CoordinateTargetNativeAudioSnapshot, NativeOutputCoordinate,
     },
@@ -15,6 +17,7 @@ use beatkernel::audio::{
     ProjectedPracticeEvent, ProjectedPracticeReceipt, TargetFrameBasis, TargetTime,
 };
 use beatkernel::time::{presentation::ObservationAdmission, ClockPoint};
+use beatkernel::transport::{OutputPhaseBasis, OutputPhasePoint};
 use beatkernel_platform::audio::presentation::validation::{
     NativeFrameBasis, NativeObservationAdmission, NativePresentationRecord,
     NativePresentationValidator, OriginalNativePresentationEvidence, PreparedNativePresentation,
@@ -212,6 +215,37 @@ impl PreparedPracticeEventBoundary {
             event_frames(self.projected.event).1,
             Some(self.projected.boundary.target_time),
         )
+    }
+}
+
+/// Native qualification of the exact Source rate cut. The original first
+/// crossing Target proof remains intact and is independently revalidated.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedPracticeRateCut {
+    projected: PreparedPracticeEventBoundary,
+    mapping: NativePlaybackMapping,
+    identity: SourcePlaybackIdentity,
+    attempt: OutputPhaseBasis,
+    query: InterpolatedTargetTime,
+    phase: OutputPhasePoint,
+    host: ClockPoint,
+}
+
+impl PreparedPracticeRateCut {
+    pub(crate) const fn projected_boundary(&self) -> PreparedPracticeEventBoundary {
+        self.projected
+    }
+    pub(crate) const fn coordinate_query(&self) -> InterpolatedTargetTime {
+        self.query
+    }
+    pub(crate) const fn phase(&self) -> OutputPhasePoint {
+        self.phase
+    }
+    pub(crate) const fn output(&self) -> ClockPoint {
+        self.phase.logical()
+    }
+    pub(crate) const fn host(&self) -> ClockPoint {
+        self.host
     }
 }
 
@@ -944,6 +978,116 @@ impl NativeAudioPresentation {
             return Err("practice event native qualification changed or retired".into());
         }
         Ok(())
+    }
+
+    /// Qualifies the continuous Source rate cut separately from its actual
+    /// first Target crossing. Neither coordinate substitutes for the other.
+    pub(crate) fn prepare_practice_rate_cut(
+        &self,
+        boundary: PreparedPracticeEventBoundary,
+        mapping: NativePlaybackMapping,
+        identity: SourcePlaybackIdentity,
+        attempt: OutputPhaseBasis,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<Option<PreparedPracticeRateCut>> {
+        self.validate_practice_event_boundary(&boundary, now)?;
+        let PracticeEvent::Rate(event) = boundary.projected.event else {
+            return Err("exact practice rate cut requires an actual rate event".into());
+        };
+        let projected_query = boundary
+            .coordinate_query()?
+            .ok_or("exact practice rate cut requires an original coordinate descriptor")?;
+        let (query, phase) = mapping.runtime_rate_cut(
+            self,
+            identity,
+            attempt,
+            (&projected_query, boundary.output()),
+            event,
+        )?;
+        let Some(host) = self
+            .authority
+            .presented_coordinate_boundary_host(&query, now)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedPracticeRateCut {
+            projected: boundary,
+            mapping,
+            identity,
+            attempt,
+            query,
+            phase,
+            host,
+        }))
+    }
+
+    fn validate_practice_rate_cut(
+        &self,
+        prepared: &PreparedPracticeRateCut,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<()> {
+        let current = self
+            .prepare_practice_rate_cut(
+                prepared.projected,
+                prepared.mapping,
+                prepared.identity,
+                prepared.attempt,
+                now,
+            )?
+            .ok_or("exact practice rate cut awaits original native presentation")?;
+        if !current
+            .query
+            .compare_interpolated_time(prepared.query)
+            .is_eq()
+            || current.phase != prepared.phase
+            || current.host != prepared.host
+        {
+            return Err("exact practice rate cut qualification changed".into());
+        }
+        Ok(())
+    }
+
+    /// Equal-cut input stays queued until the actual rate segment is installed.
+    pub(crate) fn practice_rate_cut_ready(
+        &self,
+        prepared: &PreparedPracticeRateCut,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<bool> {
+        self.validate_practice_rate_cut(prepared, now)?;
+        Ok(self
+            .authority
+            .prepare_coordinate_resume_control_cutoff(
+                prepared.projected.epoch.id,
+                prepared.query,
+                prepared.host,
+                now,
+                merger,
+            )?
+            .is_some())
+    }
+
+    /// Rechecks the unchanged first Target proof and current exact input prefix.
+    pub(crate) fn commit_practice_rate_cut(
+        &mut self,
+        prepared: PreparedPracticeRateCut,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_practice_rate_cut(&prepared, now)?;
+        let cutoff = self
+            .authority
+            .prepare_coordinate_resume_control_cutoff(
+                prepared.projected.epoch.id,
+                prepared.query,
+                prepared.host,
+                now,
+                merger,
+            )?
+            .ok_or("exact practice rate cut awaits acquired prefix or pre-cut input drain")?;
+        Ok(self
+            .authority
+            .commit_coordinate_control_cutoff(cutoff, now, merger)?)
     }
 
     pub fn practice_event_boundary_ready(

@@ -113,11 +113,13 @@ fn success_text(output: Output) -> String {
 fn assert_retained_help(platform: &str, help: &str) {
     for contract in [
         "--speed NUM/DEN",
+        "initial positive playback speed",
         "default 1/1",
         "pitch changes",
         "retained practice/restart/seek/loop",
         "runtime rate changes",
-        "unavailable",
+        "runtime rate controls",
+        "fixed saved/network competition rejects runtime rate changes",
         "--start-ns N",
         "--end-ns N",
         "--preroll-ns N",
@@ -128,15 +130,13 @@ fn assert_retained_help(platform: &str, help: &str) {
         );
     }
     if platform == "windows" {
-        assert!(help.contains("any positive fixed speed"), "{help}");
         assert!(
             help.contains("Network play retains its existing speed and section restrictions"),
             "{help}"
         );
     } else {
-        assert!(help.contains("fixed-speed retained"), "{help}");
         assert!(
-            help.contains("network selected-speed play remain unavailable"),
+            help.contains("Network selected-speed play remains unavailable."),
             "{help}"
         );
     }
@@ -328,7 +328,7 @@ fn retained_finite_solo_and_cohort_prepare_same_original_section_at_each_selecte
                     "{feedback}"
                 );
                 assert!(
-                    feedback.contains("fixed-speed retained practice enabled"),
+                    feedback.contains("retained practice with runtime rate controls; fixed competition rejects rate changes"),
                     "{feedback}"
                 );
                 let section = feedback
@@ -443,7 +443,7 @@ fn actual_selected_bgm_overlap_reservation_reaches_missing_input_for_all_linux_r
                     "{feedback}"
                 );
                 assert_eq!(
-                    feedback.contains("fixed-speed retained practice enabled"),
+                    feedback.contains("retained practice with runtime rate controls; fixed competition rejects rate changes"),
                     selected != "1/1",
                     "{feedback}"
                 );

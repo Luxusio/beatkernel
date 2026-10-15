@@ -494,3 +494,118 @@ fn phase_rate_mismatch_refuses_even_with_matching_descriptor_and_config() {
     .unwrap();
     assert_result(&cfg, &p, &t, Some(s), false);
 }
+
+fn runtime_rig(
+    kind: u8,
+    rate: Rate,
+) -> (
+    CoordinateGameplayConfig,
+    NativeAudioPresentation,
+    Transport,
+    LiveSpeedSetup,
+) {
+    let (cfg, presentation, fixed, setup) = rig(kind, rate);
+    let transport = Transport::new_with_runtime_output_phase(
+        fixed.output_phase_basis().unwrap(),
+        point(3, 500),
+        setup.start(),
+        setup.preroll(),
+        setup.speed().rate(),
+        setup.end(),
+    )
+    .unwrap();
+    (cfg, presentation, transport, setup)
+}
+
+#[test]
+fn explicit_runtime_pristine_accepts_actual_source_counter_and_target_descriptors() {
+    for kind in 0..3 {
+        for rate in [
+            Rate::NORMAL,
+            Rate::new(1, 2).unwrap(),
+            Rate::new(3, 2).unwrap(),
+        ] {
+            let (cfg, presentation, transport, setup) = runtime_rig(kind, rate);
+            assert_eq!(transport.runtime_output_rate(), Some(rate));
+            assert_result(&cfg, &presentation, &transport, Some(setup), true);
+            assert_eq!(transport.anchors().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn runtime_opt_in_keeps_exact_preroll_section_and_original_end_validation() {
+    for changed in 0..4 {
+        let (mut cfg, presentation, transport, setup) = runtime_rig(1, Rate::new(1, 2).unwrap());
+        let selected = match changed {
+            0 => Some(
+                LiveSpeedSetup::new(
+                    setup.start(),
+                    Duration::from_nanos(2),
+                    setup.speed(),
+                    setup.end(),
+                )
+                .unwrap(),
+            ),
+            1 => {
+                cfg.audio.section_start = ts(100_002);
+                Some(setup)
+            }
+            2 => {
+                cfg.audio.gameplay.end_song = Some(ts(100_013));
+                Some(setup)
+            }
+            _ => None,
+        };
+        assert_result(&cfg, &presentation, &transport, selected, false);
+    }
+}
+
+#[test]
+fn runtime_noop_control_chronology_still_cannot_impersonate_pristine_startup() {
+    let (cfg, presentation, mut transport, setup) = runtime_rig(2, Rate::new(3, 2).unwrap());
+    let phase = transport.output_phase_basis().unwrap();
+    let at = phase.point_from_elapsed_nanos(point(3, 501), 0).unwrap();
+    transport
+        .set_rate_at_output_phase(at, setup.speed().rate())
+        .unwrap();
+    assert_eq!(transport.anchors().len(), 1);
+    assert_eq!(transport.runtime_output_rate(), Some(setup.speed().rate()));
+    assert_result(&cfg, &presentation, &transport, Some(setup), false);
+}
+
+#[test]
+fn runtime_changed_basis_logical_origin_and_native_epoch_are_not_admission_proof() {
+    for changed in 0..4 {
+        let (mut cfg, presentation, old, setup) = runtime_rig(0, Rate::NORMAL);
+        let transport = match changed {
+            0 => {
+                cfg.audio.gameplay.stream_origin.domain = ClockDomainId(9);
+                old
+            }
+            1 => {
+                cfg.source_history = SourcePlaybackIdentity::new(4, 2, 1).unwrap();
+                old
+            }
+            2 => Transport::new_with_runtime_output_phase(
+                old.output_phase_basis().unwrap(),
+                point(3, 501),
+                setup.start(),
+                setup.preroll(),
+                setup.speed().rate(),
+                setup.end(),
+            )
+            .unwrap(),
+            _ => Transport::new_with_runtime_output_phase(
+                OutputPhaseBasis::new(ClockDomainId(9), 91, 113, 6, 3).unwrap(),
+                point(9, 500),
+                setup.start(),
+                setup.preroll(),
+                setup.speed().rate(),
+                setup.end(),
+            )
+            .unwrap(),
+        };
+        assert_result(&cfg, &presentation, &transport, Some(setup), false);
+    }
+}

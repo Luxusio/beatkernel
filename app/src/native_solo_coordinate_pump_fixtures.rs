@@ -554,6 +554,7 @@ impl Fixture {
             &mut OwnedStopEvidence::default(),
             &mut self.host,
             input_only.then_some(cp(1, 200)),
+            None,
             practice_end,
             &mut NativeRenderEvidence::default(),
             None,

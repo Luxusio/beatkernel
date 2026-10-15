@@ -499,6 +499,7 @@ impl Fixture {
             &mut OwnedStopEvidence::default(),
             &mut self.host,
             None,
+            None,
             practice_end,
             &mut NativeRenderEvidence::default(),
         )

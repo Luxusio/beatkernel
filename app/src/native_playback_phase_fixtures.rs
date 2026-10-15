@@ -571,3 +571,402 @@ fn actual_blanket_device_bridge_forwards_mapping_and_default_refuses() {
         NativeGameplayDevice::playback_mapping_at(&UnsupportedDevice, &p, &q, identity()).is_err()
     );
 }
+
+struct ActualRuntimeRateMapping {
+    output: beatkernel_platform::audio::ConvertedNativeOutputState,
+    source: OutputFrameBasis,
+    target: TargetFrameBasis,
+    projected: beatkernel::audio::ProjectedPracticeEvent,
+    facts: ConvertedPlaybackFacts,
+}
+
+fn actual_runtime_rate_mapping() -> ActualRuntimeRateMapping {
+    use beatkernel::audio::*;
+    use beatkernel::time::Duration;
+    use beatkernel::transport::Rate;
+    use beatkernel_platform::audio::{ConvertedNativeOutputState, DeviceFormat, SampleEncoding};
+
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let limits = PcmLimits::new(256, 1024, 1).unwrap();
+    let mut bank = SampleBank::new(format, limits).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25; 64], limits).unwrap(),
+    )
+    .unwrap();
+    let program = PreparedPracticeProgram::new_with_runtime_rates(
+        &bank,
+        vec![PracticeCue {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: Timestamp::ZERO,
+            gain: 1.0,
+        }],
+        PracticeLimits::new(8, 1, 64, 8, 16).unwrap(),
+        Rate::new(1, 2).unwrap(),
+        Duration::ZERO,
+        false,
+        14105,
+    )
+    .unwrap();
+    let (mut controller, endpoint) = practice_queue(&program).unwrap();
+    let (_, consumer) = command_queue(8).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(2),
+            Timestamp::ZERO,
+            AudioLimits::new(8, 4, 8, 256, 8).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer
+        .install_practice(
+            program,
+            endpoint,
+            PracticeRegion::new(Timestamp::ZERO, Timestamp::from_nanos(1_000_000_000), false)
+                .unwrap(),
+        )
+        .unwrap();
+    let source = mixer.output_frame_basis();
+    let mut output = ConvertedNativeOutputState::new(
+        mixer,
+        DeviceFormat::new(1500, 1, SampleEncoding::Float32, None).unwrap(),
+        ChannelMatrix::default_mix(1, 1).unwrap(),
+        ResampleQuality::Linear,
+        32,
+    )
+    .unwrap_or_else(|_| panic!("valid actual converter"));
+    output.enable_phase_history(16).unwrap();
+    output.enable_source_playback_history(16).unwrap();
+    let target = output.target_frame_basis();
+    output.render_pending(24).unwrap();
+    output.admit(24).unwrap();
+    assert!(matches!(
+        controller.try_pop_projected_event().unwrap().event,
+        PracticeEvent::Boundary(PracticeReceipt {
+            kind: PracticeBoundaryKind::Started,
+            ..
+        })
+    ));
+    assert_eq!(output.converter_owner().pulled_source_frame_cursor(), 17);
+    let preparation = controller.prepare_rate(Rate::new(3, 2).unwrap()).unwrap();
+    controller.try_set_rate_next(12, 1, &preparation).unwrap();
+    output.render_pending(16).unwrap();
+    output.admit(16).unwrap();
+    let projected = controller.try_pop_projected_event().unwrap();
+    assert_eq!(projected.boundary.source_frame, 17);
+    assert_eq!(projected.target_frame, 26);
+    assert_eq!(
+        projected.boundary.target_time,
+        TargetTime::from_frames(26, 1500).unwrap()
+    );
+    let query = exact(projected.boundary.target_time);
+    let history = output.phase_history().unwrap();
+    let (phase, segment_end) = (0..history.len())
+        .find_map(|index| {
+            let phase = history.span(index).unwrap();
+            let words = phase.to_words();
+            let start = TargetTime::new(words[4], words[5], words[6]).unwrap();
+            let end = history
+                .span(index + 1)
+                .map(|next| {
+                    let words = next.to_words();
+                    TargetTime::new(words[4], words[5], words[6]).unwrap()
+                })
+                .unwrap_or(history.end_time());
+            (!query.compare_target_time(start).is_lt()
+                && !query.compare_target_time(end).is_gt()
+                && (index + 1 == history.len() || !query.compare_target_time(end).is_eq()))
+            .then_some((phase, end))
+        })
+        .expect("original projected event lies inside actual converter history");
+    let history_source = output.converter_owner().source_playback_history().unwrap();
+    let playback = (0..history_source.len())
+        .filter_map(|index| history_source.span(index))
+        .find(|span| {
+            !phase
+                .compare_source_frame_at_interpolated_time(
+                    query,
+                    segment_end,
+                    span.physical_start(),
+                )
+                .unwrap()
+                .is_lt()
+                && span.physical_end().is_none_or(|end| {
+                    phase
+                        .compare_source_frame_at_interpolated_time(query, segment_end, end)
+                        .unwrap()
+                        .is_lt()
+                })
+        })
+        .unwrap();
+    let facts = ConvertedPlaybackFacts {
+        phase,
+        segment_end,
+        generated_target_end: history.end_time(),
+        submitted_target_end: output.admitted_target_time().unwrap(),
+        playback,
+        pulled_source_end: history_source.pulled_end_frame(),
+        revision: 2,
+    };
+    ActualRuntimeRateMapping {
+        output,
+        source,
+        target,
+        projected,
+        facts,
+    }
+}
+
+#[test]
+fn runtime_rate_exact_source17_cut_differs_from_actual_first_target26_projection() {
+    use beatkernel::audio::PracticeEvent;
+    let fixture = actual_runtime_rate_mapping();
+    let p = presentation(
+        AudioAuthorityCoordinateBasis::TargetFrame(fixture.target),
+        7,
+    );
+    let id = SourcePlaybackIdentity::new(1000, 0, 0).unwrap();
+    let attempt = OutputPhaseBasis::new(ClockDomainId(3), 41, 1, 0, 1000).unwrap();
+    let projected_query = exact(fixture.projected.boundary.target_time);
+    let projected_logical = logical(&p, projected_query, fixture.target.origin());
+    let event = match fixture.projected.event {
+        PracticeEvent::Rate(event) => event,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        (
+            event.physical_frame,
+            event.playback_frame,
+            event.active_elapsed_nanos
+        ),
+        (17, 17, 17_000_000)
+    );
+    let mapping =
+        NativePlaybackMapping::converted(7, fixture.target, id, projected_query, fixture.facts)
+            .unwrap();
+    let original_phase = mapping
+        .phase(&p, id, &projected_query, attempt, projected_logical)
+        .unwrap();
+    assert_eq!(original_phase.elapsed_nanos(), 17_333_333);
+    assert_eq!(
+        mapping.compare_physical_source_frame(17).unwrap(),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        mapping.compare_physical_source_frame(18).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    let (query, phase) = mapping
+        .runtime_rate_cut(
+            &p,
+            id,
+            attempt,
+            (&projected_query, projected_logical),
+            event,
+        )
+        .unwrap();
+    assert!(
+        query
+            .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
+            .is_eq()
+    );
+    assert!(query.compare_interpolated_time(projected_query).is_lt());
+    assert_eq!(phase.elapsed_nanos(), 17_000_000);
+    assert_eq!(phase.logical(), point(3, 17_000_500));
+    assert_eq!(phase.basis(), attempt);
+    let exact_mapping =
+        NativePlaybackMapping::converted(7, fixture.target, id, query, fixture.facts).unwrap();
+    for (frame, expected) in [
+        (16, std::cmp::Ordering::Greater),
+        (17, std::cmp::Ordering::Equal),
+        (18, std::cmp::Ordering::Less),
+    ] {
+        assert_eq!(
+            exact_mapping.compare_physical_source_frame(frame).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        fixture.projected.target_frame, 26,
+        "original native projected proof is not retimed"
+    );
+    assert!(
+        fixture
+            .facts
+            .phase
+            .compare_source_frame_at_interpolated_time(query, fixture.facts.segment_end, 17)
+            .unwrap()
+            .is_eq()
+    );
+
+    let source_p = presentation(
+        AudioAuthorityCoordinateBasis::SourceFrame(fixture.source),
+        7,
+    );
+    let source_query = exact(TargetTime::from_frames(17, 1000).unwrap());
+    let history = fixture
+        .output
+        .converter_owner()
+        .source_playback_history()
+        .unwrap();
+    let packet = NativeSourcePlaybackQuery::new(
+        7,
+        fixture.source,
+        id,
+        source_query,
+        SourcePlaybackFacts {
+            playback: fixture.facts.playback,
+            pulled_source_end: history.pulled_end_frame(),
+            submitted_source_end: history.pulled_end_frame(),
+            render: None,
+            revision: 2,
+        },
+        Some(()),
+    )
+    .unwrap();
+    let source_mapping = NativePlaybackMapping::from_source(&packet);
+    for (frame, expected) in [
+        (16, std::cmp::Ordering::Greater),
+        (17, std::cmp::Ordering::Equal),
+        (18, std::cmp::Ordering::Less),
+    ] {
+        assert_eq!(
+            source_mapping.compare_physical_source_frame(frame).unwrap(),
+            expected
+        );
+    }
+    let (direct_query, direct_phase) = source_mapping
+        .runtime_rate_cut(
+            &source_p,
+            id,
+            attempt,
+            (
+                &source_query,
+                logical(&source_p, source_query, fixture.source.origin()),
+            ),
+            event,
+        )
+        .unwrap();
+    assert!(direct_query.compare_interpolated_time(query).is_eq());
+    assert_eq!(direct_phase, phase);
+}
+
+#[test]
+fn runtime_rate_exact_cut_rejects_wrong_identity_generation_elapsed_playback_and_query() {
+    use beatkernel::audio::PracticeEvent;
+    let fixture = actual_runtime_rate_mapping();
+    let p = presentation(
+        AudioAuthorityCoordinateBasis::TargetFrame(fixture.target),
+        7,
+    );
+    let id = SourcePlaybackIdentity::new(1000, 0, 0).unwrap();
+    let attempt = OutputPhaseBasis::new(ClockDomainId(3), 41, 1, 0, 1000).unwrap();
+    let query = exact(fixture.projected.boundary.target_time);
+    let at = logical(&p, query, fixture.target.origin());
+    let event = match fixture.projected.event {
+        PracticeEvent::Rate(event) => event,
+        _ => unreachable!(),
+    };
+    let mapping =
+        NativePlaybackMapping::converted(7, fixture.target, id, query, fixture.facts).unwrap();
+    let before = format!("{p:?}");
+    assert!(
+        mapping
+            .runtime_rate_cut(
+                &p,
+                SourcePlaybackIdentity::new(1000, 1, 0).unwrap(),
+                attempt,
+                (&query, at),
+                event
+            )
+            .is_err()
+    );
+    let wrong_generation = OutputPhaseBasis::new(ClockDomainId(3), 41, 2, 0, 1000).unwrap();
+    assert!(
+        mapping
+            .runtime_rate_cut(&p, id, wrong_generation, (&query, at), event)
+            .is_err()
+    );
+    let mut wrong_e = event;
+    wrong_e.active_elapsed_nanos = 17_333_333;
+    let mut wrong_playback = event;
+    wrong_playback.playback_frame = 16;
+    let mut wrong_physical = event;
+    wrong_physical.physical_frame = 16;
+    for invalid in [wrong_e, wrong_playback, wrong_physical] {
+        assert!(
+            mapping
+                .runtime_rate_cut(&p, id, attempt, (&query, at), invalid)
+                .is_err()
+        );
+    }
+    let wrong_query = exact(TargetTime::from_frames(17, 1000).unwrap());
+    assert!(
+        mapping
+            .runtime_rate_cut(&p, id, attempt, (&wrong_query, at), event)
+            .is_err()
+    );
+    assert_eq!(
+        format!("{p:?}"),
+        before,
+        "pure mapping grants no native mutation"
+    );
+}
+
+#[test]
+fn runtime_rate_exact_cut_refuses_held_or_no_longer_retained_converter_span() {
+    use beatkernel::audio::{ConvertedPhaseSpan, PracticeEvent};
+    let fixture = actual_runtime_rate_mapping();
+    let p = presentation(
+        AudioAuthorityCoordinateBasis::TargetFrame(fixture.target),
+        7,
+    );
+    let id = SourcePlaybackIdentity::new(1000, 0, 0).unwrap();
+    let attempt = OutputPhaseBasis::new(ClockDomainId(3), 41, 1, 0, 1000).unwrap();
+    let query = exact(fixture.projected.boundary.target_time);
+    let at = logical(&p, query, fixture.target.origin());
+    let event = match fixture.projected.event {
+        PracticeEvent::Rate(event) => event,
+        _ => unreachable!(),
+    };
+    let mut held = fixture.facts;
+    let mut words = held.phase.to_words();
+    words[7] = 1;
+    held.phase = ConvertedPhaseSpan::from_words(words).unwrap();
+    let mapping = NativePlaybackMapping::converted(7, fixture.target, id, query, held).unwrap();
+    assert!(
+        mapping
+            .runtime_rate_cut(&p, id, attempt, (&query, at), event)
+            .is_err()
+    );
+    // An otherwise valid active span starts at the actual first crossing. The
+    // integer Source17 cut is strictly before it, so inversion must not extrapolate.
+    let mut shortened = fixture.facts;
+    let mut words = shortened.phase.to_words();
+    words[1] = 17;
+    words[2] = 1;
+    words[3] = 3;
+    let time = fixture.projected.boundary.target_time;
+    words[4] = time.seconds();
+    words[5] = time.numerator();
+    words[6] = time.denominator();
+    shortened.phase = ConvertedPhaseSpan::from_words(words).unwrap();
+    let mapping =
+        NativePlaybackMapping::converted(7, fixture.target, id, query, shortened).unwrap();
+    assert!(
+        mapping
+            .runtime_rate_cut(&p, id, attempt, (&query, at), event)
+            .is_err()
+    );
+    // An invalidated upper bound must remain an arithmetic range refusal. This
+    // intentionally invalid descriptor grants no native proof or admission.
+    let mut invalid_range = mapping;
+    if let Mapping::Converted { ref mut facts, .. } = invalid_range.mapping {
+        facts.segment_end = TargetTime::from_frames(25, 1500).unwrap();
+    }
+    assert!(invalid_range.compare_physical_source_frame(17).is_err());
+}
