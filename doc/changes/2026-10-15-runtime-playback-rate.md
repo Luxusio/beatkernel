@@ -544,3 +544,26 @@ backpressure·동일 원본 바이트의 재시도 성공·다른 player/current
 이전 제품 버전의 증거다. 새 브라우저 확인과 새 독립 code/security 리뷰 및
 필수 browser/CLI/desktop QA는 아직 완료하지 않았다. WBS05.13.06 W와 전체
 136/489·오디오12/27을 유지한다.
+
+
+## 수정 뒤 실제 WASM·열다섯 번째 브라우저
+
+Root9503의 offline release UI/audio 빌드와 즉시 matching bindgen 생성이 모두
+exit0이다. 현재 UI SHA256은
+`a09f96fa9340dc6695fa4226db4b224f9535ab2c5eb8e9bd4a82eaba7e855325`,
+audio는 `c83755b0f5145dfc4b671f0e304e43fceaf2a3af3d34334b65e50609be6d4c01`이다.
+후자는 실제 재빌드 뒤 동일함을 측정한 값이며 기존 아티팩트를 추정 재사용하지 않았다.
+원본 로그는 `browser-*-custody-fixes*14118*.log`이고 같은 작업 폴더의
+`browser-custody-fixes-bindgen-sha256-14118.log`가 생성 JS와 WASM 네 파일을 기록한다.
+
+실제79718은 `target/wf/runtime-rate-browser-fifteenth-14118/evidence.json`에서
+strict-final-audit PASS다. 필수14흐름 전부 PASS, 추가 고정 상대 저장 검사를
+포함한15checks, unmet/errors/consoleErrors/networkErrors 빈 배열,
+networkOverflow=false, owned browser/Xvfb exit0이다. 원래 입력·시계·File·저장·
+리플레이·가변 조건 Records·고정 상대 거절 검사를 그대로 유지했다. 실제
+`variable-records-menu-history-canvas.png`를 다시 열어 역사 상세 표시도 확인했다.
+
+현재 제품 소스는 bfb6affb, JS a4bad974, runner fc14ca44로 고정되어 있다.
+새 독립 DEEP code/security 리뷰는 전체 변경 범위를 확인 중이다. 필수 qa-browser,
+qa-cli, qa-desktop는 아직 실행하지 않았고, 이번 root 실행을 독립 QA로 표시하지
+않는다. 실제 장치·음향·지연·성능 및 WBS05.13.07 E의 범위는 그대로 남는다.
