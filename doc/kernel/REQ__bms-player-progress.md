@@ -7,6 +7,14 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+최신 재개 checkpoint: 3ce5371d의 복구된 독립 security 리뷰는 PASS, code 리뷰는
+원래 끝이 없는 세션의 scrub 뒤 자연 완료가 막히는 결함1건을 확인했다.
+AC035에서 공유 Step의 원래 optional 종료 조건 보존을 수정했다. 실제 solo/local
+자연 완료·원본 기록·PCM을 포함한 관련51/0과 기존 종료 처리83/0이 통과했다.
+새 실제 두 release WASM·matching bindgen과 native 주 실행 파일 빌드도 통과했다.
+앞선 기록 회수·최소 작업 예산 수정은 유효하다. 새 정식 code/security 리뷰 뒤
+필수 browser/CLI/desktop QA를 실행하며, 전체136/489·오디오12/27은 그대로다.
+
 현재 runtime05.13.06은 구현·연동 중(W)이다. 268bb73d의 독립 DEEP code review
 FIX_NOW5와 별도 security의 중복2건을 수정했다. c32d1287은 native optional focus,
 caaaba03은 Window session 키·기록 보관 예약/Save·편집 중 key-up,

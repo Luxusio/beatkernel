@@ -631,3 +631,45 @@ audio는 `d7ca72a92c108a8fa563459ae158d62f7f6723a7b08a1ab0b4bfc59187b863d3`다.
 (`native-final-player-build-14118.log`, binary hash는 같은 이름의 sha256 로그).
 이는 이후 독립 desktop QA가 사용할 current 실행 파일의 빌드 증거이며, 실제
 GUI/input/audio 장치 검증은 다음 QA에서 별도로 판단한다.
+
+
+## 재개 후 정식 리뷰와 끝이 없는 구간의 scrub
+
+사용자 재개 뒤 소스3ce5371d와 아티팩트 hash는 그대로였으나 중단된 c4 리뷰
+에이전트와 최종 판정은 남아 있지 않았다. 미완료된 code/security 리뷰만 새로
+실행했다. Security는 실제 대상 Node19/0과 함께 PASS0, code는 FIX_NOW1이다.
+원래 end=None/open_end=true인 browser 세션을 scrub하면 공유 Step가 오디오의
+MAX sentinel을 Some(MAX)로 잘못 옮긴다. 실제 Worklet은 계속 open이라 Ended를
+내지 않고, solo/local의 사업 로직만 유한 MAX를 기다려 자연 완료하지 못한다.
+명시적 유한 MAX와 구분해야 하며, native owner는 이미 original optional end를
+유지한다. Root가 실제 호출 경로를 읽어 결함을 확인했다.
+
+AC035는 공유 Step에서 scrub의 원래 종료 의도를 보존하고, production
+Worklet/Step의 solo/local 자연 완료와 기록 header를 독립 회귀로 확인한다.
+REQ와 canonical PLAN에 제품 수정 전 범위를 기록했다. 새 matching WASM과
+정식 리뷰 뒤 필수 QA가 현재 브라우저를 실행하며, 기존 검증 결과의 범위를
+확대하지 않는다. 전체136/489·오디오12/27과 full player Goal을 유지한다.
+
+
+## AC035 개발 검증과 최종 아티팩트
+
+공유 Step의 Requested Scrub가 원래 명시적인 open_end를 보존하도록 수정했다.
+유한 종료와 명시적인 유한 MAX는 그대로 유지한다. 독립 source/test 작성자가 모두
+QUIET인 뒤 root99205의 첫 실제 실행에서 capture12·PCM end-to-end3·signed clock10·
+Step26=51/0과 별도 기존 library completion83/0이 통과했다(ignored0). 새3회귀는
+solo/2인 local의 실제 rate→Scrub 경계·ACK, 원본 입력과 retired/current 기록,
+키음/BGM PCM 꼬리와 늦은 presentation 뒤 자연 완료, finite20ms/MAX의
+Scrub→Loop→Restart를 확인한다. 종료 gate를 완화하거나 Ended를 만들지 않았다.
+로그는 target/wf/runtime-rate-14043/rust-open-scrub-{endpoint,completion}-first-14120.log다.
+
+root1877은 실제 offline UI/audio release WASM, 각각 직후의 matching wasm-bindgen,
+desktop+webtransport native 주 실행 파일 빌드를 모두 exit0으로 끝냈다.
+UI WASM=db4f3e9bcf556d627a81cac3ffdeed4c17e31522a064c50d598a80e4019a7f76,
+audio WASM=d7ca72a92c108a8fa563459ae158d62f7f6723a7b08a1ab0b4bfc59187b863d3,
+native=877ced1df1de5851c2558aaa07431bf9aede135464e1e254f22f0404f71d47ab이다.
+matching build/bindgen/hash 로그는 같은 증거 폴더의 *open-scrub*14120.log다.
+오디오 byte 동일성은 새 실제 빌드 뒤 측정했다.
+
+새 정식 code/security 리뷰와 현재 아티팩트의 required qa-browser/CLI/desktop는
+아직 남는다. qa-browser가 최종 리뷰 PASS 뒤 필수14흐름을 한 번 실행하며,
+이전 browser15를 현재 QA로 재표기하지 않는다. 전체136/489·오디오12/27은 유지한다.

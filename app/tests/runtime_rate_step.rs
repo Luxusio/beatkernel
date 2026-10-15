@@ -5,8 +5,8 @@ mod fixture;
 
 use beatkernel::{
     audio::{
-        AudioLimits, OutputFrameBasis, PracticeBoundaryKind, PracticeEvent, PracticeRateEvent,
-        PracticeRateOutcome, PracticeRegion, ProjectedPracticeEvent, SampleBank,
+        AudioCommand, AudioLimits, OutputFrameBasis, PracticeBoundaryKind, PracticeEvent,
+        PracticeRateEvent, PracticeRateOutcome, PracticeRegion, ProjectedPracticeEvent, SampleBank,
         SourcePlaybackSpan, SourcePlaybackState,
     },
     input::{
@@ -31,6 +31,7 @@ use beatkernel_bms_runtime::{
     local_players::{PlayerId, ResolvedInputPlan},
     local_runtime::InputResult,
     native_output_coordinate::NativeOutputCoordinate,
+    play_result::PlayResultScope,
     practice_control::{
         PracticeAction, PracticeRateState, PracticeRequest, PracticeTransactionReply,
         PracticeTransactionRequest,
@@ -367,12 +368,12 @@ impl Solo {
         } else {
             authority(true)
         };
-        let end = retained.worklet.initial_region.end;
+        let end = (!retained.worklet.open_end).then_some(retained.worklet.initial_region.end);
         let (mut game, bank) = StepGameplay::new_retained_audio_section(
             prepared(),
             config(),
             bindings(None),
-            Some(end),
+            end,
             BmsInputMode::ButtonOnly,
             authority,
             None,
@@ -481,6 +482,603 @@ impl Solo {
         self.game
             .acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, id, Ok(()))
             .unwrap();
+    }
+}
+
+fn open_options() -> StepRetainedOptions {
+    let mut retained = options();
+    retained.worklet.initial_region = PracticeRegion::new(ts(0), ts(i64::MAX), false).unwrap();
+    retained.worklet.open_end = true;
+    retained
+}
+
+fn enqueue_keys(audio: &mut WorkletAudio, commands: &[AudioCommand]) {
+    // This rig deliberately separates RAW's 1s origin from Worklet's relative
+    // origin. Translate actual accepted commands, retaining their frame grid.
+    for &command in commands {
+        let AudioCommand::Play {
+            voice,
+            sample,
+            at,
+            gain,
+        } = command
+        else {
+            panic!("expected an original gameplay keysound: {command:?}");
+        };
+        audio
+            .enqueue(AudioCommand::Play {
+                voice,
+                sample,
+                at: ts(at
+                    .as_nanos()
+                    .checked_sub(raw(0).timestamp.as_nanos())
+                    .unwrap()),
+                gain,
+            })
+            .unwrap();
+    }
+}
+
+fn deliver_solo_keys(rig: &mut Solo, expected: usize) {
+    let batch = rig.game.take_commands(64).unwrap().unwrap();
+    assert_eq!(batch.commands.len(), expected);
+    enqueue_keys(&mut rig.audio, &batch.commands);
+    rig.game
+        .acknowledge(batch.sequence, batch.commands.len(), true)
+        .unwrap();
+    assert!(rig.game.take_commands(64).unwrap().is_none());
+}
+
+fn deliver_local_keys(game: &mut StepLocalGameplay, audio: &mut WorkletAudio, expected: usize) {
+    let batch = game.take_commands(64).unwrap().unwrap();
+    assert_eq!(batch.commands.len(), expected);
+    enqueue_keys(audio, &batch.commands);
+    game.acknowledge(batch.sequence, batch.commands.len(), true)
+        .unwrap();
+    assert!(game.take_commands(64).unwrap().is_none());
+}
+
+fn region_solo(rig: &mut Solo, id: u64, action: PracticeAction, region: PracticeRegion) {
+    let cap = rig.game.retained_capability().unwrap();
+    rig.game
+        .prepare_retained_transaction(
+            PracticeTransactionRequest::Region(PracticeRequest {
+                id,
+                generation: cap.practice.generation,
+                action,
+            }),
+            false,
+        )
+        .unwrap();
+    rig.audio
+        .try_region_next(id, cap.practice.generation, cap.rate.revision, region)
+        .unwrap();
+    rig.game
+        .acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, id, Ok(()))
+        .unwrap();
+    let physical = rig.physical;
+    rig.render(1);
+    let event = rig.event();
+    assert!(matches!(event.event,
+        WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+            event: PracticeEvent::Boundary(receipt), ..
+        }) if receipt.kind == PracticeBoundaryKind::Requested
+            && receipt.physical_frame == physical && receipt.request_id == id));
+    rig.finish_event(event);
+    assert!(matches!(rig.game.take_retained_response(),
+        Some(PracticeTransactionReply::Region { reply, .. }) if reply.id == id && reply.result.is_ok()));
+}
+
+fn assert_open_header(header: &ReplayHeader, initial: ReplaySpeed) {
+    let setup = decode_section_setup(&header.options).unwrap();
+    assert_eq!(setup.end, None);
+    assert_eq!(setup.start, ts(0));
+    assert_eq!(setup.chart_seed, SEED);
+    assert_eq!(setup.source_speed, initial);
+    assert_eq!(header.normalized_clock, logical(0).domain);
+    assert_eq!(
+        split_schedule(&header.options).unwrap().1.initial_speed(),
+        initial
+    );
+}
+
+#[test]
+fn open_solo_scrub_keeps_none_and_completes_from_original_inputs_pcm_and_presented_drain() {
+    let mut rig = Solo::configured(true, open_options(), false);
+    assert_eq!(rig.game.end_ns(), None);
+    rig.started();
+    rig.inputs
+        .admit(input(2 * NS, 1, 0, ButtonState::Down), host(3 * NS))
+        .unwrap();
+    let head = rig
+        .game
+        .process_next_audio_input(&mut rig.inputs, host(3 * NS), raw(3 * NS), None)
+        .unwrap()
+        .unwrap();
+    deliver_solo_keys(&mut rig, 1);
+    rig.admit_rate(200, 1, 1);
+    rig.render(1);
+    let rate_event = rig.event();
+    rig.finish_event(rate_event);
+    rig.game.take_retained_response();
+    let old_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+    assert_open_header(&old_header, speed(1, 2));
+    assert_schedule(&old_header, &[(1_500_000, 1, 1)]);
+    let old = ReplayFile::new(old_header, vec![accepted_input_record(&head, 0, NS)]);
+    let before = rig.game.retained_capability().unwrap();
+    region_solo(
+        &mut rig,
+        201,
+        PracticeAction::Scrub { target: ts(0) },
+        PracticeRegion::new(ts(0), ts(i64::MAX), false).unwrap(),
+    );
+    assert_eq!(rig.game.end_ns(), None);
+    assert_eq!(
+        rig.game.retained_capability().unwrap().practice.generation,
+        before.practice.generation + 1
+    );
+    assert_eq!(
+        rig.game.retained_capability().unwrap().rate.rate,
+        rate(1, 1)
+    );
+    assert_eq!(rig.game.score().hits, 0);
+    let current_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+    assert_open_header(&current_header, speed(1, 1));
+    assert_eq!(current_header.chart_identity, old.header.chart_identity);
+    assert_eq!(current_header.rules_identity, old.header.rules_identity);
+    assert!(split_schedule(&current_header.options)
+        .unwrap()
+        .1
+        .cuts()
+        .is_empty());
+    let retired = rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap();
+    assert_eq!(decode_replay(&retired, fixture::limits()).unwrap(), old);
+    assert_eq!(encode_replay(&old, fixture::limits()).unwrap(), retired);
+    assert!(rig.game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+    rig.render(2);
+    rig.game.record_audio_prefix(host(7 * NS)).unwrap();
+    let mut records = Vec::new();
+    for (sequence, at, key, state, song) in [
+        (1, 5 * NS, 7, ButtonState::Down, NS),
+        (2, 6 * NS, 8, ButtonState::Down, 2 * NS),
+        (3, 7 * NS, 7, ButtonState::Up, 3 * NS),
+    ] {
+        let mut event = input(at, 1, sequence, state);
+        let PhysicalInputEvent::Button(button) = &mut event else {
+            unreachable!()
+        };
+        button.control = PhysicalControlId::keyboard(key);
+        rig.inputs.admit(event, host(7 * NS)).unwrap();
+        assert!(
+            rig.game
+                .advance_audio_frontier(&mut rig.inputs, host(7 * NS), raw(7 * NS))
+                .unwrap()
+                .is_none(),
+            "unread original input must precede the frontier"
+        );
+        let report = rig
+            .game
+            .process_next_audio_input(&mut rig.inputs, host(7 * NS), raw(7 * NS), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            report.bound_inputs[0].physical.meta().original_clock_point,
+            Some(host(at))
+        );
+        assert!(report
+            .judge_events
+            .iter()
+            .any(|event| matches!(event.outcome, JudgeOutcome::Hit { .. })));
+        records.push(accepted_input_record(&report, sequence - 1, song));
+    }
+    assert_eq!(rig.game.score().hits, 3);
+    assert_eq!(rig.game.score().misses, 0);
+    assert!(!rig
+        .game
+        .observe_completion(rig.audio.report(), Some(raw(7 * NS)))
+        .unwrap());
+    deliver_solo_keys(&mut rig, 2);
+    rig.render(2);
+    assert_eq!(&rig.audio.output()[..2], &[3.0 / 32.0, 6.0 / 32.0]);
+    rig.game.record_audio_prefix(host(9 * NS)).unwrap();
+    let finish = rig
+        .game
+        .advance_audio_frontier(&mut rig.inputs, host(9 * NS), raw(9 * NS))
+        .unwrap()
+        .unwrap();
+    assert_eq!(finish.song_time, ts(5 * NS));
+    records.push(ReplayRecord {
+        ordinal: 3,
+        song_time: ts(5 * NS),
+        operation: ReplayOperation::Advance,
+    });
+    assert!(!rig
+        .game
+        .observe_completion(rig.audio.report(), Some(raw(9 * NS)))
+        .unwrap());
+    rig.render(30);
+    assert!(
+        rig.audio.report().unwrap().active_voices > 0,
+        "the original BGM tail is still playing"
+    );
+    assert!(!rig
+        .game
+        .observe_completion(rig.audio.report(), Some(raw(39 * NS)))
+        .unwrap());
+    rig.render(2);
+    assert_eq!(rig.audio.report().unwrap().active_voices, 0);
+    assert_eq!(&rig.audio.output()[..2], &[31.0 / 32.0, 0.0]);
+    assert!(
+        !rig.game
+            .observe_completion(rig.audio.report(), Some(raw(39 * NS)))
+            .unwrap(),
+        "rendered silence does not replace actual presentation"
+    );
+    assert!(rig.game.completed_result().is_none());
+    assert!(rig
+        .game
+        .observe_completion(None, Some(raw(41 * NS)))
+        .unwrap());
+    assert!(rig.game.completed_result().is_some());
+    assert_eq!(
+        rig.game.completed_result().unwrap().scope(),
+        PlayResultScope::FullSong
+    );
+    assert_eq!(rig.audio.playback_end_frame(), None);
+    assert!(
+        rig.audio.poll_retained_event().unwrap().is_none(),
+        "open playback never supplies an Ended event"
+    );
+    assert_eq!(
+        rig.game.effective_header(PlayerId(1)).unwrap(),
+        &current_header
+    );
+    rig.game.fail();
+    let current =
+        decode_replay(&rig.game.take_replay().unwrap().unwrap(), fixture::limits()).unwrap();
+    assert_eq!(current, ReplayFile::new(current_header, records));
+}
+
+#[test]
+fn open_local_scrub_preserves_each_none_capture_and_all_members_naturally_complete() {
+    let members = vec![
+        (PlayerId(1), Some(DeviceId(1))),
+        (PlayerId(2), Some(DeviceId(2))),
+    ];
+    let maps = members
+        .iter()
+        .map(|(_, device)| bindings(*device))
+        .collect();
+    let (mut game, bank) = StepLocalGameplay::new_retained_audio_section(
+        prepared(),
+        config(),
+        ResolvedInputPlan::new(members).unwrap(),
+        maps,
+        None,
+        BmsInputMode::ButtonOnly,
+        authority(true),
+        None,
+        open_options(),
+    )
+    .unwrap();
+    for id in [1, 2] {
+        game.configure_capture(PlayerId(id), fixture::limits(), SEED)
+            .unwrap();
+    }
+    let mut audio = audio(bank, game.retained_setup().unwrap());
+    let mut inputs =
+        InputMerger::new(host(0).domain, host(0), vec![DeviceId(1), DeviceId(2)], 32).unwrap();
+    game.activate_audio().unwrap();
+    game.observe_audio_coordinate(
+        1,
+        ClockPair {
+            source: raw(0),
+            target: host(0),
+        },
+        NativeOutputCoordinate::StreamFrame { frame: 0 },
+    )
+    .unwrap();
+    render_local(&mut game, &mut audio, 0, 3);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 3);
+    let mut old_records = [Vec::new(), Vec::new()];
+    for id in [1, 2] {
+        inputs
+            .admit(input(2 * NS, id, 0, ButtonState::Down), host(3 * NS))
+            .unwrap();
+        let Some(InputResult::Processed(reports)) = game
+            .process_next_audio_input(&mut inputs, host(3 * NS), raw(3 * NS), None)
+            .unwrap()
+        else {
+            panic!("original local head missing");
+        };
+        assert_eq!(reports[0].player, PlayerId(id as u32));
+        old_records[id as usize - 1].push(accepted_input_record(&reports[0].report, 0, NS));
+    }
+    deliver_local_keys(&mut game, &mut audio, 2);
+    let cap = game.retained_capability().unwrap();
+    let prepared = game
+        .prepare_retained_transaction(rate_request(210, cap, 1, 1), false)
+        .unwrap();
+    audio
+        .try_set_rate_next(
+            210,
+            cap.practice.generation,
+            cap.rate.revision,
+            prepared.preparation.unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 210, Ok(()))
+        .unwrap();
+    render_local(&mut game, &mut audio, 3, 1);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 4);
+    game.take_retained_response();
+    let old: [ReplayFile; 2] = std::array::from_fn(|i| {
+        let header = game
+            .effective_header(PlayerId(i as u32 + 1))
+            .unwrap()
+            .clone();
+        assert_open_header(&header, speed(1, 2));
+        assert_schedule(&header, &[(1_500_000, 1, 1)]);
+        ReplayFile::new(header, std::mem::take(&mut old_records[i]))
+    });
+    let before = game.retained_capability().unwrap();
+    game.prepare_retained_transaction(
+        PracticeTransactionRequest::Region(PracticeRequest {
+            id: 211,
+            generation: before.practice.generation,
+            action: PracticeAction::Scrub { target: ts(0) },
+        }),
+        false,
+    )
+    .unwrap();
+    audio
+        .try_region_next(
+            211,
+            before.practice.generation,
+            before.rate.revision,
+            PracticeRegion::new(ts(0), ts(i64::MAX), false).unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 211, Ok(()))
+        .unwrap();
+    render_local(&mut game, &mut audio, 4, 1);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 5);
+    assert_eq!(game.end_ns(), None);
+    assert_eq!(
+        game.retained_capability().unwrap().practice.generation,
+        before.practice.generation + 1
+    );
+    assert_eq!(game.retained_capability().unwrap().rate.rate, rate(1, 1));
+    let headers: [ReplayHeader; 2] = std::array::from_fn(|i| {
+        game.effective_header(PlayerId(i as u32 + 1))
+            .unwrap()
+            .clone()
+    });
+    for (i, header) in headers.iter().enumerate() {
+        assert_open_header(header, speed(1, 1));
+        assert_eq!(header.chart_identity, old[i].header.chart_identity);
+        assert_eq!(header.rules_identity, old[i].header.rules_identity);
+        assert!(split_schedule(&header.options).unwrap().1.cuts().is_empty());
+        assert_eq!(game.score(PlayerId(i as u32 + 1)).unwrap().hits, 0);
+        let retired = game
+            .take_retired_replay(PlayerId(i as u32 + 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(decode_replay(&retired, fixture::limits()).unwrap(), old[i]);
+        assert_eq!(retired, encode_replay(&old[i], fixture::limits()).unwrap());
+        assert!(game
+            .take_retired_replay(PlayerId(i as u32 + 1))
+            .unwrap()
+            .is_none());
+    }
+    render_local(&mut game, &mut audio, 5, 2);
+    game.record_audio_prefix(host(7 * NS)).unwrap();
+    let mut records = [Vec::new(), Vec::new()];
+    for (sequence, at, key, state, song) in [
+        (1, 5 * NS, 7, ButtonState::Down, NS),
+        (2, 6 * NS, 8, ButtonState::Down, 2 * NS),
+        (3, 7 * NS, 7, ButtonState::Up, 3 * NS),
+    ] {
+        for id in [1, 2] {
+            let mut event = input(at, id, sequence, state);
+            let PhysicalInputEvent::Button(button) = &mut event else {
+                unreachable!()
+            };
+            button.control = PhysicalControlId::keyboard(key);
+            inputs.admit(event, host(7 * NS)).unwrap();
+            assert!(game
+                .advance_audio_frontier(&mut inputs, host(7 * NS), raw(7 * NS))
+                .unwrap()
+                .is_none());
+            let Some(InputResult::Processed(reports)) = game
+                .process_next_audio_input(&mut inputs, host(7 * NS), raw(7 * NS), None)
+                .unwrap()
+            else {
+                panic!("current local input missing");
+            };
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].player, PlayerId(id as u32));
+            let report = &reports[0].report;
+            assert_eq!(
+                report.bound_inputs[0].physical.meta().original_clock_point,
+                Some(host(at))
+            );
+            assert!(report
+                .judge_events
+                .iter()
+                .any(|event| matches!(event.outcome, JudgeOutcome::Hit { .. })));
+            records[id as usize - 1].push(accepted_input_record(report, sequence - 1, song));
+        }
+    }
+    for id in [1, 2] {
+        assert_eq!(game.score(PlayerId(id)).unwrap().hits, 3);
+        assert_eq!(game.score(PlayerId(id)).unwrap().misses, 0);
+    }
+    assert!(!game
+        .observe_completion(audio.report(), Some(raw(7 * NS)))
+        .unwrap());
+    deliver_local_keys(&mut game, &mut audio, 4);
+    render_local(&mut game, &mut audio, 7, 2);
+    assert_eq!(&audio.output()[..2], &[3.0 / 32.0, 8.0 / 32.0]);
+    game.record_audio_prefix(host(9 * NS)).unwrap();
+    let finish = game
+        .advance_audio_frontier(&mut inputs, host(9 * NS), raw(9 * NS))
+        .unwrap()
+        .unwrap();
+    assert_eq!(finish.len(), 2);
+    for report in finish {
+        assert_eq!(report.report.song_time, ts(5 * NS));
+        records[report.player.0 as usize - 1].push(ReplayRecord {
+            ordinal: 3,
+            song_time: ts(5 * NS),
+            operation: ReplayOperation::Advance,
+        });
+    }
+    assert!(!game
+        .observe_completion(audio.report(), Some(raw(9 * NS)))
+        .unwrap());
+    render_local(&mut game, &mut audio, 9, 30);
+    assert!(audio.report().unwrap().active_voices > 0);
+    assert!(!game
+        .observe_completion(audio.report(), Some(raw(39 * NS)))
+        .unwrap());
+    render_local(&mut game, &mut audio, 39, 2);
+    assert_eq!(audio.report().unwrap().active_voices, 0);
+    assert_eq!(&audio.output()[..2], &[31.0 / 32.0, 0.0]);
+    assert!(!game
+        .observe_completion(audio.report(), Some(raw(39 * NS)))
+        .unwrap());
+    for id in [1, 2] {
+        assert!(game.completed_result(PlayerId(id)).unwrap().is_none());
+    }
+    assert!(game.observe_completion(None, Some(raw(41 * NS))).unwrap());
+    assert!(audio.poll_retained_event().unwrap().is_none());
+    assert_eq!(audio.playback_end_frame(), None);
+    for id in [1, 2] {
+        assert!(game.completed_result(PlayerId(id)).unwrap().is_some());
+        assert_eq!(
+            game.completed_result(PlayerId(id))
+                .unwrap()
+                .unwrap()
+                .scope(),
+            PlayResultScope::FullSong
+        );
+    }
+    game.fail();
+    for (i, records) in records.into_iter().enumerate() {
+        let player = PlayerId(i as u32 + 1);
+        assert_eq!(game.effective_header(player).unwrap(), &headers[i]);
+        let current = decode_replay(
+            &game.take_replay(player).unwrap().unwrap(),
+            fixture::limits(),
+        )
+        .unwrap();
+        assert_eq!(current, ReplayFile::new(headers[i].clone(), records));
+    }
+}
+
+#[test]
+fn finite_scrub_including_explicit_max_keeps_original_end_through_loop_and_restart() {
+    for end in [20 * NS, i64::MAX] {
+        let mut retained = options();
+        retained.worklet.initial_region = PracticeRegion::new(ts(0), ts(end), false).unwrap();
+        // The finite MAX output extent must remain representable on its real grid.
+        retained.worklet.initial_rate = rate(2, 1);
+        assert!(!retained.worklet.open_end);
+        let mut rig = Solo::configured(true, retained, false);
+        rig.started();
+        region_solo(
+            &mut rig,
+            220,
+            PracticeAction::Scrub { target: ts(0) },
+            PracticeRegion::new(ts(0), ts(end), false).unwrap(),
+        );
+        assert_eq!(rig.game.end_ns(), Some(end));
+        let scrub_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+        assert_eq!(
+            decode_section_setup(&scrub_header.options).unwrap().end,
+            Some(ts(end))
+        );
+        let retired = decode_replay(
+            &rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap(),
+            fixture::limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            decode_section_setup(&retired.header.options).unwrap().end,
+            Some(ts(end))
+        );
+        assert!(!rig
+            .game
+            .observe_completion(rig.audio.report(), Some(raw(4 * NS)))
+            .unwrap());
+        region_solo(
+            &mut rig,
+            221,
+            PracticeAction::Loop {
+                start: ts(0),
+                end: ts(4 * NS),
+            },
+            PracticeRegion::new(ts(0), ts(4 * NS), true).unwrap(),
+        );
+        assert_eq!(rig.game.end_ns(), Some(4 * NS));
+        let loop_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+        assert_eq!(
+            decode_section_setup(&loop_header.options).unwrap().end,
+            Some(ts(4 * NS))
+        );
+        let retired = decode_replay(
+            &rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap(),
+            fixture::limits(),
+        )
+        .unwrap();
+        assert_eq!(retired.header, scrub_header);
+        let cap = rig.game.retained_capability().unwrap();
+        let restart = rig
+            .game
+            .prepare_retained_transaction(
+                PracticeTransactionRequest::RestartOriginal {
+                    id: 222,
+                    generation: cap.practice.generation,
+                    expected: cap.rate,
+                },
+                false,
+            )
+            .unwrap();
+        rig.audio
+            .try_restart_original_next(
+                222,
+                cap.practice.generation,
+                cap.rate.revision,
+                restart.preparation.unwrap(),
+            )
+            .unwrap();
+        rig.game
+            .acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 222, Ok(()))
+            .unwrap();
+        rig.render(1);
+        let event = rig.event();
+        rig.finish_event(event);
+        assert_eq!(rig.game.end_ns(), Some(end));
+        assert_eq!(
+            decode_section_setup(&rig.game.effective_header(PlayerId(1)).unwrap().options)
+                .unwrap()
+                .end,
+            Some(ts(end))
+        );
+        let retired = decode_replay(
+            &rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap(),
+            fixture::limits(),
+        )
+        .unwrap();
+        assert_eq!(retired.header, loop_header);
+        rig.game.fail();
+        let current =
+            decode_replay(&rig.game.take_replay().unwrap().unwrap(), fixture::limits()).unwrap();
+        assert_eq!(
+            decode_section_setup(&current.header.options).unwrap().end,
+            Some(ts(end))
+        );
     }
 }
 

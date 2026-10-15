@@ -207,6 +207,12 @@ scrub/loop는 현재 적용된 배속을 유지한다. F5는 기존 계약대로
 start/end/선택 배속을 하나의 compound 경계에서 복원한다. region 변경과 rate
 변경을 따로 승인해 중간 상태를 만들지 않는다.
 
+Scrub는 원래 invocation의 optional 종료 조건도 보존한다. 원래 끝이 없는 세션의
+오디오 MAX sentinel을 Transport·capture의 명시적 유한 종료로 바꾸지 않으며,
+실제 판정·키음/BGM tail과 출력 drain 뒤 자연 완료할 수 있어야 한다. 명시적으로
+유한 MAX를 선택한 경우는 끝이 없는 세션과 구분해 그대로 유한 조건을 유지한다.
+Browser solo/local Step과 native owner가 같은 종료 의미를 사용한다.
+
 RuntimeGroup과 SoloRuntime의 일반 구간 교체는 초기 anchor가 아닌 현재 적용된
 runtime 배속을 보존하고 fixed/runtime 모드를 섞지 않는다. 서로 다른 배속의 새
 attempt는 실제 compound original-restart를 확인한 전용 경로에서만 설치한다.

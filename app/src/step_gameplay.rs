@@ -1152,7 +1152,10 @@ impl StepRetained {
                             return Err(invalid());
                         }
                         region = pending.region;
-                        new_end = Some(region.end);
+                        new_end = match request.action {
+                            PracticeAction::Scrub { .. } if self.setup.config.open_end => None,
+                            _ => Some(region.end),
+                        };
                         fresh = true;
                         rate.revision = rate
                             .revision
