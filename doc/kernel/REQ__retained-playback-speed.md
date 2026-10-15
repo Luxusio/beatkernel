@@ -5,6 +5,10 @@ It is not evidence of implementation, QA PASS or completion of WBS05.13.
 It extends [fixed live speed](REQ__live-playback-speed.md) and
 [gapless practice](REQ__gapless-practice.md) on the original audio owner.
 
+The opt-in runtime follow-on is specified in
+[runtime playback rate](REQ__runtime-playback-rate.md). It is in progress;
+fixed-rate evidence below does not establish runtime switching support.
+
 ## Selected speed and output ownership
 
 Use one immutable positive reduced NUM/DEN for the retained session. Pitch
