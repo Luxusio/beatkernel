@@ -1,4 +1,4 @@
-# BMS player 구현/검증 현황 — 2026-10-15
+# BMS player 구현/검증 현황 — 2026-10-16
 
 현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
 `python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기와
@@ -7,7 +7,26 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-최신 재개 checkpoint: 3ce5371d의 복구된 독립 security 리뷰는 PASS, code 리뷰는
+최신 checkpoint(2026-10-16): fd9c114a의 실제 독립 code/security 리뷰는 PASS다.
+그 뒤 required browser QA는 필수14/전체15검사와 실제 open-ended solo/local
+자연 완료를 확인했다. CLI는 Node1692/0, core/platform/BMS1742/0, 앱 library3392/0,
+컴파일 가능한83개 통합 suite779/0이지만, 두 allocation 테스트의 enum 누락3곳과
+main/Linux에서 중복 실행된 잘못된 logical domain 거절 검사4건, 수정 파일5개의
+포맷 오류로 FAIL이다. 실제 browser UX도 초기 배속을 현재값처럼 표시해 FAIL이다.
+AC036–039의 문구·포맷·enum 소비자·Linux 실행 경계 수정을 마쳤다.
+Root의 관련 Window100/0·입력35/0, allocation 각3/0·Settings14/0·startup9/0,
+main/Linux solo 각1/0·cohort 각10/0/6/0과10경로 포맷을 확인했다. 중복 실행은
+고유 coverage처럼 합산하지 않는다. 전체85 integration 포함 app 컴파일과 실제
+UI/audio release WASM·즉시 matching bindgen·native main 빌드가 모두 통과했다.
+새 전체 runtime 검사와 독립 리뷰/QA/UX를 수행하며 이전 PASS를 새 소스의 PASS로 바꾸지 않는다.
+실제 desktop QA는 Records·가변 기록 조회/고정 상대 거절을 확인했으나
+/dev/input·/dev/snd 부재와 ALSA default 카드 실패로 native 재생이 BLOCKED_ENV다.
+전체136/489·오디오12/27은 유지한다. 상세 명령/증거/한계는
+[변경 기록](../changes/2026-10-15-runtime-playback-rate.md)을 따른다.
+
+이하 checkpoint는 해당 버전의 과거 기록이며 현재 상태는 위 절이 우선한다.
+
+이전 재개 checkpoint: 3ce5371d의 복구된 독립 security 리뷰는 PASS, code 리뷰는
 원래 끝이 없는 세션의 scrub 뒤 자연 완료가 막히는 결함1건을 확인했다.
 AC035에서 공유 Step의 원래 optional 종료 조건 보존을 수정했다. 실제 solo/local
 자연 완료·원본 기록·PCM을 포함한 관련51/0과 기존 종료 처리83/0이 통과했다.

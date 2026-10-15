@@ -21,7 +21,8 @@ function capability({ generation = 1n, revision = 0n, numerator = 1n, denominato
   return words([1n, PROGRAM, generation, 0n, 2000000000n, revision, numerator, denominator]);
 }
 function envelope({ tag = 2n, serial = 9n, id = 3n, generation = 1n, revision = 1n,
-  numerator = 2n, denominator = 1n, outcome = 0n, boundary = 1n, paused = false,
+  numerator = 2n, denominator = 1n, previousNumerator = 1n, previousDenominator = 1n,
+  outcome = 0n, boundary = 1n, paused = false,
   physicalFrame = 4801n, playbackFrame = 4801n } = {}) {
   const values = Array(40).fill(0n);
   Object.assign(values, { 0: 1n, 1: tag, 2: PROGRAM, 3: serial, 4: id, 5: generation,
@@ -35,8 +36,8 @@ function envelope({ tag = 2n, serial = 9n, id = 3n, generation = 1n, revision = 
     if (tag === 1n && boundary === 0n) Object.assign(values, {
       7: 0n, 8: 0n, 22: 0n, 23: 0n, 26: 0n, 29: 0n, 30: 1n, 31: 0n });
     if (tag === 2n || tag === 3n) Object.assign(values, { 9: revision - 1n,
-      10: outcome === 2n ? revision - 1n : revision, 11: 1n, 12: 1n, 13: numerator, 14: denominator,
-      15: outcome === 2n ? 1n : numerator, 16: outcome === 2n ? 1n : denominator,
+      10: outcome === 2n ? revision - 1n : revision, 11: previousNumerator, 12: previousDenominator, 13: numerator, 14: denominator,
+      15: outcome === 2n ? previousNumerator : numerator, 16: outcome === 2n ? previousDenominator : denominator,
       17: outcome, 18: outcome === 2n ? 1n : 0n,
       20: tag === 2n ? playbackFrame * 1000000000n / 48000n : 0n });
   }
@@ -990,8 +991,9 @@ const {harness,flush,finalScore:baseFinalScore,selectedRecording,chooseRecording
 function finalScore(playId,fields={}) {
   return baseFinalScore(playId,{replay:null,replayComplete:false,replayError:null,...fields});
 }
-async function windowStart(h,{record=false,metadata={},ready=true,local=false}={}) {
+async function windowStart(h,{record=false,metadata={},ready=true,local=false,numerator=1n,denominator=1n}={}) {
   await h.preview();h.get("runtime-retained").checked=true;h.get("record").checked=record;h.get("live-end").value="2";
+  const fraction=`${numerator}/${denominator}`;h.get("live-speed").value=fraction;
   if(local) {
     await localCount(h,2);h.click("local-discover");await flush();
     localAssign(h,1,1n);localAssign(h,2,2n);
@@ -999,14 +1001,14 @@ async function windowStart(h,{record=false,metadata={},ready=true,local=false}={
   const pending=await h.begin(),worker=h.workers.at(-1);
   await h.reply(pending,{kind:"prepared",mode:"live",title:"Retained",artist:"Fixture",notes:1,samples:0,
     lanes:[0x11],opponentCount:0,startNs:0n,endNs:2000000000n,retained:true,programId:PROGRAM,
-    capability:null,liveSpeed:"1/1",liveSpeedNumerator:1n,liveSpeedDenominator:1n,
+    capability:null,liveSpeed:fraction,liveSpeedNumerator:numerator,liveSpeedDenominator:denominator,
     ...(local?{localPlayers:[1,2],localPage:0}:{}),...metadata});
   const upload=worker.last("play-samples-upload");assert.ok(upload);await h.admitSamples(upload,0);
   await h.reply(upload,{kind:"samples-uploaded",count:0,bytes:0});
   await h.reply(worker.last("play-audio"),null);await h.reply(worker.last("play-activate"),null);
   await h.geometry({playId:pending.playId});
   h.lastSettledTick=0;
-  if(ready)await windowCapability(h,pending,capability());
+  if(ready)await windowCapability(h,pending,capability({numerator,denominator}));
   return pending;
 }
 async function windowCapability(h,session,value) {
@@ -1025,13 +1027,15 @@ async function windowCapability(h,session,value) {
   await h.receive({kind:"play-render-done",playId:session.playId,renderId:observation.renderId,
     completed:false,commandsPending:false,observedTick:step?.tickId??0,pendingInputs:0,retainedCapability:value});
 }
-function resultFor(start,request,{outcome="applied",serial=9n,tag=2n,generation=1n,numerator=2n,denominator=1n}={}) {
+function resultFor(start,request,{outcome="applied",serial=9n,tag=2n,generation=1n,numerator=2n,denominator=1n,
+  previousNumerator=1n,previousDenominator=1n}={}) {
   return {kind:"play-retained-result",version:1,playId:start.playId,id:BigInt(request.rpcId),action:request.action,
-    event:envelope({id:BigInt(request.rpcId),serial,tag,generation,numerator,denominator,paused:outcome==="paused"}),
+    event:envelope({id:BigInt(request.rpcId),serial,tag,generation,numerator,denominator,
+      previousNumerator,previousDenominator,paused:outcome==="paused"}),
     capability:capability({generation,revision:tag===2n?1n:0n,numerator,denominator}),outcome,reason:null};
 }
-async function pendingReply(h,request) {
-  await h.reply(request,{kind:"retained-pending",version:1,id:BigInt(request.rpcId),action:request.action,capability:capability()});
+async function pendingReply(h,request,current=capability()) {
+  await h.reply(request,{kind:"retained-pending",version:1,id:BigInt(request.rpcId),action:request.action,capability:current});
 }
 function retired(start,serial,players=[1],fileFor=player=>new File([Uint8Array.from([66,75,82,player])],`prefix-${serial}-${player}.bkr`)) {
   const replays=players.map(player=>({player,replay:fileFor(player),replayComplete:false,replayError:null}));
@@ -1141,25 +1145,101 @@ test("Window forwards original getOutputTimestamp pair while currentTime is only
   }finally{await h.close();}
 });
 
-test("Window paused rate pending releases RPC slot for resume; applied display waits for matching owner result",async()=>{
-  const h=await harness();try {
-    const session=await windowStart(h),worker=h.workers[0];
+// The current-practice field owns actual applied rate. A launch fraction may
+// remain elsewhere only as explicitly initial context, never as stale current
+// playback feedback. Accept semantic alternatives without mirroring UI prose.
+function assertWindowApplied(h,fraction) {
+  const applied=h.get("runtime-status").textContent.match(/\bapplied\b[^0-9]*(\d+\/\d+)/i);
+  assert.equal(applied?.[1],fraction,"Current practice reports the owner-applied fraction");
+}
+function assertWindowSpeedContext(h,initial,current) {
+  for(const id of ["status","details"]) {
+    const text=h.get(id).textContent;
+    assert.ok(text.includes(current)||text.includes(initial),`${id} retains speed context`);
+    if(initial===current)continue;
+    for(const match of text.matchAll(/\b\d+\/\d+\b/g)) {
+      if(match[0]!==initial)continue;
+      const before=text.slice(0,match.index),after=text.slice(match.index+initial.length);
+      const initialBefore=/\b(?:initial|starting|start|launch)\b[^·.;\n]*$/i.test(before);
+      const initialAfter=/^[^·.;\n]*\b(?:initial|starting|start|launch)\b/i.test(after);
+      assert.ok(initialBefore||initialAfter,`${id} must qualify the old ${initial} fraction as initial context: ${text}`);
+    }
+  }
+}
+
+for(const local of [false,true])test(`Window retained ${local?"local":"solo"} keeps initial speed distinct from owner-applied rate through pause refusal and F5`,async()=>{
+  const h=await harness({touchSupported:local});try {
+    const initial=capability({numerator:1n,denominator:2n});
+    const current=capability({revision:1n,numerator:3n,denominator:2n});
+    const session=await windowStart(h,{local,numerator:1n,denominator:2n}),worker=h.workers.at(-1);
+    assert.equal(session.liveSpeed,"1/2");
+    assert.deepEqual(Array.from(session.localPlanWords??[]),local?[1,1,1,0,2,1,2,0]:[]);
+    assertWindowApplied(h,"1/2");assert.match(h.get("status").textContent,/^Playing\b/);
+    assertWindowSpeedContext(h,"1/2","1/2");
+
     h.click("runtime-pause");await flush();const pause=worker.last("play-retained");
-    assert.equal(pause.action,"pause");assert.equal(pause.paused,true);await pendingReply(h,pause);
-    await h.receive(resultFor(session,pause,{tag:4n,outcome:"paused",numerator:1n}));
+    assert.equal(pause.action,"pause");assert.equal(pause.paused,true);await pendingReply(h,pause,initial);
+    assertWindowApplied(h,"1/2");
+    await h.receive(resultFor(session,pause,{tag:4n,outcome:"paused",numerator:1n,denominator:2n}));
+    assert.equal(h.get("runtime-pause").textContent,"Resume");
     h.get("runtime-rate").value="003/002";h.click("runtime-rate-apply");await flush();
-    const rate=worker.last("play-retained");assert.equal(rate.fraction,"003/002");await pendingReply(h,rate);
-    assert.equal(h.get("runtime-rate-apply").disabled,true);
-    assert.doesNotMatch(h.get("runtime-status").textContent,/applied.*3\/2/i);
+    const rate=worker.last("play-retained");assert.equal(rate.fraction,"003/002");await pendingReply(h,rate,initial);
+    assert.equal(h.get("runtime-rate-apply").disabled,true);assert.equal(h.get("runtime-pause").disabled,false);
+    assert.equal(h.get("runtime-rate").value,"003/002");assertWindowApplied(h,"1/2");
+    assert.match(h.get("runtime-status").textContent,/pending/i);assertWindowSpeedContext(h,"1/2","1/2");
+
+    const applied=resultFor(session,rate,{numerator:3n,denominator:2n,previousNumerator:1n,previousDenominator:2n,serial:11n});
+    const pendingStatus=h.get("runtime-status").textContent;
+    await h.receive({...applied,playId:session.playId-1});
+    assert.equal(h.get("runtime-status").textContent,pendingStatus,"another gameplay owner cannot settle this rate request");
+    await h.receive({...applied,id:applied.id+100n});
+    assert.equal(h.get("runtime-status").textContent,pendingStatus,"an unmatched request cannot settle the pending rate");
+
     h.click("runtime-pause");await flush();const resume=worker.last("play-retained");
     assert.equal(resume.action,"pause");assert.equal(resume.paused,false);assert.ok(resume.rpcId>rate.rpcId);
-    await pendingReply(h,resume);await h.receive(resultFor(session,resume,{tag:4n,outcome:"resumed",numerator:1n,serial:10n}));
-    await h.receive(resultFor(session,rate,{numerator:3n,denominator:2n,serial:11n}));
+    await pendingReply(h,resume,initial);
+    await h.receive(resultFor(session,resume,{tag:4n,outcome:"resumed",numerator:1n,denominator:2n,serial:10n}));
+    assertWindowApplied(h,"1/2");assert.equal(h.get("runtime-rate-apply").disabled,true);
+    await h.receive(applied);
+    assertWindowApplied(h,"3/2");assertWindowSpeedContext(h,"1/2","3/2");
+    assert.equal(h.get("runtime-rate-apply").disabled,false);assert.equal(h.get("runtime-rate").value,"003/002");
+    const settled=h.get("runtime-status").textContent;
+    await h.receive(resultFor(session,rate,{numerator:9n,serial:12n}));
+    assert.equal(h.get("runtime-status").textContent,settled,"a duplicate result cannot replace the settled applied rate");
+
+    // Exercise the actual PresentationStatus cache, not only the visible footer.
+    const presentation={selectedId:worker.last("select").id,playId:session.playId,generation:7n,content:11n};
+    await h.receive({kind:"render-wait",...presentation});
+    assert.match(h.get("status").textContent,/graphics surface.*not ready/i);
+    await h.receive({kind:"drawn",...presentation,playId:session.playId-1});
+    assert.match(h.get("status").textContent,/graphics surface.*not ready/i);
+    await h.receive({kind:"drawn",...presentation});
+    assertWindowApplied(h,"3/2");assertWindowSpeedContext(h,"1/2","3/2");
+
+    h.get("runtime-rate").value="2/1";h.click("runtime-rate-apply");await flush();
+    const refused=worker.last("play-retained");assert.equal(refused.fraction,"2/1");await pendingReply(h,refused,current);
+    assertWindowApplied(h,"3/2");assert.equal(h.get("runtime-rate").value,"2/1");
+    await h.receive({kind:"play-retained-result",version:1,playId:session.playId,id:BigInt(refused.rpcId),action:"rate",
+      event:envelope({id:BigInt(refused.rpcId),serial:12n,revision:2n,numerator:2n,denominator:1n,
+        previousNumerator:3n,previousDenominator:2n,outcome:2n}),
+      capability:current,outcome:"refused",reason:"The current owner refused this requested rate."});
+    assert.match(h.get("runtime-status").textContent,/refused/i);assertWindowApplied(h,"3/2");
+    assertWindowSpeedContext(h,"1/2","3/2");assert.equal(h.get("runtime-rate").value,"2/1");
     assert.equal(h.get("runtime-rate-apply").disabled,false);
-    assert.match(h.get("runtime-status").textContent,/3\/2/);
-    const settled=h.get("runtime-status").textContent;await h.receive(resultFor({...session,playId:session.playId-1},rate));
-    assert.equal(h.get("runtime-status").textContent,settled);
-    h.click("stop");await flush();await h.receive(finalScore(session.playId));
+
+    const controls=worker.messages("play-retained").length;
+    h.window.emit("keydown",{code:"F5",repeat:false,timeStamp:1300});await flush();
+    const restart=worker.last("play-retained");assert.equal(restart.action,"restart-original");
+    assert.equal(worker.messages("play-retained").length,controls+1);await pendingReply(h,restart,current);
+    assertWindowApplied(h,"3/2");assert.match(h.get("runtime-status").textContent,/pending/i);
+    assertWindowSpeedContext(h,"1/2","3/2");assert.equal(h.get("runtime-rate").value,"2/1");
+    await h.receive(resultFor(session,restart,{tag:3n,generation:2n,serial:13n,numerator:1n,denominator:2n,
+      previousNumerator:3n,previousDenominator:2n}));
+    assertWindowApplied(h,"1/2");assertWindowSpeedContext(h,"1/2","1/2");
+    assert.equal(h.get("runtime-rate").value,"2/1","an actual restart does not erase the independent draft");
+    assert.equal(worker.messages("play-stop").length,0,"all controls preserve this gameplay owner");
+    await finishWindowKeyboard(h,session);
+    assert.equal(worker.messages("play-stop").length,1);assert.equal(h.audio.stopStarts,1);
   }finally{await h.close();}
 });
 

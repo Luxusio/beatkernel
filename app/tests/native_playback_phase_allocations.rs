@@ -15,7 +15,9 @@ use beatkernel_bms_runtime::{
         NativeSourcePlaybackQuery, SourcePlaybackFacts, SourcePlaybackIdentity,
     },
     native_audio_presentation::NativeAudioPresentation,
-    native_playback_phase::{ConvertedPlaybackFacts, NativePlaybackMapping},
+    native_playback_phase::{
+        ConvertedPlaybackFacts, NativePlaybackMapping, NativePlaybackPhaseError,
+    },
 };
 use beatkernel_platform::audio::presentation::validation::NativePresentationValidator;
 use std::{
@@ -92,6 +94,10 @@ fn presentation(descriptor: AudioAuthorityCoordinateBasis) -> NativeAudioPresent
             b.point_at_stream_frame(0).unwrap()
         }
         AudioAuthorityCoordinateBasis::TargetFrame(b) => b.point_at_stream_frame(0).unwrap(),
+        AudioAuthorityCoordinateBasis::SourceTimestamp(b) => {
+            // Cold origin arithmetic grants no native admission or frame evidence.
+            b.point_at_stream_frame(0).unwrap()
+        }
     };
     NativeAudioPresentation::new(
         AudioAuthority::new_with_coordinates(
@@ -208,4 +214,46 @@ fn converted_mapping_checked_bounds_phase_and_refusals_request_no_heap() {
     });
     assert_eq!((elapsed, rejected), (64 * 333_333_333, 64));
     assert_eq!(requests, 0);
+}
+
+#[test]
+fn raw_timestamp_descriptor_cannot_qualify_native_source_mapping_without_heap_requests() {
+    calibrate();
+    let basis = OutputFrameBasis::new(point(2, 100), 3, 0).unwrap();
+    let p = presentation(AudioAuthorityCoordinateBasis::SourceTimestamp(basis));
+    let q = InterpolatedTargetTime::new(TargetTime::new(0, 1, 3).unwrap(), 0, 0, 1, 0, 1).unwrap();
+    let packet = NativeSourcePlaybackQuery::new(
+        7,
+        basis,
+        id(),
+        q,
+        SourcePlaybackFacts {
+            playback: running(),
+            pulled_source_end: 4,
+            submitted_source_end: 4,
+            render: None,
+            revision: 2,
+        },
+        None::<()>,
+    )
+    .unwrap();
+    let mapping = NativePlaybackMapping::from_source(&packet);
+    let (_, requests) = measure(|| {
+        for _ in 0..64 {
+            assert_eq!(
+                mapping
+                    .phase(&p, id(), &q, attempt(), point(3, 333_333_833))
+                    .unwrap_err(),
+                NativePlaybackPhaseError::Descriptor,
+            );
+        }
+    });
+    assert_eq!(requests, 0);
+    assert_eq!(p.latest_record(), None);
+    assert_eq!(p.basis(), None);
+    assert_eq!(p.target_basis(), None);
+    assert_eq!(p.authority().history_len(), 0);
+    assert_eq!(p.authority().latest_coordinate_observation(), None);
+    assert!(p.authority().committed_coordinate_operation().is_none());
+    assert!(p.authority().committed_coordinate_presentation().is_none());
 }

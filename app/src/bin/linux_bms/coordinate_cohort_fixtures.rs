@@ -1,26 +1,26 @@
 //! Cold production composition for the selected Linux cohort route. No supplied
 //! HOST point below is an original native observation or hardware timing claim.
-use super::*;
 use super::super::native::{
     coordinate_initial_query, coordinate_initial_transport, prepare_coordinate_target_state,
 };
+use super::*;
 use beatkernel::audio::{
-    AudioFormat, AudioCommand, PcmSample, SampleBank, SampleId, VoiceId, PracticeLimits,
-    PracticeRegion, CommandScope,
+    AudioCommand, AudioFormat, CommandScope, PcmSample, PracticeLimits, PracticeRegion, SampleBank,
+    SampleId, VoiceId,
 };
-use beatkernel::runtime::SoundBinding;
 use beatkernel::judge::JudgeStage;
+use beatkernel::runtime::SoundBinding;
 use beatkernel_bms_runtime::{
-    PreparedBms,
     live_speed::LiveSpeedSetup,
     native_audio::{prepare_retained_audio_with_speed, NativePracticeAudioConfig},
     native_cohort_setup::{
-        prepare_audio_cohort_with_policy_and_speed, activate_audio_coordinate_cohort_with_sounds,
+        activate_audio_coordinate_cohort_with_sounds, prepare_audio_cohort_with_policy_and_speed,
     },
     play_policy::{GaugeSelection, OriginalGaugeContext},
     practice_playback::{PracticeMember, PracticePlayback},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
+    PreparedBms,
 };
 
 fn prepared() -> PreparedBms {
@@ -252,11 +252,40 @@ fn selected_cohort_cold_route_preserves_one_phase_and_original_sparse_roster() {
             assert_eq!(basis.generation(), 1);
             assert_eq!(basis.active_origin_frame(), identity.initial_playback());
             assert_eq!(basis.source_hz(), identity.hz());
+            assert_eq!(basis.domain(), LOGICAL);
+            assert_eq!(transport.runtime_output_rate(), Some(rate));
+            assert_eq!(transport.anchor().host_time, logical_origin.timestamp);
+            assert_eq!(transport.anchor().song_time, setup.song_origin());
+            let original = transport.preroll_setup().unwrap();
+            assert_eq!(original.logical_origin, logical_origin.timestamp);
+            assert_eq!(original.original_start, setup.start());
+            assert_eq!(original.output_preroll, setup.preroll());
+            assert_eq!(original.positive_rate, rate);
+            assert_eq!(original.original_end, setup.end());
             let phase = basis.point_from_elapsed_nanos(logical_origin, 0).unwrap();
             assert_eq!(
                 transport.position_at_output_phase(phase).unwrap(),
                 setup.song_origin()
             );
+            for (elapsed, expected) in [
+                (4_000_000, setup.start()),
+                (1_000_000_000, setup.end().unwrap()),
+            ] {
+                // Pure phase arithmetic preserves the selected section; it
+                // does not claim a native presentation or input observation.
+                let point = basis
+                    .point_from_elapsed_nanos(
+                        ClockPoint {
+                            domain: LOGICAL,
+                            timestamp: Timestamp::from_nanos(
+                                logical_origin.timestamp.as_nanos() + elapsed as i64,
+                            ),
+                        },
+                        elapsed,
+                    )
+                    .unwrap();
+                assert_eq!(transport.position_at_output_phase(point).unwrap(), expected);
+            }
             let mut producer = retained.audio.producer;
             producer.set_scope(CommandScope(0));
             let (group, merger) = activate_audio_coordinate_cohort_with_sounds(
@@ -280,6 +309,7 @@ fn selected_cohort_cold_route_preserves_one_phase_and_original_sparse_roster() {
             assert_eq!(group.audio_scope(), CommandScope(1));
             assert_eq!(group.transport().output_phase_basis(), Some(basis));
             assert_eq!(group.transport().anchor().rate, rate);
+            assert_eq!(group.transport().runtime_output_rate(), Some(rate));
             for &(player, _) in &assignments {
                 assert!(group
                     .member_judge(player)
@@ -490,6 +520,22 @@ fn cohort_initial_phase_refuses_wrong_logical_axis_and_scalar_activation_stays_g
         selected
     )
     .is_err());
+    for domain in [OUTPUT, beatkernel::time::ClockDomainId(999)] {
+        let error = coordinate_initial_transport(
+            29,
+            identity,
+            ClockPoint {
+                domain,
+                timestamp: Timestamp::ZERO,
+            },
+            selected,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<beatkernel::transport::OutputPhaseError>(),
+            Some(&beatkernel::transport::OutputPhaseError::WrongDomain)
+        );
+    }
     let prepared = prepared();
     let policy = policy(&prepared);
     let bindings = std::collections::BTreeMap::from([(0x11, 4)]);

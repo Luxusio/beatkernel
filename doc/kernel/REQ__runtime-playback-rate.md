@@ -168,6 +168,12 @@ native proof의 logical output으로 검증한다. Mixer의 raw origin과 같다
 요청 전에 capacity를 확보하되, 실제 event가 오기 전 예상 cut으로 Transport를
 확정하지 않는다. backend 교체나 sample-rate 변경으로 배속을 흉내 내지 않는다.
 
+플랫폼 실행 어댑터는 자신이 설정한 logical domain과 전달받은 시작점의 domain을
+생성 전에 비교해 불일치를 거절한다. 전달받은 점에서 예상 domain을 다시 유도하면
+안 된다. 공통 초기 Transport 생성기는 호출자가 명시한 logical chronology를
+지원하며 OS 고유 상수를 하드코딩하지 않는다. Linux solo/local 공통 실행 경계는
+설정된 LOGICAL 이외의 HOST·외부 domain을 실제 권한 생성 전에 거절한다.
+
 Native runtime owner는 첫 PCM 렌더 전에 원래 header·capture 예약을 갖춘 상태로
 생성한다. Worklet projection은 내부 상대 원점(domain1,0ns)을 유지하고, 외부 RAW
 시계 원점이나 normalized LOGICAL 원점과 동일시하지 않는다. 상대 target frame/time과
@@ -309,6 +315,12 @@ Browser와 native Records의 실제 preview·DETAILS·WATCH 흐름에 이 역사
 복원은 기존 metadata Worker에서 수행한다.
 
 ## UI와 검증 기준
+
+시작 화면의 입력·상세·고정 상태 문구는 **초기 배속**을 명시한다. 실행 중 실제
+적용값은 기존 Current practice의 검증된 owner capability로 표시한다. 시작 배속을
+현재 배속처럼 표시하지 않으며, pending·거절·F5 대기 중에는 마지막 실제 적용값을
+보존한다. 이를 위해 별도 배속 상태·관측자·매 프레임 DOM 갱신을 추가하지 않는다.
+공통 native Settings의 `--speed` 도움말도 초기 배속이라는 의미를 유지한다.
 
 기존 Play lifecycle에 붙는 작은 retained 선언형 제어를 사용한다. draft 오류는
 입력값을 보존하고, pending은 실제 결과까지 유지하며, applied 값은 낙관적으로

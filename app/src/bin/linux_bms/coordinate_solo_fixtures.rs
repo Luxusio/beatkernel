@@ -298,6 +298,15 @@ fn coordinate_initial_transport_preserves_selected_preroll_source_cut_and_attemp
         );
         assert_eq!(phase.domain(), logical.domain);
         assert_eq!(transport.anchor().rate, rate);
+        assert_eq!(transport.runtime_output_rate(), Some(rate));
+        assert_eq!(transport.anchor().host_time, logical.timestamp);
+        assert_eq!(transport.anchor().song_time, setup.song_origin());
+        let original = transport.preroll_setup().unwrap();
+        assert_eq!(original.logical_origin, logical.timestamp);
+        assert_eq!(original.original_start, setup.start());
+        assert_eq!(original.output_preroll, setup.preroll());
+        assert_eq!(original.positive_rate, rate);
+        assert_eq!(original.original_end, setup.end());
         for (elapsed, expected) in [
             (0, setup.song_origin()),
             (2_000_000, setup.start()),
@@ -315,6 +324,47 @@ fn coordinate_initial_transport_preserves_selected_preroll_source_cut_and_attemp
             domain: ClockDomainId(999),
             timestamp: logical.timestamp,
         };
+        // The reusable constructor honors caller-selected chronologies; only
+        // the configured Linux adapter requires its own LOGICAL axis.
+        let custom = beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_runtime_transport(
+            91, identity, foreign, setup,
+        )
+        .unwrap();
+        let custom_phase = custom.output_phase_basis().unwrap();
+        assert_eq!(custom_phase.domain(), foreign.domain);
+        assert_eq!(custom_phase.owner(), phase.owner());
+        assert_eq!(custom_phase.generation(), phase.generation());
+        assert_eq!(
+            custom_phase.active_origin_frame(),
+            phase.active_origin_frame()
+        );
+        assert_eq!(custom_phase.source_hz(), phase.source_hz());
+        assert_eq!(custom.runtime_output_rate(), Some(rate));
+        assert_eq!(custom.anchor(), transport.anchor());
+        assert_eq!(
+            custom
+                .position_at_output_phase(
+                    custom_phase.point_from_elapsed_nanos(foreign, 0).unwrap()
+                )
+                .unwrap(),
+            setup.song_origin()
+        );
         assert!(coordinate_initial_transport(91, identity, foreign, setup).is_err());
+        for domain in [super::native::HOST, super::native::OUTPUT] {
+            let error = coordinate_initial_transport(
+                91,
+                identity,
+                ClockPoint {
+                    domain,
+                    timestamp: logical.timestamp,
+                },
+                setup,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<beatkernel::transport::OutputPhaseError>(),
+                Some(&beatkernel::transport::OutputPhaseError::WrongDomain)
+            );
+        }
     }
 }

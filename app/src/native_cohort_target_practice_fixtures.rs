@@ -24,7 +24,7 @@ use crate::{
     practice_playback::{
         PracticeMember, PracticePlayback, PracticeRecordingPort, PracticeRuntimeHeader,
     },
-    practice_session::{PracticeAttemptConfig, prepare_attempt_with_speed},
+    practice_session::{prepare_attempt_with_speed, PracticeAttemptConfig},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
@@ -34,14 +34,14 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId,
     },
-    replay::{ReplaySession, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplaySession},
     runtime::{RuntimeProcessingClock, RuntimeReport},
-    time::{ClockPair, Duration, ExtrapolationPolicy, presentation::PresentationEstimator},
+    time::{presentation::PresentationEstimator, ClockPair, Duration, ExtrapolationPolicy},
     transport::{OutputPhaseBasis, Rate},
 };
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
-    presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, ConvertedNativeOutputState,
+    DeviceFormat, SampleEncoding,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -261,9 +261,11 @@ impl GameplayDevice for Device {
                 }));
             }
         }
-        while self.extra_events.front().is_some_and(|event| {
-            event.meta().timestamp <= host(self.frame).timestamp
-        }) {
+        while self
+            .extra_events
+            .front()
+            .is_some_and(|event| event.meta().timestamp <= host(self.frame).timestamp)
+        {
             let event = self.extra_events.pop_front().unwrap();
             self.acquired_extra.push((self.frame, *event.meta()));
             events.push_back(event);
@@ -1308,12 +1310,11 @@ fn genuine_scrub_installs_selected_phase_for_two_and_four_members() {
         f.device.close_at = 25;
         assert!(f.run().unwrap().is_none());
         f.assert_fresh();
-        assert!(
-            f.host
-                .replies
-                .iter()
-                .any(|r| r.id == 12 && r.result.is_ok())
-        );
+        assert!(f
+            .host
+            .replies
+            .iter()
+            .any(|r| r.id == 12 && r.result.is_ok()));
         assert_eq!(f.recordings.0.len(), ids.len());
         assert!(f.host.commits.contains(&2));
     }
@@ -1366,11 +1367,10 @@ fn visual_refusal_after_application_keeps_whole_fresh_cohort_identity() {
     let basis = f.group.transport().output_phase_basis().unwrap();
     assert_eq!(basis.generation(), 2);
     assert_eq!(basis.owner(), f.phase.owner());
-    assert!(
-        f.states
-            .iter()
-            .all(|state| state.capture.as_ref().unwrap().records().is_empty())
-    );
+    assert!(f
+        .states
+        .iter()
+        .all(|state| state.capture.as_ref().unwrap().records().is_empty()));
     assert!(!f.group.poisoned());
 }
 
@@ -1386,13 +1386,11 @@ fn request_runtime_rate(f: &mut Fixture, selected: Rate) {
 }
 fn applied_runtime_rate(f: &Fixture) -> PracticeRateEvent {
     match &f.host.transaction_replies[..] {
-        [
-            PracticeTransactionReply::Rate {
-                id: 14102,
-                generation: 1,
-                result: Ok(event),
-            },
-        ] => *event,
+        [PracticeTransactionReply::Rate {
+            id: 14102,
+            generation: 1,
+            result: Ok(event),
+        }] => *event,
         replies => panic!("one actual cohort rate reply required: {replies:?}"),
     }
 }
@@ -1452,10 +1450,10 @@ fn runtime_target_cohort_shares_one_native_cut_and_effective_headers_with_or_wit
                         })
                         .collect();
                     assert!(!inputs.is_empty());
-                    assert!(
-                        inputs.iter().all(|input| input.physical.meta().source
-                            == DeviceId(u64::from(state.player.0)))
-                    );
+                    assert!(inputs
+                        .iter()
+                        .all(|input| input.physical.meta().source
+                            == DeviceId(u64::from(state.player.0))));
                     let replay = crate::replay_playback::reconstruct_section(
                         &f.original,
                         beatkernel::replay::codec::ReplayFile::new(

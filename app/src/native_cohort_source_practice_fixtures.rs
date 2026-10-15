@@ -24,7 +24,7 @@ use crate::{
     practice_playback::{
         PracticeMember, PracticePlayback, PracticeRecordingPort, PracticeRuntimeHeader,
     },
-    practice_session::{PracticeAttemptConfig, prepare_attempt_with_speed},
+    practice_session::{prepare_attempt_with_speed, PracticeAttemptConfig},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
@@ -34,9 +34,9 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId,
     },
-    replay::{ReplaySession, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplaySession},
     runtime::{RuntimeProcessingClock, RuntimeReport},
-    time::{ClockPair, Duration, ExtrapolationPolicy, presentation::PresentationEstimator},
+    time::{presentation::PresentationEstimator, ClockPair, Duration, ExtrapolationPolicy},
     transport::{OutputPhaseBasis, Rate},
 };
 use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
@@ -1118,13 +1118,11 @@ fn request_runtime_rate(f: &mut Fixture, selected: Rate) {
 }
 fn applied_runtime_rate(f: &Fixture) -> PracticeRateEvent {
     match &f.host.transaction_replies[..] {
-        [
-            PracticeTransactionReply::Rate {
-                id: 14102,
-                generation: 1,
-                result: Ok(event),
-            },
-        ] => *event,
+        [PracticeTransactionReply::Rate {
+            id: 14102,
+            generation: 1,
+            result: Ok(event),
+        }] => *event,
         replies => panic!("one actual cohort rate reply required: {replies:?}"),
     }
 }
@@ -1184,10 +1182,10 @@ fn runtime_source_cohort_shares_one_native_cut_and_effective_headers_with_or_wit
                         })
                         .collect();
                     assert!(!inputs.is_empty());
-                    assert!(
-                        inputs.iter().all(|input| input.physical.meta().source
-                            == DeviceId(u64::from(state.player.0)))
-                    );
+                    assert!(inputs
+                        .iter()
+                        .all(|input| input.physical.meta().source
+                            == DeviceId(u64::from(state.player.0))));
                     let replay = crate::replay_playback::reconstruct_section(
                         &f.original,
                         beatkernel::replay::codec::ReplayFile::new(
@@ -1270,8 +1268,8 @@ fn runtime_source_cohort_noop_and_stale_revision_preserve_every_member_header() 
 }
 
 #[test]
-fn runtime_source_cohort_f5_compound_restart_archives_rate_lineage_and_restores_original_speed_once()
- {
+fn runtime_source_cohort_f5_compound_restart_archives_rate_lineage_and_restores_original_speed_once(
+) {
     let mut f = Fixture::new_runtime(&[7, 29], true);
     f.device.close_at = 27;
     let initial = f.practice.current_speed().rate();

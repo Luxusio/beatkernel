@@ -83,7 +83,7 @@ fn point(domain: u32, ns: i64) -> ClockPoint {
         timestamp: Timestamp::from_nanos(ns),
     }
 }
-fn bases() -> [AudioAuthorityCoordinateBasis; 3] {
+fn bases() -> [AudioAuthorityCoordinateBasis; 4] {
     let source = OutputFrameBasis::new(point(2, 100), 3, 2).unwrap();
     [
         AudioAuthorityCoordinateBasis::SourceFrame(source),
@@ -94,11 +94,13 @@ fn bases() -> [AudioAuthorityCoordinateBasis; 3] {
             basis: source,
             frequency: u64::MAX,
         },
+        AudioAuthorityCoordinateBasis::SourceTimestamp(source),
     ]
 }
 fn setup(basis: AudioAuthorityCoordinateBasis, policy: ExtrapolationPolicy) -> AudioAuthority {
     let origin = match basis {
         AudioAuthorityCoordinateBasis::SourceFrame(b)
+        | AudioAuthorityCoordinateBasis::SourceTimestamp(b)
         | AudioAuthorityCoordinateBasis::SourceCounter { basis: b, .. } => {
             b.point_at_stream_frame(0).unwrap()
         }
@@ -125,34 +127,49 @@ fn observe(owner: &mut AudioAuthority, units: u64, at: i64) {
     let basis = owner.coordinate_basis().unwrap();
     let (coordinate, source) = match basis {
         AudioAuthorityCoordinateBasis::SourceFrame(b) => (
-            NativeOutputCoordinate::StreamFrame { frame: units },
+            Some(NativeOutputCoordinate::StreamFrame { frame: units }),
             b.point_at_stream_frame(units).unwrap(),
         ),
         AudioAuthorityCoordinateBasis::TargetFrame(b) => (
-            NativeOutputCoordinate::StreamFrame { frame: units },
+            Some(NativeOutputCoordinate::StreamFrame { frame: units }),
             b.point_at_stream_frame(units).unwrap(),
         ),
         AudioAuthorityCoordinateBasis::SourceCounter {
             basis: b,
             frequency,
         } => (
-            NativeOutputCoordinate::Counter {
+            Some(NativeOutputCoordinate::Counter {
                 position: units,
                 frequency,
-            },
+            }),
             b.point_at_native_counter(units, frequency).unwrap(),
         ),
+        AudioAuthorityCoordinateBasis::SourceTimestamp(b) => {
+            let origin = b.point_at_stream_frame(0).unwrap();
+            (
+                None,
+                ClockPoint {
+                    domain: origin.domain,
+                    timestamp: Timestamp::from_nanos(
+                        origin
+                            .timestamp
+                            .as_nanos()
+                            .checked_add(i64::try_from(units).unwrap())
+                            .unwrap(),
+                    ),
+                },
+            )
+        }
     };
-    owner
-        .observe_coordinate(
-            7,
-            ClockPair {
-                source,
-                target: point(1, at),
-            },
-            coordinate,
-        )
-        .unwrap();
+    let pair = ClockPair {
+        source,
+        target: point(1, at),
+    };
+    match coordinate {
+        Some(coordinate) => owner.observe_coordinate(7, pair, coordinate),
+        None => owner.observe_source_timestamp(7, pair),
+    }
+    .unwrap();
 }
 fn measure_pin(owner: &AudioAuthority, expected: InterpolatedTargetTime) {
     let before = (
@@ -221,6 +238,107 @@ fn cold_first_and_real_closed_anchor_pin_reads_have_zero_heap_requests() {
                 .unwrap();
             measure_pin(&owner, prepared.query());
         }
+    }
+}
+
+#[test]
+fn original_signed_timestamp_pin_reads_preserve_raw_pairs_without_heap_requests() {
+    calibrate();
+    // Creation is at -333_333_334 ns on this nonzero physical frame grid.
+    let source = OutputFrameBasis::new(point(2, -1_000_000_000), 3, 2).unwrap();
+    let creation =
+        InterpolatedTargetTime::new(TargetTime::new(0, 2, 3).unwrap(), 0, 0, 1, 0, 1).unwrap();
+    // Literal rational oracles: 2/3 - 7 ns and 2/3 + 11 ns.
+    let pre_origin = InterpolatedTargetTime::new(
+        TargetTime::new(0, 1_999_999_979, 3_000_000_000).unwrap(),
+        0,
+        0,
+        1,
+        0,
+        1,
+    )
+    .unwrap();
+    let progressed = InterpolatedTargetTime::new(
+        TargetTime::new(0, 2_000_000_033, 3_000_000_000).unwrap(),
+        0,
+        0,
+        1,
+        0,
+        1,
+    )
+    .unwrap();
+    let first_pair = ClockPair {
+        source: point(2, -333_333_341),
+        target: point(1, 100),
+    };
+    let latest_pair = ClockPair {
+        source: point(2, -333_333_323),
+        target: point(1, 110),
+    };
+    for policy in [
+        ExtrapolationPolicy::Forbid,
+        ExtrapolationPolicy::Bounded {
+            before: Duration::from_nanos(5),
+            after: Duration::ZERO,
+        },
+    ] {
+        let mut owner = setup(
+            AudioAuthorityCoordinateBasis::SourceTimestamp(source),
+            policy,
+        );
+        measure_pin(&owner, creation);
+        owner.observe_source_timestamp(7, first_pair).unwrap();
+        let first = if policy == ExtrapolationPolicy::Forbid {
+            pre_origin
+        } else {
+            creation
+        };
+        measure_pin(&owner, first);
+        let original = owner.latest_coordinate_observation().unwrap();
+        assert_eq!(original.pair(), first_pair);
+        assert_eq!(original.coordinate(), None);
+
+        owner.observe_source_timestamp(7, latest_pair).unwrap();
+        measure_pin(&owner, first);
+        owner.record_acquired_prefix(point(1, 110)).unwrap();
+        let mut merger =
+            InputMerger::new(ClockDomainId(1), point(1, 0), vec![DeviceId(9)], 8).unwrap();
+        let prepared = owner
+            .prepare_coordinate_frontier(point(1, 110), &merger)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.query().compare_interpolated_time(progressed),
+            Ordering::Equal
+        );
+        measure_pin(&owner, first);
+        owner
+            .commit_coordinate_frontier(prepared, point(1, 110), &mut merger)
+            .unwrap();
+        measure_pin(&owner, progressed);
+        assert_eq!(owner.closed_host_prefix(), Some(point(1, 110)));
+        assert_eq!(owner.history_len(), 2);
+        let original = owner.latest_coordinate_observation().unwrap();
+        assert_eq!(original.pair(), latest_pair);
+        assert_eq!(original.coordinate(), None);
+
+        // Raw source-clock units cannot be relabeled as a native stream frame.
+        let (_, requests) = measure(|| {
+            for _ in 0..128 {
+                assert_eq!(
+                    owner.observe_coordinate(
+                        7,
+                        latest_pair,
+                        NativeOutputCoordinate::StreamFrame { frame: 0 },
+                    ),
+                    Err(AudioAuthorityError::CoordinateMismatch),
+                );
+            }
+        });
+        assert_eq!(requests, 0);
+        assert_eq!(owner.latest_coordinate_observation(), Some(original));
+        assert_eq!(owner.history_len(), 2);
+        measure_pin(&owner, progressed);
     }
 }
 

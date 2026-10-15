@@ -57,8 +57,8 @@
         <label>Live end (seconds, optional) <input id="live-end" type="text" inputmode="decimal" value="" maxlength="20" disabled></label></div>
       <p class="hint">Live play uses these original song positions with a short preroll. Leave the end blank to play through the song. Earlier notes and holds already in progress are excluded; overlapping music resumes from its original sound. Replay uses its recorded section.</p>
       <div id="live-speed-control">
-        <div class="replay-controls"><label for="live-speed">Live speed (NUM/DEN) <input id="live-speed" type="text" value="1/1" maxlength="40" aria-describedby="live-speed-hint" disabled></label></div>
-        <p id="live-speed-hint" class="hint">Live play only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 changes playback speed and pitch for all local players.</p>
+        <div class="replay-controls"><label for="live-speed">Initial live speed (NUM/DEN) <input id="live-speed" type="text" value="1/1" maxlength="40" aria-describedby="live-speed-hint" disabled></label></div>
+        <p id="live-speed-hint" class="hint">Live play only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 sets the initial playback speed and pitch for all local players.</p>
         <label><input id="runtime-retained" type="checkbox" disabled> Enable runtime practice controls for live play</label>
         <p class="hint">Choose before Play to retain original music and chart geometry for rate changes, regions and restart. Fixed-condition saved and network opponents refuse rate changes.</p>
       </div>

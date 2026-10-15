@@ -101,9 +101,11 @@ test("an underflowing live draft leaves independent replay selection available",
   } finally { await h.close(); }
 });
 
-test("live speed markup exposes labelled bounded default and separate pitch hints", async () => {
+test("initial live speed markup exposes labelled bounded default and separate pitch hints", async () => {
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
-  assert.match(html, /<label\b[^>]*for="live-speed"[^>]*>\s*Live speed \(NUM\/DEN\)/);
+  const label = html.match(/<label\b[^>]*for="live-speed"[^>]*>([^<]*)(?=<input\b|<\/label>)/)?.[1];
+  assert.ok(label); assert.match(label, /\binitial\b/i); assert.match(label, /\blive speed\b/i);
+  assert.match(label, /\(NUM\/DEN\)/);
   const field = html.match(/<input\b[^>]*id="live-speed"[^>]*>/)?.[0]; assert.ok(field);
   assert.match(field, /value="1\/1"/); assert.match(field, /maxlength="40"/);
   assert.match(field, /aria-describedby="live-speed-hint"/);

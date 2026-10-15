@@ -2555,7 +2555,7 @@ async function play(mode = "live") {
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`)
-      + (mode === "replay" ? ` · replay speed ${session.replaySpeed.fraction} (pitch changes)` : ` · live speed ${session.liveSpeed.fraction} (pitch changes)`)
+      + (mode === "replay" ? ` · replay speed ${session.replaySpeed.fraction} (pitch changes)` : ` · initial live speed ${session.liveSpeed.fraction} (pitch changes)`)
       + (session.localPlan ? ` · ${session.localPlan.players.length} local players` : "");
     if (session.localPlan || session.hidOwner !== null || session.gamepadSources?.size > 0 || session.pointerSources?.size > 0) {
       bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
@@ -2673,8 +2673,8 @@ async function play(mode = "live") {
     controls();
     ui.stop.focus();
     status(mode === "replay" ? `Playing recorded replay at ${session.replaySpeed.fraction} speed (pitch changes). Stop ends this session.`
-      : session.timingPolicy ? `Playing at ${session.liveSpeed.fraction} speed (pitch changes) with SEVENKEYS numerical windows v1 (8320241d), ${session.timingPolicy.rankPrecedence}, ${session.timingPolicy.gauge} gauge and BeatKernel Hold v1. Stop ends this session.`
-        : `Playing at ${session.liveSpeed.fraction} speed (pitch changes). Stop ends this session; leaving the page stops playback.`);
+      : session.timingPolicy ? `Playing · initial speed ${session.liveSpeed.fraction} (pitch changes) with SEVENKEYS numerical windows v1 (8320241d), ${session.timingPolicy.rankPrecedence}, ${session.timingPolicy.gauge} gauge and BeatKernel Hold v1. Stop ends this session.`
+        : `Playing · initial speed ${session.liveSpeed.fraction} (pitch changes). Stop ends this session; leaving the page stops playback.`);
     session.timer = setInterval(() => {
       if (session.mode === "live") {
         pollGamepads(session);

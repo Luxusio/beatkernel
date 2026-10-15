@@ -842,6 +842,9 @@ mod native {
         logical_origin: ClockPoint,
         setup: beatkernel_bms_runtime::live_speed::LiveSpeedSetup,
     ) -> Result<Transport> {
+        if logical_origin.domain != LOGICAL {
+            return Err(beatkernel::transport::OutputPhaseError::WrongDomain.into());
+        }
         beatkernel_bms_runtime::native_audio_startup::initial_source_coordinate_runtime_transport(
             epoch,
             identity,

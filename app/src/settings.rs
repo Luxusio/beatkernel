@@ -310,7 +310,7 @@ const COMMON: &[Spec] = &[
     (
         "--speed",
         "PLAYBACK SPEED (NUM/DEN)",
-        "Empty uses 1/1. Positive NUM/DEN changes pitch; fixed for the entire play. Choose before starting.",
+        "Empty uses 1/1. Positive NUM/DEN sets the initial playback speed and changes pitch. Choose before starting.",
     ),
 ];
 const WINDOWS: &[Spec] = &[

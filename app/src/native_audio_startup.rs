@@ -1,18 +1,18 @@
 //! Bounded original-observation startup shared by native launchers.
 use crate::{
     audio_authority::{
-        AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch, AudioAuthorityCoordinateBasis,
+        AudioAuthority, AudioAuthorityConfig, AudioAuthorityCoordinateBasis, AudioAuthorityEpoch,
         AudioAuthorityObservation,
     },
     bgm::BgmFeeder,
+    gameplay::output::ports::SourcePlaybackIdentity,
     native_audio::feed_rendered,
     native_audio_presentation::NativeAudioPresentation,
-    native_gameplay::NativeGameplayResult,
     native_coordinate_control::{CoordinateControlFacts, CoordinatePlaybackControlFacts},
-    gameplay::output::ports::SourcePlaybackIdentity,
+    native_gameplay::NativeGameplayResult,
 };
 use beatkernel::{
-    audio::{CommandProducer, OutputFrameBasis, RenderReport, InterpolatedTargetTime},
+    audio::{CommandProducer, InterpolatedTargetTime, OutputFrameBasis, RenderReport},
     time::{
         AffineClockMapper, ClockDomainId, ClockInterval, ClockMapper, ClockPair, ClockPoint,
         Duration, ExtrapolationPolicy, Timestamp,
@@ -23,8 +23,7 @@ use beatkernel_platform::audio::presentation::validation::NativePresentationVali
 /// Slots for acquired input, retained practice receipts and native anchors.
 pub const SOURCE_COORDINATE_HISTORY_HEADROOM: usize = 4096 + 256 + 2;
 
-static NEXT_RUNTIME_PROGRAM_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static NEXT_RUNTIME_PROGRAM_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Identifies one immutable cold retained program, independently of its clocks.
 /// Exhaustion refuses preparation rather than reusing zero or an earlier identity.
@@ -136,14 +135,16 @@ pub fn initial_source_coordinate_runtime_transport(
         identity.initial_playback(),
         identity.hz(),
     )?;
-    Ok(beatkernel::transport::Transport::new_with_runtime_output_phase(
-        basis,
-        logical_origin,
-        setup.start(),
-        setup.preroll(),
-        setup.speed().rate(),
-        setup.end(),
-    )?)
+    Ok(
+        beatkernel::transport::Transport::new_with_runtime_output_phase(
+            basis,
+            logical_origin,
+            setup.start(),
+            setup.preroll(),
+            setup.speed().rate(),
+            setup.end(),
+        )?,
+    )
 }
 
 /// Original IO and retained input service; the boolean is continuation, not prefix closure.

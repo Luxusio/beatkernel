@@ -673,3 +673,99 @@ matching build/bindgen/hash 로그는 같은 증거 폴더의 *open-scrub*14120.
 새 정식 code/security 리뷰와 현재 아티팩트의 required qa-browser/CLI/desktop는
 아직 남는다. qa-browser가 최종 리뷰 PASS 뒤 필수14흐름을 한 번 실행하며,
 이전 browser15를 현재 QA로 재표기하지 않는다. 전체136/489·오디오12/27은 유지한다.
+
+
+## 2026-10-16 독립 QA와 수정 범위 AC036–039
+
+fd9c114a에 대한 실제 c5 code/security 리뷰는 모두 PASS, 문서 검토도 PASS다.
+그 뒤 required qa-browser14120은 현재 커밋된 strict runner로 필수14/전체15검사
+exit0을 확인했다. console/network0, overflow=false, 원본 File·PCM cut·retired
+custody/ACK·Records DETAILS·고정 상대 거절을 보존했다. 별도 실제 solo/local의
+open-ended scrub 뒤 자연 완료도 확인했다. solo 보충 스크립트는 정상 completed
+cleanup까지 금지한 검사 오류로 exit1이었고 원본 실패를 보존했다. raw 증거로
+실제 정상 완료를 별도 확인했으며 solo 스크립트 자체를 PASS로 표시하지 않는다.
+브라우저 증거: target/wf/runtime-rate-qa-browser-14120/evidence.json 및
+runtime-rate-qa-open-end{,-local}-14120/ 아래의 원본 기록.
+
+Required qa-cli14120의 실제 최종 판정은 FAIL이다. Full Node1692/0/skip0,
+core/platform/BMS1742/0/ignored2, app library3392/0/ignored9,
+7개 binary suite678pass/4fail/ignored17, 컴파일 가능한83 integration suite779/0/ignored17이다.
+중복 binary 실행과 별도 대상 재실행을 고유 coverage처럼 합산하지 않는다.
+전체85 integration 컴파일은 기존 allocation 소비자2개 파일에서 새 SourceTimestamp
+variant를 빠뜨린 정확히3개 E0004로 실패했다. Native/Windows/macOS all-target
+검사도 이 누락으로 실패했으며, foreign 실행 증거는 아니다. UI/audio WASM check는
+모두 exit0이다. `cargo test --keep-going`의 첫 호출은 인자 파싱 단계에서 거절됐고,
+지원되는 `cargo build --lib --bins --tests --keep-going`으로 전체 오류를 수집했다.
+실행 FAIL4는 같은 solo/cohort wrong-domain 거절 두 검사가 main/Linux에서 반복된
+결과다. SourceTimestamp 소비자 누락과 설정된 Linux logical axis의 검증 누락을
+수정한다. 수정 파일5개의 task-new rustfmt drift만 정리하며, byte-identical baseline
+포맷9개와 source_playback_history.rs:265의 Clippy too_many_arguments는 strict-clean이
+아니라는 한계를 보존한다. 실제 legacy2배속 PCM 출력은 독립 decimation과 일치했고,
+6/4 정규화·Unicode/공백 경로·출력 충돌 시 원본 hash 보존도 통과했다. 가변 기록의
+legacy offline-render 거절은 기존 policy-aware metadata 제한이며 신규 결함이 아니다.
+CLI 원본: target/wf/runtime-rate-qa-cli-14120/final-software-results.json,
+app-compile-regressions.json 및 해당 폴더의 raw logs.
+
+실제 ux-browser14120은 initial1/2→applied3/2에서 Current practice는 맞지만
+전역 상태가 Playing at1/2라고 표시해 P2 FAIL이다. AC036은 시작 입력·상세·고정
+상태를 초기 배속이라고 명확히 하며, 실제 적용값은 기존 owner capability만 따른다.
+새 상태/관측자/매 프레임 갱신은 추가하지 않는다. 공통 native Settings의 fixed for
+entire play 도움말도 초기 배속 의미로 고친다. 최초 resize의 실제 GPU 오류는
+새 세션 동일 동작에서 재현되지 않았다. 해당 경로는 변경 범위에서 그대로지만
+baseline 재현은 확정하지 못했으므로 BACKLOG로 보존한다.
+
+Required qa-desktop14120은 실제 :99 GUI에서 Records 원본 가변 기록469ops 조회,
+Own/Other 고정 상대 거절과 WATCH 복원, 키보드·크기 변경을 확인했다. 실제 Play는
+/dev/input·/dev/snd 부재/ENOENT, WATCH는 ALSA default 카드 snd_pcm_open -2로
+BLOCKED_ENV다. NULL 장치를 재생 증거로 사용하지 않았다. 양쪽 owned app은 exit0으로
+정리했다. source/target native 재생·RateView live 조작·실제 장치 시계·음향·성능은
+미확인이다. 원본: target/wf/runtime-rate-qa-desktop-14120/desktop-evidence.json.
+
+수정은 독립7명+root의 겹치지 않는4AC로 진행한다: AC036 UI 문구/독립 VM 회귀,
+AC037 해당5파일 포맷, AC038 두 allocation 테스트의 명시적 SourceTimestamp 처리,
+AC039 공유 Linux 실행 경계의 설정된 LOGICAL 검증/독립 positive·negative 회귀다.
+공통 builder는 호출자가 명시한 logical chronology 지원을 유지한다. 각 source/test
+작성자는 syntax·scoped format·diff만 확인하며 QUIET 뒤 root가 실제 Verify한다.
+현재 source 변경은 새 정식 DEEP code/security와 영향받은 QA/UX를 필요로 한다.
+기존 결과를 새 후보 PASS로 바꾸거나 receipt만 받기 위해 재실행하지 않는다.
+WBS05.13.06 W·전체136/489·오디오12/27과 전체 BMS player Goal을 유지한다.
+
+
+## AC036–039 개발 회귀 확인14121
+
+각 작업의 독립 작성자가 모두 QUIET로 반환한 뒤 root가 해당 범위의 기능 검사를 수행했다.
+UI는 기존 실제 적용값 경로를 유지한 채 초기 배속을 명시한다. Window solo/local
+각각 pause→pending→Resume→실제3/2→거절→F5 실제1/2, stale/duplicate result,
+PresentationStatus 복원과 단일 Stop을 확인했다. 관련 Window100/0은 첫 실행에서
+통과했다. 같은 실행의 markup 검사는 작성한 정규식이 nested input을 빠뜨려1건
+실패했다. 원본 실패 로그를 유지하고 테스트 추출만 수정한 뒤 해당 파일35/0을
+별도 확인했다. 겹치지 않는 최종 두 파일 범위는135/0이며134+35로 합산하지 않는다.
+로그: target/wf/runtime-rate-14043/window-initial-speed-first-14121.log 및
+window-initial-speed-markup-second-14121.log.
+
+두 allocation integration은 각각3/0, 기존 native Settings14/0와 일반 startup9/0이
+통과했다. 실제 signed 원본 pair를 이용한 retention pin의 literal 분수·무할당과
+raw timestamp를 native source mapping 증거로 바꾸지 못하는 거절을 포함한다.
+설정된 Linux 실행 경계의 기존 OutputPhaseError::WrongDomain을 복구했다.
+main/Linux의 solo startup 각1/0, cohort 필터 각10/0·6/0이 통과했고 원래 실패했던
+두 거절을 보존한다. cohort 숫자와 두 binary의 반복 실행을 고유 coverage처럼
+합산하지 않는다. 일반 builder에 distinct domain999를 직접 전달한 positive도
+통과하므로 Linux의 configured-axis 검증과 공통 API의 자유를 구분한다.
+로그: allocation-startup-settings-first-14121.log, native-axis-first-14121.log,
+native-cohort-axis-first-14121.log (같은 증거 폴더).
+
+수정한10개 Rust 경로의 edition2021/skip_children=true formatter가 통과했다.
+shared settings.rs의 다른 기존 formatter drift는 문자열 한 줄 수정과 구분해
+남겼으며 baseline 정리를 추가하지 않았다. Root31077은 전체 app library/bin/
+85 integration 대상 컴파일, UI/audio release WASM과 각각 직후의 matching bindgen을
+모두 exit0으로 끝냈다. 전체 app 컴파일7m22s, UI50.18s, audio30.51s다.
+현재 UI WASM=db4f3e9bcf556d627a81cac3ffdeed4c17e31522a064c50d598a80e4019a7f76,
+audio WASM=06b698ffc61ec9e44ecee905441b53c3a5c02603cf344d64a99d1e39f5410825,
+UI JS=33733edc7cb07d63a7f79fb9c813706cf811b193230ef561a8c4c826f90fb89e,
+audio JS=29807f3845b7f6ca4d95d5f04aa687b7d698254bb98a3cfacc736cd6737abcec,
+native main=0f39b0f5f58933caf25bba4b38d06b3b5c4ef1453f228d8265e56ed93ff66031이다.
+UI 동일성도 새 실제 빌드 뒤 측정했으며 audio는 이전 d7ca72a9와 다르다.
+로그는 같은 증거 폴더의 all-app-targets-build-14121.log,
+scoped-rustfmt-ten-14121.log, browser{,-audio}-remediation-*-14121.log,
+native-remediation-player-sha256-14121.log다. 새 전체 앱 runtime 검증과 독립 리뷰,
+필수 QA/UX는 남아 있으며 WBS/실제 장치 acceptance는 올리지 않는다.

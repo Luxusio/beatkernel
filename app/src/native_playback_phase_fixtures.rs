@@ -635,9 +635,9 @@ fn latest_generated_endpoint_is_inclusive_only_with_positive_matching_submission
 
 use crate::{
     gameplay_presentation::GameplayDevice,
+    native_end::{EndBoundary, NativeEnd},
+    native_gameplay::{InputBatch, NativeGameplayResult},
     native_gameplay_bridge::NativeGameplayDevice,
-    native_gameplay::{NativeGameplayResult, InputBatch},
-    native_end::{NativeEnd, EndBoundary},
 };
 use beatkernel::{audio::RenderReport, input::PhysicalInputEvent, time::ClockPair};
 use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
@@ -901,11 +901,9 @@ fn runtime_rate_exact_source17_cut_differs_from_actual_first_target26_projection
             event,
         )
         .unwrap();
-    assert!(
-        query
-            .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
-            .is_eq()
-    );
+    assert!(query
+        .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
+        .is_eq());
     assert!(query.compare_interpolated_time(projected_query).is_lt());
     assert_eq!(phase.elapsed_nanos(), 17_000_000);
     assert_eq!(phase.logical(), point(3, 17_000_500));
@@ -926,14 +924,12 @@ fn runtime_rate_exact_source17_cut_differs_from_actual_first_target26_projection
         fixture.projected.target_frame, 26,
         "original native projected proof is not retimed"
     );
-    assert!(
-        fixture
-            .facts
-            .phase
-            .compare_source_frame_at_interpolated_time(query, fixture.facts.segment_end, 17)
-            .unwrap()
-            .is_eq()
-    );
+    assert!(fixture
+        .facts
+        .phase
+        .compare_source_frame_at_interpolated_time(query, fixture.facts.segment_end, 17)
+        .unwrap()
+        .is_eq());
 
     let source_p = presentation(
         AudioAuthorityCoordinateBasis::SourceFrame(fixture.source),
@@ -1006,23 +1002,19 @@ fn runtime_rate_exact_cut_rejects_wrong_identity_generation_elapsed_playback_and
     let mapping =
         NativePlaybackMapping::converted(7, fixture.target, id, query, fixture.facts).unwrap();
     let before = format!("{p:?}");
-    assert!(
-        mapping
-            .runtime_rate_cut(
-                &p,
-                SourcePlaybackIdentity::new(1000, 1, 0).unwrap(),
-                attempt,
-                (&query, at),
-                event
-            )
-            .is_err()
-    );
+    assert!(mapping
+        .runtime_rate_cut(
+            &p,
+            SourcePlaybackIdentity::new(1000, 1, 0).unwrap(),
+            attempt,
+            (&query, at),
+            event
+        )
+        .is_err());
     let wrong_generation = OutputPhaseBasis::new(ClockDomainId(3), 41, 2, 0, 1000).unwrap();
-    assert!(
-        mapping
-            .runtime_rate_cut(&p, id, wrong_generation, (&query, at), event)
-            .is_err()
-    );
+    assert!(mapping
+        .runtime_rate_cut(&p, id, wrong_generation, (&query, at), event)
+        .is_err());
     let mut wrong_e = event;
     wrong_e.active_elapsed_nanos = 17_333_333;
     let mut wrong_playback = event;
@@ -1030,18 +1022,14 @@ fn runtime_rate_exact_cut_rejects_wrong_identity_generation_elapsed_playback_and
     let mut wrong_physical = event;
     wrong_physical.physical_frame = 16;
     for invalid in [wrong_e, wrong_playback, wrong_physical] {
-        assert!(
-            mapping
-                .runtime_rate_cut(&p, id, attempt, (&query, at), invalid)
-                .is_err()
-        );
+        assert!(mapping
+            .runtime_rate_cut(&p, id, attempt, (&query, at), invalid)
+            .is_err());
     }
     let wrong_query = exact(TargetTime::from_frames(17, 1000).unwrap());
-    assert!(
-        mapping
-            .runtime_rate_cut(&p, id, attempt, (&wrong_query, at), event)
-            .is_err()
-    );
+    assert!(mapping
+        .runtime_rate_cut(&p, id, attempt, (&wrong_query, at), event)
+        .is_err());
     assert_eq!(
         format!("{p:?}"),
         before,
@@ -1070,11 +1058,9 @@ fn runtime_rate_exact_cut_refuses_held_or_no_longer_retained_converter_span() {
     words[7] = 1;
     held.phase = ConvertedPhaseSpan::from_words(words).unwrap();
     let mapping = NativePlaybackMapping::converted(7, fixture.target, id, query, held).unwrap();
-    assert!(
-        mapping
-            .runtime_rate_cut(&p, id, attempt, (&query, at), event)
-            .is_err()
-    );
+    assert!(mapping
+        .runtime_rate_cut(&p, id, attempt, (&query, at), event)
+        .is_err());
     // An otherwise valid active span starts at the actual first crossing. The
     // integer Source17 cut is strictly before it, so inversion must not extrapolate.
     let mut shortened = fixture.facts;
@@ -1089,11 +1075,9 @@ fn runtime_rate_exact_cut_refuses_held_or_no_longer_retained_converter_span() {
     shortened.phase = ConvertedPhaseSpan::from_words(words).unwrap();
     let mapping =
         NativePlaybackMapping::converted(7, fixture.target, id, query, shortened).unwrap();
-    assert!(
-        mapping
-            .runtime_rate_cut(&p, id, attempt, (&query, at), event)
-            .is_err()
-    );
+    assert!(mapping
+        .runtime_rate_cut(&p, id, attempt, (&query, at), event)
+        .is_err());
     // An invalidated upper bound must remain an arithmetic range refusal. This
     // intentionally invalid descriptor grants no native proof or admission.
     let mut invalid_range = mapping;

@@ -32,14 +32,14 @@ use beatkernel::{
         EventMeta, GameControlId, PhysicalControlId,
     },
     judge::JudgeEngine,
-    replay::{ReplayOperation, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayOperation},
     runtime::RuntimeProcessingClock,
     time::presentation::PresentationEstimator,
     transport::{OutputPhaseBasis, Rate, Transport},
 };
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
-    presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, ConvertedNativeOutputState,
+    DeviceFormat, SampleEncoding,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1160,11 +1160,13 @@ fn runtime_target_input_between_source_cut_and_first_projected_sample_uses_new_r
     // Actual Source17 is17ms; its first generated Target sample is26/1500s.
     // This physical release lies strictly between those two boundaries.
     let release_host = point(1, 17_100_100);
-    f.device.events.push_back(PhysicalInputEvent::Button(ButtonEvent {
-        meta: EventMeta::new(DeviceId(9), release_host, 8),
-        control: PhysicalControlId::keyboard(7u16),
-        state: ButtonState::Up,
-    }));
+    f.device
+        .events
+        .push_back(PhysicalInputEvent::Button(ButtonEvent {
+            meta: EventMeta::new(DeviceId(9), release_host, 8),
+            control: PhysicalControlId::keyboard(7u16),
+            state: ButtonState::Up,
+        }));
     let changed = Rate::new(3, 2).unwrap();
     request_runtime_rate(&mut f, changed);
     assert!(f.run().unwrap().is_none());
@@ -1174,9 +1176,13 @@ fn runtime_target_input_between_source_cut_and_first_projected_sample_uses_new_r
     assert_eq!(event.physical_frame, 17);
     assert_eq!(event.active_elapsed_nanos, 17_000_000);
     let projected = TargetTime::from_frames(26, 1500).unwrap();
-    assert!(f.device.pins.iter().any(|(source, target)| {
-        *source == 17 && *target == projected
-    }), "actual queued event must retain its Source17/Target26 projection");
+    assert!(
+        f.device
+            .pins
+            .iter()
+            .any(|(source, target)| { *source == 17 && *target == projected }),
+        "actual queued event must retain its Source17/Target26 projection"
+    );
     assert_eq!(f.playback.generation(), 1);
     assert_eq!(f.runtime.audio_scope(), CommandScope(1));
     assert_eq!(f.playback.current_speed().rate(), changed);
@@ -1184,28 +1190,50 @@ fn runtime_target_input_between_source_cut_and_first_projected_sample_uses_new_r
     assert!(f.host.commits.is_empty());
     assert!(f.recording.captures.is_empty());
 
-    let header = f.playback.effective_header(crate::local_players::PlayerId(1)).unwrap();
+    let header = f
+        .playback
+        .effective_header(crate::local_players::PlayerId(1))
+        .unwrap();
     let (_, schedule) = crate::replay_speed_policy::split_schedule(&header.options).unwrap();
     assert_eq!(schedule.cuts().len(), 1);
     let cut = schedule.cuts()[0];
-    assert_eq!((cut.whole(), cut.numerator(), cut.denominator()), (17_000_000, 0, 1));
+    assert_eq!(
+        (cut.whole(), cut.numerator(), cut.denominator()),
+        (17_000_000, 0, 1)
+    );
     assert_eq!(schedule.current_speed().rate(), changed);
     let capture = f.capture.as_ref().unwrap();
     assert_eq!(capture.header(), header);
-    let inputs: Vec<_> = capture.records().iter().filter_map(|record| match &record.operation {
-        ReplayOperation::Input(input) => Some((record.song_time, input)),
-        _ => None,
-    }).collect();
+    let inputs: Vec<_> = capture
+        .records()
+        .iter()
+        .filter_map(|record| match &record.operation {
+            ReplayOperation::Input(input) => Some((record.song_time, input)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(inputs.len(), 2);
     assert_eq!(inputs[0].1.physical.meta().sequence, 7);
-    assert_eq!(inputs[0].1.physical.meta().original_clock_point, Some(point(1, 10_000_100)));
+    assert_eq!(
+        inputs[0].1.physical.meta().original_clock_point,
+        Some(point(1, 10_000_100))
+    );
     let (song, release) = inputs[1];
-    assert_eq!(song, Timestamp::from_nanos(17_150_000), "old-rate drain would incorrectly record17_100_000");
+    assert_eq!(
+        song,
+        Timestamp::from_nanos(17_150_000),
+        "old-rate drain would incorrectly record17_100_000"
+    );
     assert_eq!(release.physical.meta().sequence, 8);
     assert_eq!(release.physical.meta().source, DeviceId(9));
-    assert_eq!(release.physical.meta().original_clock_point, Some(release_host));
-    assert!(matches!(&release.physical, PhysicalInputEvent::Button(button)
-        if button.control == PhysicalControlId::keyboard(7u16) && button.state == ButtonState::Up));
+    assert_eq!(
+        release.physical.meta().original_clock_point,
+        Some(release_host)
+    );
+    assert!(
+        matches!(&release.physical, PhysicalInputEvent::Button(button)
+        if button.control == PhysicalControlId::keyboard(7u16) && button.state == ButtonState::Up)
+    );
     let capture = f.capture.take().unwrap();
     f.assert_replay_matches_live_judge(capture);
 }
@@ -1298,12 +1326,11 @@ fn runtime_target_unprojected_source_cut_holds_acquired_input_until_actual_proje
     assert_eq!(event.physical_frame, 17);
     assert_eq!(event.active_elapsed_nanos, 17_000_000);
     let projected = TargetTime::from_frames(26, 1500).unwrap();
-    assert!(
-        f.device
-            .pins
-            .iter()
-            .any(|(source, target)| *source == 17 && *target == projected)
-    );
+    assert!(f
+        .device
+        .pins
+        .iter()
+        .any(|(source, target)| *source == 17 && *target == projected));
     assert_eq!(f.playback.generation(), 1);
     assert_eq!(f.runtime.audio_scope(), CommandScope(1));
     assert_eq!(f.playback.current_speed().rate(), changed);
