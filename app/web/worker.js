@@ -3504,7 +3504,7 @@ async function drainRetiredRecordings(state, boundarySerial) {
   let cohort = state.retiredCohort;
   if (cohort && cohort.boundarySerial !== boundarySerial) throw new Error("An earlier retired cohort still owns its File custody.");
   if (!cohort) {
-    cohort = state.retiredCohort = { state, boundarySerial, players: retainedPlayers(state), rows: [], bytes: 0, promise: null };
+    cohort = state.retiredCohort = { state, boundarySerial, players: retainedPlayers(state), rows: [], bytes: 0, accepted: false, promise: null };
     retiredCaptureOwner = cohort;
   }
   for (const player of cohort.players) {
@@ -3531,7 +3531,7 @@ async function drainRetiredRecordings(state, boundarySerial) {
     if (row.replay === null) row.replay = new File([row.bytes], "recording.bkr", { type: "application/octet-stream" });
   }
   cohort.bytes = total;
-  if (!cohort.promise) cohort.promise = new Promise((resolve, reject) => {
+  if (!cohort.accepted && !cohort.promise) cohort.promise = new Promise((resolve, reject) => {
     cohort.resolve = resolve; cohort.reject = reject;
     cohort.timer = setTimeout(() => reject(new Error("Retired recording custody acknowledgement timed out.")), 10000);
     try {
@@ -3540,7 +3540,7 @@ async function drainRetiredRecordings(state, boundarySerial) {
         replays: cohort.rows.map(({ player, replay, replayComplete, replayError }) => ({ player, replay, replayComplete, replayError })), bytes: cohort.bytes });
     } catch (error) { clearTimeout(cohort.timer); reject(error); }
   });
-  await cohort.promise;
+  if (!cohort.accepted) await cohort.promise;
   if (state.retiredCohort === cohort) state.retiredCohort = null;
   if (retiredCaptureOwner === cohort) retiredCaptureOwner = null;
 }
@@ -3551,9 +3551,11 @@ function acceptRetiredRecordings(request) {
   if (Reflect.ownKeys(request).length !== 9 || request.version !== 1 || typeof request.accepted !== "boolean"
     || !integer(request.remainingRecords, 0, 128) || !integer(request.remainingBytes, 0, 256 * 1024 * 1024)
     || !(request.error === null || typeof request.error === "string" && request.error.length <= 4096)) return;
+  if (cohort.accepted) return;
   clearTimeout(cohort.timer);
   if (!request.accepted || request.error !== null) cohort.reject(new Error(request.error ?? "Window refused retired recording custody."));
   else {
+    cohort.accepted = true;
     cohort.state.captureBudget = { remainingRecords: request.remainingRecords, remainingBytes: request.remainingBytes };
     cohort.resolve();
   }

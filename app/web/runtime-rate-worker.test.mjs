@@ -93,6 +93,13 @@ replaceFixture('  if (options.missingSectionConstructor)', `
   }
   installSpeed(BrowserGame, [["new_and_speed", null], ["new_section_and_speed", BrowserGame.new_section],
     ["new_physical_and_speed", BrowserGame.new_physical], ["new_physical_contact_and_speed", BrowserGame.new_physical_contact]]);
+  // Both real Browser adapters make stop idempotent. Retained cleanup may
+  // retry it after custody failure while the current-capture cache stays owned.
+  const firstStop = BrowserGame.prototype.stop;
+  BrowserGame.prototype.stop = function() {
+    if (this.prepared.retained_practice && this.stops !== 0) { this.live(); return; }
+    return firstStop.call(this);
+  };
   Object.defineProperty(BrowserGame.prototype, "speed_numerator", { get() { return this.liveSelected?.[0] ?? 1n; } });
   Object.defineProperty(BrowserGame.prototype, "speed_denominator", { get() { return this.liveSelected?.[1] ?? 1n; } });
   Object.assign(BrowserGame.prototype, {
@@ -163,6 +170,12 @@ replaceFixture('  if (options.missingSectionConstructor)', `
     take_retired_replay(player=1) {
       this.live(); this.calls.push(["take-retired",player]);
       if(options.retiredErrorPlayer===player) throw new Error("member prefix encoding failed");
+      this.retiredExportFailures ??= new Set();
+      if(options.retiredTransientErrorPlayer===player&&!this.retiredExportFailures.has(player)) {
+        this.retiredExportFailures.add(player);
+        assert.equal(this.retiredBytes?.has(player),true,"fallible export retains its original retired member");
+        throw new Error("transient member prefix encoding failed");
+      }
       return this.retiredBytes?.delete(player) ? Uint8Array.from([66,75,82,player,9]) : undefined;
     },
   });
@@ -792,6 +805,170 @@ test("one retired member encoding failure cannot erase another member or permit 
   assert.ok(terminal.every(row=>row.released!==true),"unexported member remains owned after encoding failure");
   if(!owner.stops)await stop(h);
   assert.deepEqual([...owner.memberReplayTakes],[[99,1],[7,1]],"other/current member captures remain independently exportable");
+});
+
+function custodyAck(serial,fields={}) {
+  return {kind:"play-retired-recordings-ack",version:1,playId:7,programId:PROGRAM,boundarySerial:serial,
+    accepted:true,error:null,remainingRecords:124,remainingBytes:192*MiB,...fields};
+}
+async function custodyBoundary(mode,serial,options={}) {
+  const rawReceipts=[];
+  const h=await catalog({...options,postFailure:value=>{rawReceipts.push(value);return false;}});
+  const players=mode==="local"?[99,7]:[1];
+  const owner=await begin(h,{recordReplay:true,captureBudget:{remainingRecords:128,remainingBytes:256*MiB},
+    ...(mode==="local"?{inputMode:"physical-contact",localPlanWords:new Uint32Array([99,1,1,0,7,1,2,0])}:{})});
+  await attach(h);owner.allowCommit=true;owner.retiredBytes=new Set(players);
+  const id=await request(h,"region",{startSeconds:"1",endSeconds:"2",repeat:true});
+  await reachControl(h,"retained-region");await ackAudio(h);
+  await deliverPoll(h,envelope({tag:1n,generation:2n,id:BigInt(id),serial}));
+  return {h,owner,players,serial,rawReceipts};
+}
+async function captureBytes(file) {
+  assert.ok(file instanceof File,"accepted capture remains an immutable File");
+  return Array.from(new Uint8Array(await file.arrayBuffer()));
+}
+async function assertRetiredReceipt(value,players,serial) {
+  assert.ok(value);assert.equal(value.version,1);assert.equal(value.playId,7);
+  assert.equal(value.programId,PROGRAM);assert.equal(value.boundarySerial,serial);
+  assert.deepEqual(value.players,players);assert.deepEqual(value.replays.map(row=>row.player),players);
+  assert.equal(value.bytes,players.length*5);
+  for(const row of value.replays) {
+    assert.equal(row.replayComplete,false);assert.equal(row.replayError,null);
+    assert.deepEqual(await captureBytes(row.replay),[66,75,82,row.player,9]);
+  }
+}
+function assertCustodyOwned({h,owner,serial}) {
+  assert.equal(h.of("play-stopped").length,0,"Stop cannot finish without actual Window custody");
+  assert.ok(h.of("play-error").every(row=>row.released===false),"failure cannot release unaccepted captures");
+  assert.equal(owner.frees,0);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"&&row.serial===serial),false);
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===serial),false);
+}
+function assertCurrentExportCount(owner,players,mode,count=1) {
+  if(mode==="local")assert.deepEqual([...owner.memberReplayTakes],count?players.map(player=>[player,count]):[]);
+  else assert.equal(owner.replayTakes,count);
+}
+async function assertCurrentReceipt(value,players,mode) {
+  assert.equal(value.playId,7);assert.equal(value.replayComplete,false);
+  if(mode==="local") {
+    assert.deepEqual(Array.from(value.replays,row=>row.player),players);
+    for(const row of value.replays) {
+      assert.equal(row.replayComplete,false);assert.equal(row.replayError,null);
+      assert.deepEqual(await captureBytes(row.replay),[66,75,82,row.player]);
+    }
+  } else {
+    assert.equal(value.replayError,null);
+    assert.deepEqual(await captureBytes(value.replay),[66,75,82,255,0,1]);
+  }
+}
+function assertSameCurrentFiles(first,last,mode) {
+  if(mode==="local")for(let index=0;index<first.replays.length;index++)assert.equal(last.replays[index].replay,first.replays[index].replay,
+    "cleanup reuses each original cached current File");
+  else assert.equal(last.replay,first.replay,"cleanup reuses the original cached current File");
+}
+
+for(const mode of ["solo","local"])for(const arrival of ["before Stop","during retry"])test(`${mode} genuine late custody ACK ${arrival} survives the original timeout without duplicate exports`,async()=>{
+  const state=await custodyBoundary(mode,61n),{h,owner,players,serial,rawReceipts}=state;
+  const original=h.of("play-retired-recordings")[0];await assertRetiredReceipt(original,players,serial);
+  assertCurrentExportCount(owner,players,mode,0);assertCustodyOwned(state);
+  await h.runTimer(10000);
+  assertCustodyOwned(state);assert.match(h.of("play-error").at(-1)?.message??"",/custody.*timed out/i);
+  assert.equal(h.of("play-retired-recordings").length,1,"the timeout supplies no acceptance or replacement transfer");
+  assertCurrentExportCount(owner,players,mode);
+  const current=rawReceipts.filter(row=>row.kind==="play-error").at(-1);
+  await assertCurrentReceipt(current,players,mode);
+  if(arrival==="during retry") {
+    await stop(h);assertCustodyOwned(state);
+    const retries=h.of("play-retired-recordings");assert.equal(retries.length,2);
+    await assertRetiredReceipt(retries[1],players,serial);
+    const rawTransfers=rawReceipts.filter(row=>row.kind==="play-retired-recordings");
+    for(let index=0;index<players.length;index++)assert.equal(rawTransfers[1].replays[index].replay,rawTransfers[0].replays[index].replay,
+      "unaccepted retry transfers the original immutable prefix File");
+    await h.send(custodyAck(serial-1n));assertCustodyOwned(state);
+  }
+  await h.send(custodyAck(serial));
+  if(arrival==="before Stop") {
+    // A repeated acceptance or a delayed refusal cannot revoke real custody.
+    await h.send(custodyAck(serial));
+    await h.send(custodyAck(serial,{accepted:false,error:"duplicate tuple refused"}));
+    await stop(h);
+  }
+  const terminal=h.of("play-stopped").at(-1);assert.ok(terminal,"Stop completes after the genuine matching Window ACK");
+  assert.equal(owner.frees,1);assert.equal(h.of("play-retired-recordings").length,arrival==="before Stop"?1:2);
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="take-retired"),players.map(player=>["take-retired",player]));
+  assertCurrentExportCount(owner,players,mode);await assertCurrentReceipt(terminal,players,mode);
+  assertSameCurrentFiles(current,rawReceipts.filter(row=>row.kind==="play-stopped").at(-1),mode);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"&&row.serial===serial),false,
+    "terminal cleanup never invents an ACK after the original audio owner has closed");
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===serial),false);
+  await assertRetiredReceipt(original,players,serial);
+});
+
+test("timed-out retired custody stays owned through wrong, stale and malformed ACKs until an exact explicit retry acceptance",async()=>{
+  const state=await custodyBoundary("solo",62n),{h,owner,players,serial}=state;
+  await h.runTimer(10000);assertCustodyOwned(state);
+  const invalid=[{playId:8},{programId:PROGRAM+1n},{boundarySerial:serial-1n},{version:2},{extra:true},
+    {accepted:1},{remainingRecords:129},{remainingRecords:1.5},{remainingBytes:256*MiB+1},
+    {remainingBytes:-1},{error:"x".repeat(4097)},{error:undefined}];
+  for(const fields of invalid) {
+    await h.send(custodyAck(serial,fields));assertCustodyOwned(state);
+    assert.equal(h.of("play-retired-recordings").length,1);
+    assertCurrentExportCount(owner,players,"solo");
+  }
+  const missing=custodyAck(serial);delete missing.remainingBytes;
+  await h.send(missing);assertCustodyOwned(state);
+  await h.send(custodyAck(serial,{error:"positive flag with a custody error is still refusal"}));
+  assertCustodyOwned(state);
+  await stop(h);assertCustodyOwned(state);
+  assert.equal(h.of("play-retired-recordings").length,2,"an unaccepted cohort must still be offered on explicit retry");
+  await h.runTimer(10000);assertCustodyOwned(state);
+  assertCurrentExportCount(owner,players,"solo");
+  await h.send(custodyAck(serial));await stop(h);
+  assert.equal(owner.frees,1);assert.ok(h.of("play-stopped").at(-1));
+  assert.equal(h.of("play-retired-recordings").length,2,"late acceptance of the retried transfer is also durable");
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="take-retired"),[["take-retired",1]]);
+});
+
+test("whole local cohort refusal preserves original Files and current export through an explicit successful custody retry",async()=>{
+  const state=await custodyBoundary("local",63n),{h,owner,players,serial,rawReceipts}=state;
+  await h.send(custodyAck(serial,{accepted:false,error:"Window refused retired recording custody"}));
+  assertCustodyOwned(state);assert.match(h.of("play-error").at(-1)?.message??"",/Window refused/);
+  assertCurrentExportCount(owner,players,"local");
+  const current=rawReceipts.filter(row=>row.kind==="play-error").at(-1);
+  await stop(h);assertCustodyOwned(state);
+  const transfers=h.of("play-retired-recordings");assert.equal(transfers.length,2);
+  for(const value of transfers)await assertRetiredReceipt(value,players,serial);
+  const rawTransfers=rawReceipts.filter(row=>row.kind==="play-retired-recordings");
+  for(let index=0;index<players.length;index++)assert.equal(rawTransfers[1].replays[index].replay,rawTransfers[0].replays[index].replay);
+  await h.send(custodyAck(serial));
+  assert.equal(owner.frees,1);assertCurrentExportCount(owner,players,"local");
+  await assertCurrentReceipt(h.of("play-stopped").at(-1),players,"local");
+  assertSameCurrentFiles(current,rawReceipts.filter(row=>row.kind==="play-stopped").at(-1),"local");
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="take-retired"),players.map(player=>["take-retired",player]));
+});
+
+for(const mode of ["solo","local"])test(`${mode} transient retired encoding failure automatically retries the original whole cohort before real custody and terminal release`,async()=>{
+  // This generated-binding boundary models AC033's non-consuming error. The
+  // real Rust allocation-failure contract has its own independent Step tests.
+  const failedPlayer=mode==="local"?7:1;
+  const state=await custodyBoundary(mode,64n,{retiredTransientErrorPlayer:failedPlayer});
+  const {h,owner,players,serial}=state;
+  assert.deepEqual([...owner.retiredExportFailures],[failedPlayer]);
+  assert.deepEqual([...owner.retiredBytes],[],"automatic cleanup retry actually recovers each retained member");
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="take-retired"),mode==="local"
+    ?[["take-retired",99],["take-retired",7],["take-retired",7]]:[["take-retired",1],["take-retired",1]]);
+  assert.equal(h.of("play-retired-recordings").length,1,"failed encoding never sends a partial or null success cohort");
+  await assertRetiredReceipt(h.of("play-retired-recordings")[0],players,serial);
+  assertCustodyOwned(state);assertCurrentExportCount(owner,players,mode,0);
+  await h.send(custodyAck(serial));
+  const terminal=h.of("play-error").at(-1);assert.ok(terminal);
+  assert.equal(terminal.released,true,"automatic error cleanup releases only after the actual whole-cohort acceptance");
+  assert.match(terminal.message,/transient member prefix encoding failed/);
+  assert.equal(owner.frees,1);assertCurrentExportCount(owner,players,mode);
+  await assertCurrentReceipt(terminal,players,mode);
+  assert.equal(h.of("play-retired-recordings").length,1);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"&&row.serial===serial),false);
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===serial),false);
 });
 
 // Reuse the existing Window VM fixture, including its actual retained DOM.
