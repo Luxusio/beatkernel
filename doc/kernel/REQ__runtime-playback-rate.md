@@ -43,6 +43,28 @@ Retained browser는 getOutputTimestamp의 실제 context/HOST 쌍에서 arm 원�
 source0에 처음 도달하는 정수 HOST는1536224814ns다. 그 전에는 제어 권한이나
 Started ACK를 만들 수 없다.
 
+## 정확한 PCM cut과 정수 HOST 입력의 순서
+
+실제 PCM 이벤트의 Source cut은 분수 나노초일 수 있다. 해당 cut에 처음 도달하는
+정수 HOST와 같은 timestamp의 실제 입력도, 원래 관측으로 구한 정확한 query는
+cut 뒤일 수 있다. 예를 들어 원래 source/HOST1:1 관측에서44100Hz의 frame1은
+22675+325/441ns지만 그 뒤 첫 HOST22676ns의 query는22676ns다. 이 입력을
+cut 전에 소비하도록 요구하면서 exact-query guard로 보류하는 교착을 허용하지 않는다.
+
+이 exact Source query와 정수 누적 활성 경과 E는 구분한다. 같은44100Hz frame1에서
+E는 누적 frame delta를 한 번 floor한22675ns다. S/P=0·초기 배속1/2라면 기록의
+정확한 채보 cut Q는11337+1/2ns다. 물리 frame duration을 먼저1/2한
+11337+383/441ns로 바꾸지 않는다. PCM voice의 유리수 sample head와 기존 E/Q
+계약은 그대로 두고, 여기서는 입력과 이벤트의 순서만 수정한다.
+
+공통 Step의 solo/local event 준비는 실제 acquired queue의 같은 HOST 입력에
+한해서 기존 authority로 정확한 query를 확인한다. query>cut인 입력은 남겨 두고
+기존 resume-control cutoff로 원래 이벤트를 먼저 commit한다. query==cut인 입력의
+기존 inclusive drain과 cut 이전 입력의 우선 처리는 유지한다. 입력이 없는 닫힌
+prefix도 원래대로 경계를 완료할 수 있어야 한다. Rate·Pause·region/loop/end·restart에
+공통 적용하며 원래 관측·history pin·PCM·기록·실제 ACK 순서를 바꾸지 않는다.
+정수 HOST를 exact Source cut으로 대신하거나 입력 시각을 자르지 않는다.
+
 ## 하나의 실제 적용 경계
 
 배속은 정규화한 양수 i64/u64 유리수이며 pitch가 함께 바뀐다. 출력 장치 Hz,

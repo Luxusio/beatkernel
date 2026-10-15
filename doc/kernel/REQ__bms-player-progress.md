@@ -7,7 +7,17 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-최신 checkpoint(2026-10-16): 수정7f38f2b2·소비 패키지 문서 정정99c86f60에서
+현재 후속 작업(2026-10-16): AC040 렌더러 오류 전달·기록 보존을966c4ff0으로
+커밋했고 root 관련346/0·독립 문서/안전성 검토는 PASS다. 전체134경로를 본 c7
+코드 리뷰는 별도 P1 한 건으로 FAIL했다. 분수 Source cut 뒤 첫 정수 HOST의 입력이
+exact query guard와 inclusive cutoff 사이에서 서로 기다리는 공통 Step 교착이다.
+AC041에서 실제 같은 HOST의 acquired 입력이 cut 뒤인지 원래 authority로 확인해
+기존 strict cutoff로 남긴다. 정확히 같은 query의 기존 우선 처리는 유지한다.
+AC041 수정 후 실제 Step32/0·Worklet24/0·PCM3/0을 확인했다. 새 실제 UI/audio
+release WASM과 matching bindgen도 통과했고 새 정식 리뷰·QA는 아직 남는다.
+이는 원래 미확정 메뉴/GPU 최초 원인과 별개다. WBS136/489·오디오12/27은 유지한다.
+
+직전 QA checkpoint(2026-10-16): 수정7f38f2b2·소비 패키지 문서 정정99c86f60에서
 독립 DEEP code/security 리뷰와 문서 감사가 PASS다. 실제 required CLI도 PASS:
 앱4859/0(43 ignored), Node1693/0(skip0), Linux/Windows/macOS all-target typing0,
 별도 ALSA-null 소프트웨어 진단4/4다. Foreign typing/null을 실제 장치 검증으로

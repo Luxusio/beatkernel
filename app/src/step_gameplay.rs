@@ -2296,7 +2296,33 @@ impl StepGameplay {
         };
         let resume = matches!(event.event, WorkletRetainedEvent::Pause(pause) if !pause.paused)
             || matches!(event.event, WorkletRetainedEvent::Practice(projected) if matches!(projected.event, PracticeEvent::Boundary(receipt) if receipt.kind == PracticeBoundaryKind::Started));
-        let cutoff = if resume {
+        // The first integer HOST at a fractional cut can map strictly after it.
+        // Keep that genuine input queued for the new phase, while exact-cut
+        // equality retains the ordinary inclusive drain policy. Only prepare
+        // an actual queued input; a closed prefix need not admit a new input.
+        let after_cut_input = match (resume, authority.acquired_prefix()) {
+            (false, Some(prefix)) => {
+                match merger
+                    .peek_ready(prefix)
+                    .map_err(AudioAuthorityError::from)?
+                {
+                    Some(input) if input.meta().timestamp == host.timestamp => authority
+                        .prepare_coordinate_input(
+                            ClockPoint {
+                                domain: input.meta().clock_domain,
+                                timestamp: input.meta().timestamp,
+                            },
+                            now,
+                        )?
+                        .is_some_and(|prepared| {
+                            prepared.query().compare_interpolated_time(query).is_gt()
+                        }),
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        let cutoff = if resume || after_cut_input {
             authority.prepare_coordinate_resume_control_cutoff(
                 authority.epoch().id,
                 query,

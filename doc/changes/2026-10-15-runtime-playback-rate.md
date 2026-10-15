@@ -881,3 +881,66 @@ retained custody의 회수 대기/재시도를 확인했다. GPU/WASM 경계는 
 일치함을 확인했다. 이전 앱4859/typing/native BLOCKED_ENV의 동일 범위만 이월하며
 새 전체 Node·browser·UX 증거로 대체하지 않는다. 새 독립 full-scope DEEP 코드·
 security 리뷰 뒤 영향받은 QA를 수행한다. WBS 수와 전체 Goal은 그대로다.
+
+
+## c7 독립 리뷰와 AC041 분수 cut 입력 순서14122 (진행 중)
+
+Frozen966c4ff0의 독립 c7 security는 PASS0이며8focused와 실제 소비 패키지/native
+hash를 확인했다. 문서 감사도 PASS다. 전체134경로의 독립 DEEP code는 별도 P1
+한 건으로 FAIL했다. 공통 Step retained_cut의 inclusive cutoff는 equal HOST 입력을
+먼저 소비해야 하나, 정확한 query가 held cut보다 뒤라 기존 permits_query가 올바르게
+보류하면 이벤트와 입력이 서로 기다린다. 원래1:1 source/HOST 관측에서44100Hz
+frame1 cut22675+325/441ns·첫 정수 HOST22676ns가 구체적인 유효 사례다.
+Rate 외 Pause(true), region/loop/end/disable/rejected revision와 compound restart도
+같은 helper를 사용한다. Started/Pause(false)는 이미 strict cutoff다. 이 결함은
+AC040 렌더러 수정 및 원래 미확정 메뉴/GPU 최초 오류와 별개다.
+
+AC041은 실제 acquired queue의 같은 HOST 입력만 기존 authority로 preflight해
+query>cut일 때 기존 resume cutoff로 남긴다. query==cut의 원래 inclusive drain과
+이전 입력 우선, 미래 입력 보존, 입력 없는 닫힌 prefix를 유지한다. ClockPair·시계·
+정확한 Source cut·기록·history pin·실제 PCM/ACK를 바꾸지 않는다. 제품 변경은
+공통 Step 한 파일, 독립 회귀는 기존 runtime_rate_step.rs 한 파일이다.
+44.1/48k의 solo/local 실제 PCM·관측·capture/replay와 정확한 정수 경계 대조를
+작성 중이다. 기능 실행은 두 작성자 QUIET 후 root가 수행한다.
+
+Rust/Step가 바뀌므로 이전 앱/Step/WASM 검사를 새 후보의 증거로 쓰지 않는다.
+필요한 실제 UI/audio WASM과 matching bindgen을 실제 소비 이름으로 다시 빌드하고,
+새 정식 리뷰 뒤 영향받은 QA를 수행한다. 아직 현재 QA를 시작하지 않았으며
+WBS05.13.06 W·전체136/489·오디오12/27과 전체 Goal은 유지한다.
+
+
+### AC041 root 실제 검증과 새 소비 아티팩트14122
+
+공통 Step 소스/독립 테스트 작성자가 QUIET 뒤 root가 Step·Worklet·실제 PCM 세
+integration을 실행했다. 첫 실행은 Step31pass/1fail, Worklet24/0·PCM3/0이었다.
+새 자연 종료 fixture의 end1ns보다 늦은 old input을 capture에 기대한 한 건이었다.
+기존 exclusive-end 정책을 확인하고 실제 pre-end 입력으로 사례를 수정했다.
+끝은11337ns·이전 HOST22673ns→song11336ns로 바꾸고 실제 Ended의 physical
+frame1과 post-cut HOST22676ns는 유지했다. 이전 prefix 보존 assertion을 지우거나
+빈 기록을 허용하지 않았고 실제 bound input1개도 확인한다. 해당 Step 파일만
+재실행해32/0, exit0이다. 변경 없는 Worklet/PCM은 다시 돌리지 않았다. 최종
+겹치지 않는 제품 범위는32+24+3=59/0이며 첫31pass를 더하지 않는다.
+원본 retained-first.log와 step-second.log를 모두 보존한다.
+
+순수 회귀는44.1/48k actual Worklet PCM·이벤트·원래 SourceTimestamp ClockPair·
+exact Source cut과 E/Q를 구분한 literal·solo/local2/4 라우팅·capture/codec/provenance를
+확인한다. Rate·Pause·Region/Restart·Ended, 정확한 정수 경계의 inclusive equality,
+입력 없는 실제 닫힌 frontier의 다음 제어를 포함한다. 실제 장치 proof는 아니다.
+Rust2파일의 edition2021/skip_children formatter, diff whitespace, WBS parser도 PASS다.
+
+Root의 새 실제 UI release46.68s·audio release31.17s와 각 직후 matching bindgen이
+exit0이다. 실제 소비 이름은 모두 beatkernel_bms_runtime이며 UI와 audio 각 pkg 경로를
+분리했다. Source Step는 두 빌드 사이 변하지 않았고 중간 테스트 수정은 fixture뿐이다.
+현재 소비 SHA256은 다음과 같다.
+
+- UI WASM: d2bdf298cd3aec4ee87b33e1e48fb389881f33468bee96062f52e23961a7891c
+- audio WASM: 52940c9236a5b531b819c58d111379e66ecf09c73494dfa73147b13fedd508a0
+- UI JS: 33733edc7cb07d63a7f79fb9c813706cf811b193230ef561a8c4c826f90fb89e
+- audio JS: eaa1340083a7e6dc40b6cecbd8b9c888b8f07ac311ddf0d9d26116c0f849eb40
+- Cargo integration build로 새로 만든 native main: c43a87902ebf7910afe5698c76f1cf00ff46d24ef3865aee615d9e6fccef3b8b
+
+증거는 target/wf/runtime-rate-ac041-14122/의 위 로그, browser-{ui,audio}-release-first.log,
+browser-{ui,audio}-bindgen-first.log, final-current-consumed-artifacts.json이다.
+이 개발 검증은 새 독립 리뷰·전체 앱/Node·foreign typing·실제 browser/desktop/UX의
+완료가 아니다. 새 후보를 정식 리뷰에 넘기며 최초 미확정 메뉴 실패·장치 한계와
+WBS136/489·오디오12/27을 유지한다.
