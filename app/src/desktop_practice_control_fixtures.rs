@@ -1,6 +1,483 @@
 use super::*;
 use beatkernel::time::Timestamp;
 use beatkernel_bms_runtime::practice_control::*;
+
+fn runtime_fixture() -> (Desktop, player::PlayerPublisher) {
+    let (mut app, publisher) = fixture();
+    publisher
+        .advertise_practice_transactions(Some(PracticeTransactionCapability {
+            practice: PracticeCapability {
+                generation: 1,
+                min_target: t(0),
+                max_target: t(1000),
+            },
+            rate: PracticeRateState {
+                revision: 7,
+                rate: beatkernel::transport::Rate::NORMAL,
+            },
+        }))
+        .unwrap();
+    app.collect_game();
+    (app, publisher)
+}
+
+// Copied audio DTOs check UI response interpretation only; actual PCM and native
+// boundary qualification are exercised by the separate owner/audio fixtures.
+fn copied_runtime_rate_reply(
+    request: PracticeTransactionRequest,
+    refused: bool,
+) -> PracticeTransactionReply {
+    use beatkernel::audio::{PracticeRateEvent, PracticeRateOutcome, PracticeRateRefusal};
+    let PracticeTransactionRequest::Rate {
+        id,
+        generation,
+        expected,
+        requested_rate,
+    } = request
+    else {
+        panic!("rate request required")
+    };
+    PracticeTransactionReply::Rate {
+        id,
+        generation,
+        result: Ok(PracticeRateEvent {
+            request_id: id,
+            generation,
+            iteration: 2,
+            request_revision: expected.revision,
+            applied_revision: expected.revision + u64::from(!refused),
+            physical_frame: 300,
+            playback_frame: 200,
+            active_elapsed_nanos: 100_000_000,
+            previous_rate: expected.rate,
+            requested_rate,
+            applied_rate: if refused {
+                expected.rate
+            } else {
+                requested_rate
+            },
+            outcome: if refused {
+                PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity)
+            } else if requested_rate == expected.rate {
+                PracticeRateOutcome::Noop
+            } else {
+                PracticeRateOutcome::Applied
+            },
+        }),
+    }
+}
+
+fn replace_focused_rate_text(app: &mut Desktop, text: &str) {
+    app.modifiers_changed(if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    });
+    app.keyboard_input(
+        PhysicalKey::Code(KeyCode::KeyA),
+        &Key::Character("a".into()),
+        Some("a"),
+        false,
+    );
+    app.modifiers_changed(ModifiersState::empty());
+    app.keyboard_input(
+        PhysicalKey::Code(KeyCode::Digit1),
+        &Key::Character(text.into()),
+        Some(text),
+        false,
+    );
+}
+
+#[test]
+fn desktop_runtime_rate_keyboard_focus_edits_and_apply_keep_original_attempt_until_reply() {
+    use beatkernel_bms_runtime::ui::rate::{APPLY_CONTROL, DENOMINATOR_CONTROL, NUMERATOR_CONTROL};
+    let (mut app, publisher) = runtime_fixture();
+    let owner = app.navigator.active_id().unwrap();
+    let original = app.game.as_ref().unwrap().launch.clone();
+    assert!(app.text_target().is_none());
+    app.key(KeyCode::Tab, false);
+    let numerator = app
+        .text_target()
+        .expect("NUMERATOR is the first rate focus");
+    replace_focused_rate_text(&mut app, "6");
+    assert_eq!(app.text_editor(numerator.field).unwrap().value(), "6");
+    app.key(KeyCode::Tab, true);
+    assert_eq!(
+        app.text_target(),
+        Some(numerator),
+        "OS repetition cannot move focus"
+    );
+    app.key(KeyCode::Tab, false);
+    let denominator = app
+        .text_target()
+        .expect("DENOMINATOR is the second rate focus");
+    assert_ne!(denominator, numerator);
+    replace_focused_rate_text(&mut app, "4");
+    assert_eq!(app.text_editor(denominator.field).unwrap().value(), "4");
+    app.key(KeyCode::Tab, false);
+    assert!(
+        app.text_target().is_none(),
+        "Apply focus is not a text editor"
+    );
+    app.key(KeyCode::Enter, false);
+    let request = publisher.take_practice_transaction(true).unwrap().unwrap();
+    assert!(matches!(request,
+        PracticeTransactionRequest::Rate { requested_rate, expected, .. }
+            if requested_rate == beatkernel::transport::Rate::new(3, 2).unwrap()
+                && expected.revision == 7
+                && expected.rate == beatkernel::transport::Rate::NORMAL
+    ));
+    app.activate(APPLY_CONTROL);
+    app.key(KeyCode::Enter, false);
+    assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+    let game = app.game.as_ref().unwrap();
+    assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+    assert_eq!(game.launch.args(), original.args());
+    assert_eq!(
+        game.viewer
+            .practice_transaction_capability()
+            .unwrap()
+            .unwrap()
+            .rate
+            .revision,
+        7
+    );
+    publisher
+        .commit_practice_transaction_reply(&copied_runtime_rate_reply(request, false))
+        .unwrap();
+    app.collect_game();
+    assert!(!app.game.as_ref().unwrap().viewer.practice_pending());
+    assert_eq!(app.navigator.active_id(), Some(owner));
+    app.activate(NUMERATOR_CONTROL);
+    assert_eq!(
+        app.text_editor(app.text_target().unwrap().field)
+            .unwrap()
+            .value(),
+        "6"
+    );
+    app.activate(DENOMINATOR_CONTROL);
+    assert_eq!(
+        app.text_editor(app.text_target().unwrap().field)
+            .unwrap()
+            .value(),
+        "4"
+    );
+}
+
+#[test]
+fn desktop_runtime_rate_invalid_draft_is_retained_and_keyboard_recovers_without_new_route() {
+    let (mut app, publisher) = runtime_fixture();
+    let owner = app.navigator.active_id();
+    app.key(KeyCode::Tab, false);
+    replace_focused_rate_text(&mut app, "3");
+    app.key(KeyCode::Tab, false);
+    let target = app.text_target().unwrap();
+    replace_focused_rate_text(&mut app, "0");
+    app.key(KeyCode::Enter, false);
+    assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+    assert!(!app.game.as_ref().unwrap().viewer.practice_pending());
+    assert_eq!(app.text_target(), Some(target));
+    assert_eq!(app.text_editor(target.field).unwrap().value(), "0");
+    assert_eq!(app.navigator.active_id(), owner);
+    replace_focused_rate_text(&mut app, "2");
+    app.key(KeyCode::Enter, false);
+    assert!(matches!(publisher.take_practice_transaction(true).unwrap(),
+        Some(PracticeTransactionRequest::Rate { requested_rate, .. })
+            if requested_rate == beatkernel::transport::Rate::new(3, 2).unwrap()
+    ));
+}
+
+#[test]
+fn desktop_runtime_rate_reverse_focus_and_ime_keep_play_shortcuts_and_committed_draft_separate() {
+    let (mut app, publisher) = runtime_fixture();
+    app.key(KeyCode::Tab, false);
+    let numerator = app.text_target().unwrap();
+    assert_eq!(numerator.field, TextField::RateNumerator);
+    app.modifiers_changed(ModifiersState::SHIFT);
+    app.key(KeyCode::Tab, false);
+    assert!(app.text_target().is_none());
+    app.modifiers_changed(ModifiersState::empty());
+    app.key(KeyCode::Tab, false);
+    assert_eq!(app.text_target(), Some(numerator));
+    app.key(KeyCode::Tab, false);
+    assert_eq!(app.text_target().unwrap().field, TextField::RateDenominator);
+    app.modifiers_changed(ModifiersState::SHIFT);
+    app.key(KeyCode::Tab, false);
+    assert_eq!(app.text_target(), Some(numerator));
+    app.modifiers_changed(ModifiersState::empty());
+    replace_focused_rate_text(&mut app, "6");
+    app.text_editor_mut(numerator.field).unwrap().select_all();
+    app.ime_event(Ime::Enabled);
+    app.ime_event(Ime::Preedit("9".into(), Some((1, 1))));
+    assert!(app.ime_owns_keyboard());
+    assert_eq!(app.text_editor(numerator.field).unwrap().value(), "6");
+    app.key(KeyCode::Tab, false);
+    app.key(KeyCode::Enter, false);
+    assert_eq!(app.text_target(), Some(numerator));
+    assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+    app.ime_event(Ime::Commit("9".into()));
+    app.ime_event(Ime::Disabled);
+    assert_eq!(app.text_editor(numerator.field).unwrap().value(), "9");
+    assert!(!app.game.as_ref().unwrap().viewer.practice_pending());
+    app.key(KeyCode::F9, false);
+    assert!(
+        app.game.as_ref().unwrap().viewer.pause_requested(),
+        "focused rate editing must preserve F9"
+    );
+    app.key(KeyCode::Escape, false);
+    assert!(
+        app.game.as_ref().unwrap().cancelling,
+        "focused rate editing must preserve stop"
+    );
+}
+
+#[test]
+fn desktop_runtime_rate_paused_request_allows_f9_resume_through_both_guards_only() {
+    let (mut app, publisher) = runtime_fixture();
+    app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause = player::PauseState::Paused;
+    let viewer = &app.game.as_ref().unwrap().viewer;
+    viewer.request_pause(true);
+    viewer
+        .request_practice_rate(beatkernel::transport::Rate::new(3, 2).unwrap())
+        .unwrap();
+    assert!(publisher
+        .take_practice_transaction(false)
+        .unwrap()
+        .is_none());
+    assert_eq!(app.game.as_ref().unwrap().pause_target(), Some(false));
+    app.key(KeyCode::F9, false);
+    assert!(!app.game.as_ref().unwrap().viewer.pause_requested());
+    assert!(publisher
+        .take_practice_transaction(false)
+        .unwrap()
+        .is_none());
+    app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause = player::PauseState::Running;
+    assert_eq!(
+        app.game.as_ref().unwrap().pause_target(),
+        None,
+        "pending rate allows resume only"
+    );
+    app.key(KeyCode::F9, false);
+    assert!(!app.game.as_ref().unwrap().viewer.pause_requested());
+    assert!(matches!(
+        publisher.take_practice_transaction(true).unwrap(),
+        Some(PracticeTransactionRequest::Rate { .. })
+    ));
+}
+
+#[test]
+fn desktop_runtime_rate_audio_refusal_is_not_applied_and_does_not_clear_loop_or_score() {
+    let (mut app, publisher) = runtime_fixture();
+    let game = app.game.as_mut().unwrap();
+    game.loop_enabled = true;
+    game.snapshot.as_mut().unwrap().score.hits = 37;
+    game.snapshot.as_mut().unwrap().score.combo = 9;
+    game.snapshot.as_mut().unwrap().pressed_lanes = 5;
+    let before_score = game.snapshot.as_ref().unwrap().score.clone();
+    game.viewer
+        .request_practice_rate(beatkernel::transport::Rate::new(3, 2).unwrap())
+        .unwrap();
+    let request = publisher.take_practice_transaction(true).unwrap().unwrap();
+    publisher
+        .commit_practice_transaction_reply(&copied_runtime_rate_reply(request, true))
+        .unwrap();
+    app.collect_game();
+    let game = app.game.as_ref().unwrap();
+    assert!(game.loop_enabled);
+    assert!(!game.cancelling && game.prepared_retry.is_none());
+    assert_eq!(game.snapshot.as_ref().unwrap().score, before_score);
+    assert_eq!(game.snapshot.as_ref().unwrap().pressed_lanes, 5);
+    assert_eq!(
+        game.viewer
+            .practice_transaction_capability()
+            .unwrap()
+            .unwrap()
+            .rate,
+        PracticeRateState {
+            revision: 7,
+            rate: beatkernel::transport::Rate::NORMAL
+        }
+    );
+    assert!(
+        game.viewer
+            .take_practice_transaction_response()
+            .unwrap()
+            .is_none(),
+        "desktop consumes the correlated response once"
+    );
+    let failure = app.failure.clone();
+    assert!(
+        failure.is_some(),
+        "an audio-side refusal needs an error presentation"
+    );
+    app.collect_game();
+    assert_eq!(app.failure, failure);
+}
+
+#[test]
+fn desktop_runtime_f5_is_one_original_restart_and_refusal_keeps_pinned_owner_and_loop() {
+    use beatkernel::audio::{
+        PracticeBoundaryKind, PracticeRateOutcome, PracticeRateRefusal, PracticeReceipt,
+        PracticeRestartEvent,
+    };
+    let (mut app, publisher) = runtime_fixture();
+    let original = SessionLaunch::new(vec![
+        "--chart".into(),
+        "pinned.bms".into(),
+        "--start-ns".into(),
+        "123".into(),
+        "--end-ns".into(),
+        "999".into(),
+        "--speed".into(),
+        "6/4".into(),
+        "--record-replay".into(),
+        "records/pinned.bkr".into(),
+    ])
+    .unwrap();
+    let current = original
+        .retry_from(PracticeStart::from_nanoseconds(789).unwrap())
+        .unwrap();
+    app.game.as_mut().unwrap().launch = current.clone();
+    app.game.as_mut().unwrap().loop_enabled = true;
+    app.key(KeyCode::F5, true);
+    assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+    for refused in [true, false] {
+        app.key(KeyCode::F5, false);
+        let request = publisher.take_practice_transaction(true).unwrap().unwrap();
+        let PracticeTransactionRequest::RestartOriginal {
+            id,
+            generation,
+            expected,
+        } = request
+        else {
+            panic!("F5 must be one compound original restart, not a region scrub")
+        };
+        app.key(KeyCode::F5, false);
+        assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+        assert!(publisher.take_practice_request().unwrap().is_none());
+        let game = app.game.as_ref().unwrap();
+        assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+        assert!(game.loop_enabled);
+        assert_eq!(game.launch.args(), current.args());
+        let target = if refused { t(20) } else { t(123) };
+        let reply = PracticeTransactionReply::RestartOriginal {
+            id,
+            generation,
+            result: Ok(PracticeRestartEvent {
+                boundary: PracticeReceipt {
+                    request_id: id,
+                    generation: generation + u64::from(!refused),
+                    iteration: 0,
+                    physical_frame: 300,
+                    playback_frame: 200,
+                    requested_song_time: target,
+                    applied_song_time: target,
+                    correction_nanos: 0,
+                    kind: if refused {
+                        PracticeBoundaryKind::ControlRejectedRevision
+                    } else {
+                        PracticeBoundaryKind::Requested
+                    },
+                },
+                request_revision: expected.revision,
+                applied_revision: expected.revision + u64::from(!refused),
+                previous_rate: expected.rate,
+                requested_rate: beatkernel::transport::Rate::new(3, 2).unwrap(),
+                applied_rate: if refused {
+                    expected.rate
+                } else {
+                    beatkernel::transport::Rate::new(3, 2).unwrap()
+                },
+                outcome: if refused {
+                    PracticeRateOutcome::Refused(PracticeRateRefusal::Ended)
+                } else {
+                    PracticeRateOutcome::Applied
+                },
+            }),
+        };
+        if refused {
+            // A refused compound control is an unchanged-state marker. A
+            // Requested boundary would falsely claim an applied new attempt.
+            let mut wrong_marker = reply.clone();
+            if let PracticeTransactionReply::RestartOriginal {
+                result: Ok(event), ..
+            } = &mut wrong_marker
+            {
+                event.boundary.kind = PracticeBoundaryKind::Requested;
+            }
+            assert!(publisher
+                .commit_practice_transaction_reply(&wrong_marker)
+                .is_err());
+            let viewer = &app.game.as_ref().unwrap().viewer;
+            assert_eq!(
+                viewer.pending_practice_transaction().unwrap(),
+                Some(request)
+            );
+            assert_eq!(
+                viewer
+                    .practice_transaction_capability()
+                    .unwrap()
+                    .unwrap()
+                    .rate,
+                expected
+            );
+            assert!(viewer
+                .take_practice_transaction_response()
+                .unwrap()
+                .is_none());
+        }
+        publisher.commit_practice_transaction_reply(&reply).unwrap();
+        app.collect_game();
+        let game = app.game.as_ref().unwrap();
+        assert_eq!(game.loop_enabled, refused);
+        assert!(!game.cancelling && game.prepared_retry.is_none());
+        assert_eq!(game.launch.original_args(), original.original_args());
+        assert_eq!(
+            game.launch.args(),
+            current.args(),
+            "UI cannot invent unpublished launch evidence"
+        );
+    }
+}
+
+#[test]
+fn desktop_runtime_rate_pending_back_and_escape_never_fabricate_applied_completion() {
+    let (mut app, publisher) = runtime_fixture();
+    let owner = app.navigator.active_id();
+    app.game
+        .as_ref()
+        .unwrap()
+        .viewer
+        .request_practice_rate(beatkernel::transport::Rate::new(3, 2).unwrap())
+        .unwrap();
+    let request = publisher.take_practice_transaction(true).unwrap().unwrap();
+    assert!(app.navigate(ScreenRoute::Selection).is_err());
+    assert_eq!(app.navigator.active_id(), owner);
+    assert!(app.game.as_ref().unwrap().viewer.practice_pending());
+    assert!(app
+        .game
+        .as_ref()
+        .unwrap()
+        .viewer
+        .take_practice_transaction_response()
+        .unwrap()
+        .is_none());
+    app.key(KeyCode::Escape, false);
+    assert!(app.game.as_ref().unwrap().cancelling);
+    assert!(publisher.take_practice_transaction(true).unwrap().is_none());
+    assert!(publisher
+        .commit_practice_transaction_reply(&copied_runtime_rate_reply(request, false))
+        .is_err());
+    app.collect_game();
+    let game = app.game.as_ref().unwrap();
+    assert!(game.cancelling && game.prepared_retry.is_none());
+    assert!(game
+        .viewer
+        .practice_transaction_capability()
+        .unwrap()
+        .is_none());
+    assert!(!game.viewer.practice_pending());
+}
 fn t(n: i64) -> Timestamp {
     Timestamp::from_nanos(n)
 }

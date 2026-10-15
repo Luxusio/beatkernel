@@ -16,6 +16,7 @@ pub mod motion;
 pub mod organisms;
 pub mod players;
 pub mod practice;
+pub mod rate;
 pub mod records;
 pub mod results;
 mod retained;

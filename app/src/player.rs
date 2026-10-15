@@ -441,6 +441,56 @@ fn settle_practice(
     closed
 }
 impl PlayerPublisher {
+    pub fn advertise_practice_transactions(
+        &self,
+        cap: Option<crate::practice_control::PracticeTransactionCapability>,
+    ) -> io::Result<()> {
+        let mut controls = self
+            .0
+            .practice
+            .lock()
+            .map_err(|_| io::Error::other("practice controls unavailable"))?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(());
+        }
+        controls
+            .advertise_transactions(cap)
+            .map_err(io::Error::other)?;
+        if cap.is_some() {
+            self.0.practice_owner.store(true, Ordering::Release);
+        }
+        self.0
+            .practice_busy
+            .store(controls.pending(), Ordering::Release);
+        Ok(())
+    }
+    pub fn take_practice_transaction(
+        &self,
+        active: bool,
+    ) -> io::Result<Option<crate::practice_control::PracticeTransactionRequest>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(None);
+        }
+        let active = active
+            && !self.0.pause_requested.load(Ordering::Acquire)
+            && !self.0.practice_paused.load(Ordering::Acquire);
+        Ok(controls.take_transaction(active))
+    }
+    pub fn commit_practice_transaction_reply(
+        &self,
+        reply: &crate::practice_control::PracticeTransactionReply,
+    ) -> io::Result<()> {
+        let mut controls = self
+            .0
+            .practice
+            .lock()
+            .map_err(|_| io::Error::other("practice controls unavailable"))?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        controls.reply_transaction(reply).map_err(io::Error::other)
+    }
     /// Cold native-owner advertisement; capability defaults to unsupported.
     pub fn advertise_practice(
         &self,
@@ -509,6 +559,21 @@ pub fn reply_practice(reply: &crate::practice_control::PracticeReply) -> io::Res
 pub fn commit_practice_reply(reply: &crate::practice_control::PracticeReply) -> io::Result<()> {
     output_publisher(|p| p.commit_practice_reply(reply), ())
 }
+pub fn advertise_practice_transactions(
+    cap: Option<crate::practice_control::PracticeTransactionCapability>,
+) -> io::Result<()> {
+    output_publisher(|p| p.advertise_practice_transactions(cap), ())
+}
+pub fn take_practice_transaction(
+    active: bool,
+) -> io::Result<Option<crate::practice_control::PracticeTransactionRequest>> {
+    output_publisher(|p| p.take_practice_transaction(active), None)
+}
+pub fn commit_practice_transaction_reply(
+    reply: &crate::practice_control::PracticeTransactionReply,
+) -> io::Result<()> {
+    output_publisher(|p| p.commit_practice_transaction_reply(reply), ())
+}
 /// Pin the desktop invocation before native preparation.
 pub fn pin_native_launch(launch: crate::session_launch::SessionLaunch) -> Result<(), String> {
     pin_native_launch_with_preparation(launch, None)
@@ -560,6 +625,65 @@ pub fn practice_pending() -> bool {
     output_publisher(|p| Ok(p.0.practice_busy.load(Ordering::Acquire)), false).unwrap_or(true)
 }
 impl PlayerViewer {
+    pub fn practice_transaction_capability(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeTransactionCapability>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(None);
+        }
+        Ok(controls.transaction_capability())
+    }
+    pub fn pending_practice_transaction(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeTransactionRequest>> {
+        let controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        Ok(controls.pending_transaction())
+    }
+    pub fn request_practice_rate(&self, rate: beatkernel::transport::Rate) -> io::Result<u64> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        if self.output_pending() {
+            return Err(io::Error::other(
+                "practice conflicts with output replacement",
+            ));
+        }
+        let id = controls.request_rate(rate).map_err(io::Error::other)?;
+        self.0.practice_busy.store(true, Ordering::Release);
+        Ok(id)
+    }
+    pub fn request_practice_original_restart(&self) -> io::Result<u64> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        if self.output_pending()
+            || self.pause_requested()
+            || self.0.practice_paused.load(Ordering::Acquire)
+        {
+            return Err(io::Error::other(
+                "practice conflicts with pause or output replacement",
+            ));
+        }
+        let id = controls
+            .request_original_restart()
+            .map_err(io::Error::other)?;
+        self.0.practice_busy.store(true, Ordering::Release);
+        Ok(id)
+    }
+    pub fn take_practice_transaction_response(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeTransactionResponse>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        settle_practice(&self.0, &mut controls);
+        let response = controls.take_transaction_response();
+        self.0
+            .practice_busy
+            .store(controls.pending(), Ordering::Release);
+        Ok(response)
+    }
     /// Move the latest boundary's canonical global invocation once. This
     /// mailbox remains readable after native cleanup so joined retry sees the
     /// final ordinal; no argument vector is cloned by frame polling. Contention
@@ -886,7 +1010,9 @@ impl PlayerViewer {
     /// Desired state only; native snapshots acknowledge actual boundaries.
     pub fn request_pause(&self, paused: bool) {
         if let Ok(practice) = self.0.practice.try_lock() {
-            if !practice.pending() && !self.0.cancel.load(Ordering::Acquire) {
+            if (!practice.pending() || (!paused && practice.rate_pending()))
+                && !self.0.cancel.load(Ordering::Acquire)
+            {
                 self.0.pause_requested.store(paused, Ordering::Release);
             }
         }

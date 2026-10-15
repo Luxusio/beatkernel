@@ -78,6 +78,10 @@ use beatkernel_bms_runtime::ui::{
     organisms,
     players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
+    rate::{
+        RateFrame, RateView, APPLY_CONTROL as RATE_APPLY, DENOMINATOR_CONTROL as RATE_DENOMINATOR,
+        NUMERATOR_CONTROL as RATE_NUMERATOR,
+    },
     records::{RecordsFrame, RecordsView},
     results::{ResultDetails, ResultsView},
     selection::{SelectionFrame, SelectionItem, SelectionView, ROW_HEIGHT, VISIBLE_ROWS},
@@ -96,6 +100,10 @@ use beatkernel_bms_runtime::{
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
     practice::PracticeStart,
+    practice_control::{
+        PracticeRateState, PracticeTransactionCapability, PracticeTransactionReply,
+        PracticeTransactionRequest,
+    },
     practice_loop::PracticeLoop,
     presentation_settings::PresentationSettings,
     record_catalog::{RecordCatalog, RecordPreview},
@@ -108,7 +116,9 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
-    scene::{Scene, UiComponentKey, UiPresentedPose, UiTransform, MAX_UI_COMPONENTS},
+    scene::{
+        GeometrySnapshot, Scene, UiComponentKey, UiPresentedPose, UiTransform, MAX_UI_COMPONENTS,
+    },
 };
 use std::{
     error::Error,
@@ -644,7 +654,6 @@ impl Game {
             || self.cancelling
             || self.prepared_retry.is_some()
             || self.viewer.output_pending()
-            || self.viewer.practice_pending()
         {
             return None;
         }
@@ -656,10 +665,42 @@ impl Game {
             return None;
         }
         match snapshot.pause {
-            player::PauseState::Running => Some(true),
-            player::PauseState::Paused => Some(false),
+            player::PauseState::Running if !self.viewer.practice_pending() => Some(true),
+            player::PauseState::Paused
+                if !self.viewer.practice_pending()
+                    || self
+                        .viewer
+                        .pending_practice_transaction()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|request| {
+                            matches!(request, PracticeTransactionRequest::Rate { .. })
+                        }) =>
+            {
+                Some(false)
+            }
             _ => None,
         }
+    }
+    fn runtime_rate_available(&self) -> bool {
+        !self.replay
+            && !self.joined
+            && !self.cancelling
+            && self.prepared_retry.is_none()
+            && !self.network_launch()
+            && !self.viewer.output_pending()
+            && !self.viewer.room_pending()
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot.cancelled
+                    && snapshot.status == player::PlayerStatus::Playing
+                    && snapshot.room.is_none()
+            })
+            && self
+                .viewer
+                .practice_transaction_capability()
+                .ok()
+                .flatten()
+                .is_some()
     }
     fn accept_snapshot(&mut self, mut snapshot: player::PlayerSnapshot) {
         if !self.replay {
@@ -1105,6 +1146,7 @@ fn run_with_ui_commands_and_preparation(
         players_view: None,
         devices_view: None,
         practice: None,
+        rate: None,
         records: None,
         records_view: None,
         native,
@@ -1405,6 +1447,62 @@ struct PracticeDraft {
     error: Option<String>,
     view: PracticeView,
 }
+
+struct RateDraft {
+    numerator: LineEditor,
+    denominator: LineEditor,
+    focus: Option<ControlId>,
+    applied: Option<PracticeRateState>,
+    pending: bool,
+    error: Option<String>,
+    view: RateView,
+    geometry: Option<GeometrySnapshot>,
+    hits: Vec<(ControlId, Bounds)>,
+    needs_update: bool,
+    hovered: Option<ControlId>,
+    armed: Option<ControlId>,
+    font_error: Option<String>,
+}
+impl RateDraft {
+    fn new(id: ScreenInstanceId, cap: PracticeTransactionCapability) -> Result<Self, String> {
+        Ok(Self {
+            numerator: LineEditor::new(&cap.rate.rate.numerator().to_string(), 32)?,
+            denominator: LineEditor::new(&cap.rate.rate.denominator().to_string(), 32)?,
+            focus: None,
+            applied: Some(cap.rate),
+            pending: false,
+            error: None,
+            view: RateView::new(id, WIDTH as u32, HEIGHT as u32)?,
+            geometry: None,
+            hits: Vec::new(),
+            needs_update: true,
+            hovered: None,
+            armed: None,
+            font_error: None,
+        })
+    }
+    fn rate(&self) -> Result<beatkernel::transport::Rate, String> {
+        let numerator = self.numerator.value().parse::<i64>().map_err(|_| {
+            "Rate numerator is out of range or is not a positive integer".to_string()
+        })?;
+        let denominator = self.denominator.value().parse::<u64>().map_err(|_| {
+            "Rate denominator is out of range or is not a positive integer".to_string()
+        })?;
+        if numerator <= 0 || denominator == 0 {
+            return Err("Rate numerator and denominator must both be positive".into());
+        }
+        beatkernel::transport::Rate::new(numerator, denominator).map_err(|error| error.to_string())
+    }
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        let editor = match self.focus {
+            Some(id) if id == RATE_NUMERATOR => &mut self.numerator,
+            Some(id) if id == RATE_DENOMINATOR => &mut self.denominator,
+            _ => return,
+        };
+        self.error = edit_line(editor, key, value).err();
+        self.needs_update = true;
+    }
+}
 impl PracticeDraft {
     fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
         let editor = if self.end_focused {
@@ -1657,6 +1755,8 @@ enum TextField {
     Display(usize),
     PracticeStart,
     PracticeEnd,
+    RateNumerator,
+    RateDenominator,
     RecordDirectory,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1804,6 +1904,7 @@ struct Desktop {
     players_view: Option<PlayersView>,
     devices_view: Option<DevicesView>,
     practice: Option<PanelScope<PracticeDraft>>,
+    rate: Option<RateDraft>,
     records: Option<PanelScope<RecordsDraft>>,
     records_view: Option<RecordsView>,
     native: Native,
@@ -3123,6 +3224,17 @@ impl Desktop {
                 }
                 2
             }
+            ScreenRoute::Play { replay: false } => {
+                if let Some(draft) = &self.rate {
+                    values[0] = self
+                        .ime_editor(ImeField::RateNumerator, &draft.numerator)
+                        .value();
+                    values[1] = self
+                        .ime_editor(ImeField::RateDenominator, &draft.denominator)
+                        .value();
+                }
+                2
+            }
             ScreenRoute::Records => {
                 if let Some(draft) = &self.records {
                     values[0] = self
@@ -3407,6 +3519,13 @@ impl Desktop {
         }
         release_panel(&mut self.display, &self.navigator);
         release_panel(&mut self.practice, &self.navigator);
+        if self
+            .rate
+            .as_ref()
+            .is_some_and(|rate| !self.navigator.retains(rate.view.id()))
+        {
+            self.rate = None;
+        }
         release_panel(&mut self.local_setup, &self.navigator);
         if self
             .players_view
@@ -4786,6 +4905,21 @@ impl Desktop {
         if !self.ui_ready() {
             return;
         }
+        if self.navigator.route() == (ScreenRoute::Play { replay: false })
+            && [RATE_NUMERATOR, RATE_DENOMINATOR, RATE_APPLY].contains(&id)
+        {
+            if let Some(draft) = &mut self.rate {
+                draft.focus = Some(id);
+                draft.needs_update = true;
+                if id == RATE_APPLY {
+                    self.apply_runtime_rate();
+                } else {
+                    self.gesture.cancel();
+                    self.invalidate_hits();
+                }
+            }
+            return;
+        }
         if self.navigator.route() == ScreenRoute::LiveAudio {
             match id.0 {
                 90 => self.apply_live_audio(),
@@ -5220,6 +5354,27 @@ impl Desktop {
             return;
         }
         if !game.joined && game.viewer.retained_practice_owner() {
+            let transactions = match game.viewer.practice_transaction_capability() {
+                Ok(capability) => capability.is_some(),
+                Err(error) => {
+                    self.failure = Some(error.to_string());
+                    return;
+                }
+            };
+            if !from_bookmark && transactions {
+                self.failure = if game.retained_practice_available() {
+                    game.viewer
+                        .request_practice_original_restart()
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                        .err()
+                } else {
+                    Some("Original restart requires stable running retained playback".into())
+                };
+                self.gesture.cancel();
+                self.invalidate_hits();
+                return;
+            }
             let target = if from_bookmark {
                 Ok(game.practice_bookmark.expect("bookmark admission"))
             } else {
@@ -5346,14 +5501,259 @@ impl Desktop {
             game.cancel();
         }
     }
+    fn sync_runtime_rate(&mut self) {
+        let Some(id) = self
+            .navigator
+            .stack()
+            .iter()
+            .find(|entry| entry.route == (ScreenRoute::Play { replay: false }))
+            .map(|entry| entry.id)
+        else {
+            return;
+        };
+        let Some(game) = &self.game else {
+            return;
+        };
+        let pending = game.viewer.practice_pending();
+        match game.viewer.practice_transaction_capability() {
+            Ok(Some(cap)) => {
+                if self.rate.is_none() && !game.joined {
+                    match RateDraft::new(id, cap) {
+                        Ok(draft) => self.rate = Some(draft),
+                        Err(error) => self.failure = Some(error),
+                    }
+                }
+                if let Some(draft) = &mut self.rate {
+                    if draft.applied != Some(cap.rate) {
+                        draft.applied = Some(cap.rate);
+                        draft.needs_update = true;
+                    }
+                }
+            }
+            Ok(None) => {
+                if let Some(draft) = &mut self.rate {
+                    if draft.applied.take().is_some() {
+                        draft.needs_update = true;
+                    }
+                }
+            }
+            Err(error) if error.kind() != io::ErrorKind::WouldBlock => {
+                if let Some(draft) = &mut self.rate {
+                    draft.error = Some(error.to_string());
+                    draft.needs_update = true;
+                }
+            }
+            Err(_) => {}
+        }
+        if let Some(draft) = &mut self.rate {
+            if draft.pending != pending {
+                draft.pending = pending;
+                draft.needs_update = true;
+            }
+        }
+    }
+    fn apply_runtime_rate(&mut self) {
+        let result = (|| {
+            if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+                return Err("Runtime rate controls require active Play".to_string());
+            }
+            let game = self
+                .game
+                .as_ref()
+                .ok_or("Runtime rate owner is unavailable")?;
+            if !game.runtime_rate_available() || game.viewer.practice_pending() {
+                return Err("Runtime rate is unavailable or another control is pending".into());
+            }
+            let rate = self
+                .rate
+                .as_ref()
+                .ok_or("Runtime rate editor is unavailable")?
+                .rate()?;
+            game.viewer
+                .request_practice_rate(rate)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        if let Some(draft) = &mut self.rate {
+            draft.error = result.err();
+            draft.needs_update = true;
+        }
+        self.sync_runtime_rate();
+        self.gesture.cancel();
+        self.invalidate_hits();
+    }
+    fn rate_key(&mut self, key: KeyCode, repeat: bool) -> bool {
+        if self.navigator.route() != (ScreenRoute::Play { replay: false }) || self.rate.is_none() {
+            return false;
+        }
+        if key == KeyCode::Tab {
+            if !repeat {
+                let draft = self.rate.as_mut().unwrap();
+                let order = [
+                    None,
+                    Some(RATE_NUMERATOR),
+                    Some(RATE_DENOMINATOR),
+                    Some(RATE_APPLY),
+                ];
+                let index = order
+                    .iter()
+                    .position(|focus| *focus == draft.focus)
+                    .unwrap_or(0);
+                let step = if self.modifiers.shift_key() {
+                    order.len() - 1
+                } else {
+                    1
+                };
+                draft.focus = order[(index + step) % order.len()];
+                draft.needs_update = true;
+                self.invalidate_hits();
+            }
+            return true;
+        }
+        let focused = self.rate.as_ref().and_then(|draft| draft.focus);
+        if key == KeyCode::Enter && focused.is_some() {
+            if !repeat {
+                self.apply_runtime_rate();
+            }
+            return true;
+        }
+        if focused.is_some_and(|id| id == RATE_NUMERATOR || id == RATE_DENOMINATOR)
+            && matches!(
+                key,
+                KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+            )
+        {
+            self.rate.as_mut().unwrap().edit(Some(key), None);
+            self.invalidate_hits();
+            return true;
+        }
+        false
+    }
+    fn compose_runtime_rate(&mut self) -> Result<(), String> {
+        if self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+            return Ok(());
+        }
+        let Some(draft) = &self.rate else {
+            return Ok(());
+        };
+        let id = draft.view.id();
+        if !self.navigator.accepts(id) {
+            return Err("Runtime rate child is stale".into());
+        }
+        let point = self.point();
+        let hovered = point.and_then(|point| draft.view.hit(point));
+        let armed = [RATE_NUMERATOR, RATE_DENOMINATOR, RATE_APPLY]
+            .into_iter()
+            .find(|&control| self.gesture.is_armed(control))
+            .or_else(|| draft.focus.filter(|&control| control == RATE_APPLY));
+        if draft.needs_update
+            || draft.hovered != hovered
+            || draft.armed != armed
+            || draft.font_error != self.input_font_error
+        {
+            draft.view.update(RateFrame {
+                numerator: self
+                    .ime_editor(ImeField::RateNumerator, &draft.numerator)
+                    .clone(),
+                denominator: self
+                    .ime_editor(ImeField::RateDenominator, &draft.denominator)
+                    .clone(),
+                denominator_focused: draft.focus == Some(RATE_DENOMINATOR),
+                pending: draft.pending,
+                applied: draft.applied,
+                error: self
+                    .input_font_error
+                    .clone()
+                    .or_else(|| draft.error.clone()),
+                hovered,
+                armed,
+            });
+        }
+        draft.view.set_input_font(self.input_font.clone());
+        let draft = self.rate.as_mut().unwrap();
+        draft.needs_update = false;
+        draft.hovered = hovered;
+        draft.armed = armed;
+        if draft.font_error != self.input_font_error {
+            draft.font_error = self.input_font_error.clone();
+        }
+        if draft.view.dirty() || draft.geometry.is_none() {
+            let mut scene = Scene::with_capacity(WIDTH as u32, HEIGHT as u32, 64);
+            draft.view.compose(&mut scene, &mut draft.hits)?;
+            draft.geometry = Some(scene.geometry_snapshot()?);
+        }
+        if let Some(geometry) = &draft.geometry {
+            self.scene.append_geometry(geometry)?;
+        }
+        self.hits.extend_from_slice(&draft.hits);
+        self.painted_reactive = Some(id);
+        Ok(())
+    }
     fn fail(&mut self, error: impl ToString) {
         self.fatal = Some(error.to_string());
         self.request_close();
     }
     fn collect_game(&mut self) {
+        self.sync_runtime_rate();
         if let Some(game) = &mut self.game {
             if let Err(error) = game.sync_native_launch() {
                 self.failure = Some(format!("native retry lineage: {error}"));
+            }
+            match game.viewer.take_practice_transaction_response() {
+                Ok(Some(response)) => {
+                    let error = match response.reply {
+                        PracticeTransactionReply::Region { reply, .. } => match reply.result {
+                            Ok(_) => {
+                                if let PracticeTransactionRequest::Region(request) =
+                                    response.request
+                                {
+                                    game.loop_enabled = matches!(request.action, beatkernel_bms_runtime::practice_control::PracticeAction::Loop { .. });
+                                }
+                                None
+                            }
+                            Err(error) => Some(format!("practice request {}: {error}", reply.id)),
+                        },
+                        PracticeTransactionReply::Rate { id, result, .. } => match result {
+                            Ok(event) => match event.outcome {
+                                beatkernel::audio::PracticeRateOutcome::Applied => None,
+                                beatkernel::audio::PracticeRateOutcome::Noop => None,
+                                beatkernel::audio::PracticeRateOutcome::Refused(reason) => {
+                                    Some(format!("Rate request {id} refused: {reason:?}"))
+                                }
+                            },
+                            Err(error) => Some(format!("Rate request {id}: {error}")),
+                        },
+                        PracticeTransactionReply::RestartOriginal { id, result, .. } => {
+                            match result {
+                                Ok(event) => match event.outcome {
+                                    beatkernel::audio::PracticeRateOutcome::Applied => {
+                                        game.loop_enabled = false;
+                                        None
+                                    }
+                                    beatkernel::audio::PracticeRateOutcome::Noop => None,
+                                    beatkernel::audio::PracticeRateOutcome::Refused(reason) => {
+                                        Some(format!("Original restart {id} refused: {reason:?}"))
+                                    }
+                                },
+                                Err(error) => Some(format!("Original restart {id}: {error}")),
+                            }
+                        }
+                    };
+                    if let Some(draft) = &mut self.rate {
+                        draft.error = error.clone();
+                        draft.needs_update = true;
+                    }
+                    self.failure = error;
+                }
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => {
+                    self.failure = Some(error.to_string());
+                }
+                _ => {}
             }
             match game.viewer.take_practice_response() {
                 Ok(Some(response)) => match response.reply.result {
@@ -5512,6 +5912,7 @@ impl Desktop {
                 self.replace_joined_game(launch);
             }
         }
+        self.sync_runtime_rate();
     }
     fn repeat_practice_if_due(&mut self) {
         if self.ui_ready()
@@ -5558,6 +5959,8 @@ impl Desktop {
             ImeField::Display(index) => 40_000_u64.checked_add(u64::try_from(index).ok()?)?,
             ImeField::PracticeStart => 70,
             ImeField::PracticeEnd => 75,
+            ImeField::RateNumerator => RATE_NUMERATOR.0,
+            ImeField::RateDenominator => RATE_DENOMINATOR.0,
             ImeField::RecordDirectory => 58,
         });
         if self
@@ -5700,6 +6103,9 @@ impl Desktop {
             target,
             ..ImeDraft::default()
         };
+        if let Some(draft) = &mut self.rate {
+            draft.needs_update = true;
+        }
         self.painted_reactive = None;
         if let Some(window) = &self.window {
             window.set_ime_allowed(false);
@@ -5769,6 +6175,9 @@ impl Desktop {
                 }
             }
             _ => {}
+        }
+        if let Some(draft) = &mut self.rate {
+            draft.needs_update = true;
         }
         self.invalidate_hits();
     }
@@ -5875,6 +6284,11 @@ impl Desktop {
                     TextField::PracticeStart
                 }
             }
+            ScreenRoute::Play { replay: false } => match self.rate.as_ref()?.focus? {
+                id if id == RATE_NUMERATOR => TextField::RateNumerator,
+                id if id == RATE_DENOMINATOR => TextField::RateDenominator,
+                _ => return None,
+            },
             ScreenRoute::Records if self.records.as_ref()?.directory_focused => {
                 TextField::RecordDirectory
             }
@@ -5899,6 +6313,8 @@ impl Desktop {
             TextField::Display(index) => self.display.as_ref()?.draft.editors.get(index),
             TextField::PracticeStart => self.practice.as_ref().map(|draft| &draft.editor),
             TextField::PracticeEnd => self.practice.as_ref().map(|draft| &draft.end_editor),
+            TextField::RateNumerator => self.rate.as_ref().map(|draft| &draft.numerator),
+            TextField::RateDenominator => self.rate.as_ref().map(|draft| &draft.denominator),
             TextField::RecordDirectory => self.records.as_ref().map(|draft| &draft.directory),
         }
     }
@@ -5919,6 +6335,14 @@ impl Desktop {
             TextField::Display(index) => self.display.as_mut()?.draft.editors.get_mut(index),
             TextField::PracticeStart => self.practice.as_mut().map(|draft| &mut draft.editor),
             TextField::PracticeEnd => self.practice.as_mut().map(|draft| &mut draft.end_editor),
+            TextField::RateNumerator => self.rate.as_mut().map(|draft| {
+                draft.needs_update = true;
+                &mut draft.numerator
+            }),
+            TextField::RateDenominator => self.rate.as_mut().map(|draft| {
+                draft.needs_update = true;
+                &mut draft.denominator
+            }),
             TextField::RecordDirectory => self.records.as_mut().map(|draft| &mut draft.directory),
         }
     }
@@ -5962,6 +6386,12 @@ impl Desktop {
             ScreenRoute::Practice => {
                 if let Some(draft) = &mut self.practice {
                     draft.error = error;
+                }
+            }
+            ScreenRoute::Play { replay: false } => {
+                if let Some(draft) = &mut self.rate {
+                    draft.error = error;
+                    draft.needs_update = true;
                 }
             }
             ScreenRoute::Records => {
@@ -6189,6 +6619,11 @@ impl Desktop {
                             practice.edit(None, Some(value));
                         }
                     }
+                    ScreenRoute::Play { replay: false } => {
+                        if let Some(draft) = &mut self.rate {
+                            draft.edit(None, Some(value));
+                        }
+                    }
                     ScreenRoute::Selection if self.search_focused => {
                         self.edit_search(None, Some(value))
                     }
@@ -6301,6 +6736,9 @@ impl Desktop {
         }
         if self.navigator.route() == ScreenRoute::LiveAudio {
             self.live_audio_key(key, repeat);
+            return;
+        }
+        if self.rate_key(key, repeat) {
             return;
         }
         if !repeat
@@ -6896,6 +7334,7 @@ impl Desktop {
             return Ok(());
         }
         let route = self.navigator.route();
+        self.sync_runtime_rate();
         if route == ScreenRoute::LiveAudio {
             return self.draw_live_audio();
         }
@@ -7276,6 +7715,7 @@ impl Desktop {
                 .ok_or("native Results screen unavailable")?;
             self.stage_control_hits(screen)?;
         }
+        self.compose_runtime_rate()?;
         if submit {
             self.render_scene()
         } else {
@@ -9511,6 +9951,7 @@ mod tests {
             players_view: None,
             devices_view: None,
             practice: None,
+            rate: None,
             records: None,
             records_view: None,
             native: native_unavailable,

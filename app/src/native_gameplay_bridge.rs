@@ -442,6 +442,24 @@ impl NativeGameplayHost for PlayerGameplayHost {
     ) -> NativeGameplayResult<()> {
         Ok(player::commit_practice_reply(reply)?)
     }
+    fn advertise_practice_transactions(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeTransactionCapability>,
+    ) -> NativeGameplayResult<()> {
+        Ok(player::advertise_practice_transactions(capability)?)
+    }
+    fn take_practice_transaction(
+        &mut self,
+        active: bool,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeTransactionRequest>> {
+        Ok(player::take_practice_transaction(active)?)
+    }
+    fn commit_practice_transaction_reply(
+        &mut self,
+        reply: &crate::practice_control::PracticeTransactionReply,
+    ) -> NativeGameplayResult<()> {
+        Ok(player::commit_practice_transaction_reply(reply)?)
+    }
     fn apply_practice_identity(
         &mut self,
         prepared: &mut player::PreparedPracticePresentation,
@@ -679,6 +697,24 @@ impl<H: NativeGameplayHost> NativeGameplayHost for ResolvedGameplayHost<'_, '_, 
         reply: &crate::practice_control::PracticeReply,
     ) -> NativeGameplayResult<()> {
         self.host.commit_practice_reply(reply)
+    }
+    fn advertise_practice_transactions(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeTransactionCapability>,
+    ) -> NativeGameplayResult<()> {
+        self.host.advertise_practice_transactions(capability)
+    }
+    fn take_practice_transaction(
+        &mut self,
+        active: bool,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeTransactionRequest>> {
+        self.host.take_practice_transaction(active)
+    }
+    fn commit_practice_transaction_reply(
+        &mut self,
+        reply: &crate::practice_control::PracticeTransactionReply,
+    ) -> NativeGameplayResult<()> {
+        self.host.commit_practice_transaction_reply(reply)
     }
     fn apply_practice_identity(
         &mut self,
