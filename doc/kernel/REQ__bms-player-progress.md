@@ -15,8 +15,12 @@
 검증할 실제 bracket이 사라졌고 HistoryExpired로 종료했다. 원본 signed 시계 쌍을
 보존하는 공통 authority와 retained JS 연결을 구현했다. core7/0·앱 통합28/0·기존
 authority 회귀216/0·Node95/0과 새 두 release WASM·matching bindgen을 확인했다.
-실제 세 번째 실행은 시작·노트 판정을 통과했으나 테스트의 과도한 반복 키음 입력이
-voice_full에 걸렸다. 필요한 유한 trusted 입력으로 runner를 수정하며 전체 실제 browser
+실제 세 번째 실행은 시작·노트 판정을 통과했고 네 번째의 유한 trusted 입력
+한 쌍에서도 voice_full이 발생했다. 반복 입력만의 문제라는 가설은 반증됐다. 실제
+전체 슬롯4096을 BGM에 전부 예약한 browser cold 예산 혼동을 확인해, 기존 full
+geometry overlap을 재사용하는 공통 예산 adapter를 수정했다. 실제 solo/local 키음·BGM
+PCM·배속 전환과 cold 원자성 통합32/0, 새 두 release WASM·matching bindgen을
+확인했다. 전체 실제 browser
 검증과 독립 review/QA는 남는다.
 오디오 WASM은 실제 EOF·matching compile을 확인했으나 strict ERR_ABORTED도 관측됐다.
 이 JS 수정의 cold→Started→Ended·capture·늦은 거절 회귀41개가 모두 통과했다

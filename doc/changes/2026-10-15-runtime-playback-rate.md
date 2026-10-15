@@ -219,3 +219,28 @@ Started/capability·실제 노트 판정을 통과했고 song465186831ns/hits1�
 오류는0이고 owned browser/Xvfb는 exit0이나 전체 strict journey PASS는 아니다.
 fixture의 sample 길이·voice 한도·PCM/기록 oracle을 유지하면서 필요한 유한 trusted
 입력만 보내도록 runner를 수정한다. 기존처럼 네트워크 오류를 제외하지 않는다.
+
+네 번째 실제 실행58025는 trusted Down/Up 한 쌍만으로도 voice_full=1이 재현됐다.
+따라서 위의 반복 입력만의 원인 판단은 반증됐으며 제품의 cold voice 예산 결함으로
+정정한다. 실제 total maxVoices4096과 retained setup max_overlap4096 때문에 모든
+슬롯을 BGM에 예약했고, 실제 cue/active voice는1개였다. Mixer의 보호된 BGM 예약
+뒤에는 키음 슬롯이0개였다. 원본은
+`target/wf/runtime-rate-browser-fourth-14110/evidence.json`이며 console/network0·owned
+browser/Xvfb exit0이다. native는 actual overlap과 gameplay budget을 이미 구분한다.
+Browser/공통 Step의 cold adapter에서 기존 전체 geometry overlap 계산을 재사용해
+예약분과 전체 나머지 shared gameplay pool을 분리하며, Mixer나 native 정책은
+그대로 유지한다. 기존 명시 PracticeLimits API·미래 capacity 거절·현재 PCM/기록도
+유지한다. 테스트의 유한 입력과 즉시 원인 보고 개선은 보존한다.
+
+AC023 공통 cold 예산 수정을 완료했다. 기존 명시 limits 계약과 native 최소 키음
+예산을 유지하고 전체 나머지 슬롯을 roster가 공유한다. 신규4개를 포함한 signed
+clock8/0·Step21/0·실제 PCM/기록/replay3/0(합계32/0)이 통과했다. 원본은
+`target/wf/runtime-rate-14043/rust-voice-budget-first-14111.log`다. UI/audio release
+WASM과 즉시 matching bindgen도 모두 통과했다(각각52.40s 및 아래 build 로그).
+UI WASM SHA256은 `5a3abdd308c37592828c16b185f726e46610e78366bd4fb947fcfed3f6e4b83e`,
+audio WASM은 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`다.
+빌드/해시는 `browser-voice-budget-release-wasm-14111.log`,
+`browser-audio-voice-budget-release-wasm-14111.log`,
+`browser-voice-budget-bindgen-sha256-14111.log`에 있다.
+이는 범위 내 software 검증이며 AC010 실제 browser 전체·독립 review/QA는 남는다.
+WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.

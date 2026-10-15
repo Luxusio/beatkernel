@@ -1771,6 +1771,43 @@ impl StepGameplay {
         limits: beatkernel::audio::PracticeLimits,
         source_history_capacity: usize,
     ) -> Result<(), StepGameplayError> {
+        self.configure_retained_limits_inner(limits, source_history_capacity, None)
+    }
+    /// Reserves actual initial BGM overlap; all remaining Mixer slots stay shared by gameplay.
+    pub fn configure_retained_audio_limits(
+        &mut self,
+        total_voices: usize,
+        max_events_per_render: usize,
+        control_capacity: usize,
+        receipt_capacity: usize,
+        source_history_capacity: usize,
+    ) -> Result<(), StepGameplayError> {
+        let max_cues = self
+            .retained_setup()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?
+            .cues
+            .len()
+            .max(1);
+        self.configure_retained_limits_inner(
+            beatkernel::audio::PracticeLimits {
+                max_cues,
+                max_overlap: 0,
+                max_events_per_render,
+                control_capacity,
+                receipt_capacity,
+            },
+            source_history_capacity,
+            Some(total_voices),
+        )
+    }
+    fn configure_retained_limits_inner(
+        &mut self,
+        mut limits: beatkernel::audio::PracticeLimits,
+        source_history_capacity: usize,
+        total_voices: Option<usize>,
+    ) -> Result<(), StepGameplayError> {
         self.ensure_usable()?;
         let state = self
             .retained
@@ -1804,6 +1841,14 @@ impl StepGameplay {
             limits.receipt_capacity,
         )
         .map_err(retained_error)?;
+        if total_voices.is_some_and(|total| {
+            !(1..=AudioLimits::MAX_VOICES).contains(&total)
+                || limits.max_events_per_render > AudioLimits::MAX_COMMANDS
+        }) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained audio limits exceed total Mixer capacity",
+            ));
+        }
         let preparation = beatkernel::audio::prepare_practice_rate(
             state.setup.config.program_id,
             self.sample_rate,
@@ -1812,6 +1857,24 @@ impl StepGameplay {
         )
         .map_err(retained_error)?
         .to_words();
+        if let Some(total) = total_voices {
+            limits.max_overlap = usize::try_from(preparation[6])
+                .map_err(|_| StepGameplayError::SequenceOverflow)?;
+            let gameplay = total.checked_sub(limits.max_overlap).ok_or(
+                StepGameplayError::InvalidConfiguration(
+                    "retained BGM overlap exceeds total voice budget",
+                ),
+            )?;
+            if gameplay == 0
+                && (!state.original.notes.is_empty()
+                    || !state.original.invisible.is_empty()
+                    || !state.original.mines.is_empty())
+            {
+                return Err(StepGameplayError::InvalidConfiguration(
+                    "retained total voice budget leaves no gameplay voice",
+                ));
+            }
+        }
         if state.setup.cues.len() > limits.max_cues
             || preparation[6] > limits.max_overlap as u64
             || preparation[8] > limits.max_events_per_render as u64
@@ -4915,6 +4978,24 @@ impl StepLocalGameplay {
     ) -> Result<(), StepLocalGameplayError> {
         self.control
             .configure_retained_limits(limits, source_history_capacity)
+            .map_err(Into::into)
+    }
+    pub fn configure_retained_audio_limits(
+        &mut self,
+        total_voices: usize,
+        max_events_per_render: usize,
+        control_capacity: usize,
+        receipt_capacity: usize,
+        source_history_capacity: usize,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .configure_retained_audio_limits(
+                total_voices,
+                max_events_per_render,
+                control_capacity,
+                receipt_capacity,
+                source_history_capacity,
+            )
             .map_err(Into::into)
     }
     pub fn retained_capability(&self) -> Option<PracticeTransactionCapability> {

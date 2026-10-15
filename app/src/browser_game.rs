@@ -929,28 +929,20 @@ impl BrowserGame {
 
     pub fn configure_retained_limits(
         &mut self,
-        max_overlap: u32,
+        total_voices: u32,
         max_events_per_render: u32,
         control_capacity: u32,
         receipt_capacity: u32,
         source_history_capacity: u32,
     ) -> Result<(), JsValue> {
-        let cues = self
-            .game
-            .retained_setup()
-            .ok_or_else(|| error("retained playback is not configured"))?
-            .cues
-            .len();
-        let limits = PracticeLimits::new(
-            cues.max(1),
-            max_overlap as usize,
-            max_events_per_render as usize,
-            control_capacity as usize,
-            receipt_capacity as usize,
-        )
-        .map_err(error)?;
         self.game
-            .configure_retained_limits(limits, source_history_capacity as usize)
+            .configure_retained_audio_limits(
+                total_voices as usize,
+                max_events_per_render as usize,
+                control_capacity as usize,
+                receipt_capacity as usize,
+                source_history_capacity as usize,
+            )
             .map_err(error)
     }
     pub fn retained_setup_words(&self) -> Result<Vec<u32>, JsValue> {

@@ -292,10 +292,20 @@ fn bindings(device: DeviceSelector) -> BindingMap {
     .unwrap()
 }
 fn output(bank: SampleBank, setup: &StepRetainedSetup) -> WorkletAudio {
+    let mut audio = output_before_render(bank, setup, 64);
+    audio.render(CONTEXT, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.0, 0.015625]);
+    audio
+}
+fn output_before_render(
+    bank: SampleBank,
+    setup: &StepRetainedSetup,
+    total_voices: usize,
+) -> WorkletAudio {
     let mut builder = WorkletAudioBuilder::new(WorkletAudioConfig {
         format: bank.format(),
         pcm_limits: fixture::pcm_limits(),
-        audio_limits: AudioLimits::new(32, 64, 32, 32, 32).unwrap(),
+        audio_limits: AudioLimits::new(32, total_voices, 32, 32, 32).unwrap(),
     })
     .unwrap();
     for (id, pcm) in bank.into_samples() {
@@ -307,8 +317,6 @@ fn output(bank: SampleBank, setup: &StepRetainedSetup) -> WorkletAudio {
         .finish_retained(setup.cues.clone(), setup.config)
         .unwrap();
     audio.arm(CONTEXT, CONTEXT).unwrap();
-    audio.render(CONTEXT, 2).unwrap();
-    assert_eq!(&audio.output()[..2], &[0.0, 0.015625]);
     audio
 }
 fn history(audio: &WorkletAudio) -> StepRemoteHistorySnapshot {
@@ -582,5 +590,353 @@ fn local_started_and_shared_rate_require_the_same_genuine_signed_prefix_for_all_
             .iter()
             .any(|r| matches!(&r.operation, ReplayOperation::Input(saved)
             if saved.physical.meta().original_clock_point == Some(host(FIRST)))));
+    }
+}
+
+fn budget_solo(prepared: PreparedRetainedSection) -> (StepGameplay, SampleBank) {
+    StepGameplay::new_retained_audio_section(
+        prepared,
+        config(),
+        bindings(DeviceSelector::Any),
+        Some(ts(20_000_000)),
+        BmsInputMode::ButtonOnly,
+        signed_authority(),
+        None,
+        options(),
+    )
+    .unwrap()
+}
+fn start_budget_solo(game: &mut StepGameplay, audio: &mut WorkletAudio, inputs: &mut InputMerger) {
+    game.activate_audio().unwrap();
+    game.observe_retained_history(history(audio)).unwrap();
+    game.observe_audio_source_timestamp(1, pair(-5_303_245, LEFT))
+        .unwrap();
+    game.observe_audio_source_timestamp(1, pair(1_459_755, RIGHT))
+        .unwrap();
+    game.record_audio_prefix(host(RIGHT)).unwrap();
+    let started = audio.poll_retained_event().unwrap().unwrap();
+    game.retain_output_event(started).unwrap();
+    assert_eq!(
+        game.service_retained_event(inputs, host(RIGHT), raw(2_000_000))
+            .unwrap(),
+        Some(started.serial)
+    );
+    audio.acknowledge_retained_event(started.serial).unwrap();
+    game.acknowledge_retained_event(started.serial).unwrap();
+}
+fn cold_fields(setup: &StepRetainedSetup) -> [usize; 6] {
+    let limits = setup.config.limits;
+    [
+        limits.max_cues,
+        limits.max_overlap,
+        limits.max_events_per_render,
+        limits.control_capacity,
+        limits.receipt_capacity,
+        setup.config.source_history_capacity,
+    ]
+}
+fn budget_prepared(chart: &str, pcm: &[f32]) -> PreparedRetainedSection {
+    prepare_retained_at(fixture::prepared(chart, 1000, &[(1, pcm)]), ts(0)).unwrap()
+}
+
+#[test]
+fn total_two_reserves_one_bgm_voice_and_real_judged_key_continues_across_rate_cut() {
+    let (mut game, bank) = budget_solo(prepared());
+    game.configure_retained_audio_limits(2, 128, 8, 16, 16)
+        .unwrap();
+    assert_eq!(game.retained_setup().unwrap().config.limits.max_overlap, 1);
+    game.configure_capture(fixture::limits(), SEED).unwrap();
+    let mut audio = output_before_render(bank, game.retained_setup().unwrap(), 2);
+    audio.render(CONTEXT, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.0, 0.015625]);
+    let mut inputs = merger(vec![DeviceId(1)]);
+    start_budget_solo(&mut game, &mut audio, &mut inputs);
+    inputs.admit(input(1, FIRST), host(RIGHT)).unwrap();
+    let report = game
+        .process_next_audio_input(&mut inputs, host(RIGHT), raw(2_000_000), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.song_time, ts(0));
+    assert_eq!(game.score().hits, 1);
+    let batch = game.take_commands(32).unwrap().unwrap();
+    assert_eq!(batch.commands.len(), 1);
+    assert!(
+        matches!(batch.commands[0], AudioCommand::Play { sample: SampleId(1), at, .. } if at == ts(2_000_000))
+    );
+    for &command in &batch.commands {
+        audio.enqueue(command).unwrap();
+    }
+    game.acknowledge(batch.sequence, batch.commands.len(), true)
+        .unwrap();
+    audio.render(CONTEXT + 2, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.03125, 0.0625]);
+    assert_eq!(audio.report().unwrap().counters.voice_full, 0);
+    assert_eq!(audio.report().unwrap().counters.commands_applied, 1);
+    let cap = game.retained_capability().unwrap();
+    let prepared = game
+        .prepare_retained_transaction(request(cap), false)
+        .unwrap();
+    audio
+        .try_set_rate_next(
+            1,
+            cap.practice.generation,
+            cap.rate.revision,
+            prepared.preparation.unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 1, Ok(()))
+        .unwrap();
+    audio.render(CONTEXT + 4, 4).unwrap();
+    assert_eq!(&audio.output()[..4], &[0.09375, 0.21875, 0.34375, 0.46875]);
+    assert_eq!(audio.report().unwrap().counters.voice_full, 0);
+    game.observe_retained_history(history(&audio)).unwrap();
+    game.observe_audio_source_timestamp(1, pair(7_000_000, LATER + 4_000_000))
+        .unwrap();
+    game.record_audio_prefix(host(LATER + 4_000_000)).unwrap();
+    let event = audio.poll_retained_event().unwrap().unwrap();
+    assert!(
+        matches!(event.event, WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+        event: PracticeEvent::Rate(rate), .. }) if rate.physical_frame == 4 && rate.active_elapsed_nanos == 4_000_000
+            && rate.outcome == PracticeRateOutcome::Applied)
+    );
+    game.retain_output_event(event).unwrap();
+    assert_eq!(
+        game.service_retained_event(&mut inputs, host(LATER + 4_000_000), raw(8_000_000))
+            .unwrap(),
+        Some(event.serial)
+    );
+    audio.acknowledge_retained_event(event.serial).unwrap();
+    game.acknowledge_retained_event(event.serial).unwrap();
+    assert_eq!(game.score().hits, 1);
+    assert_eq!(
+        game.retained_capability().unwrap().practice.generation,
+        cap.practice.generation
+    );
+    let effective = game.effective_header(PlayerId(1)).unwrap().clone();
+    assert_eq!(
+        split_schedule(&effective.options).unwrap().1.cuts()[0].whole(),
+        2_000_000
+    );
+    game.fail();
+    let file = decode_replay(&game.take_replay().unwrap().unwrap(), fixture::limits()).unwrap();
+    assert_eq!(file.header, effective);
+    assert!(file
+        .records
+        .iter()
+        .any(|r| matches!(&r.operation, ReplayOperation::Input(saved)
+        if saved.physical.meta().original_clock_point == Some(host(FIRST)))));
+}
+
+#[test]
+fn local_members_share_the_entire_remaining_gameplay_pool_alongside_one_bgm_voice() {
+    let members = [(PlayerId(3), DeviceId(1)), (PlayerId(7), DeviceId(2))];
+    let (mut game, bank) = StepLocalGameplay::new_retained_audio_section(
+        prepared(),
+        config(),
+        ResolvedInputPlan::new(members.map(|(id, device)| (id, Some(device))).to_vec()).unwrap(),
+        vec![
+            bindings(DeviceSelector::Exact(members[0].1)),
+            bindings(DeviceSelector::Exact(members[1].1)),
+        ],
+        Some(ts(20_000_000)),
+        BmsInputMode::ButtonOnly,
+        signed_authority(),
+        None,
+        options(),
+    )
+    .unwrap();
+    // One shared gameplay slot is a valid budget for two members; it is not a
+    // guarantee that two concurrent voices fit. Use two slots for this journey.
+    game.configure_retained_audio_limits(2, 128, 8, 16, 16)
+        .unwrap();
+    assert_eq!(game.retained_setup().unwrap().config.limits.max_overlap, 1);
+    game.configure_retained_audio_limits(3, 128, 8, 16, 16)
+        .unwrap();
+    for (id, _) in members {
+        game.configure_capture(id, fixture::limits(), SEED).unwrap();
+    }
+    let mut audio = output_before_render(bank, game.retained_setup().unwrap(), 3);
+    audio.render(CONTEXT, 2).unwrap();
+    game.activate_audio().unwrap();
+    game.observe_retained_history(history(&audio)).unwrap();
+    game.observe_audio_source_timestamp(1, pair(-5_303_245, LEFT))
+        .unwrap();
+    game.observe_audio_source_timestamp(1, pair(1_459_755, RIGHT))
+        .unwrap();
+    game.record_audio_prefix(host(RIGHT)).unwrap();
+    let mut inputs = merger(members.map(|(_, device)| device).to_vec());
+    let started = audio.poll_retained_event().unwrap().unwrap();
+    game.retain_output_event(started).unwrap();
+    assert_eq!(
+        game.service_retained_event(&mut inputs, host(RIGHT), raw(2_000_000))
+            .unwrap(),
+        Some(started.serial)
+    );
+    audio.acknowledge_retained_event(started.serial).unwrap();
+    game.acknowledge_retained_event(started.serial).unwrap();
+    for (id, device) in members {
+        inputs.admit(input(device.0, FIRST), host(RIGHT)).unwrap();
+        let Some(InputResult::Processed(reports)) = game
+            .process_next_audio_input(&mut inputs, host(RIGHT), raw(2_000_000), None)
+            .unwrap()
+        else {
+            panic!("actual local key input missing");
+        };
+        assert_eq!(reports[0].player, id);
+        assert_eq!(reports[0].report.song_time, ts(0));
+    }
+    let batch = game.take_commands(32).unwrap().unwrap();
+    assert_eq!(batch.commands.len(), 2);
+    for &command in &batch.commands {
+        audio.enqueue(command).unwrap();
+    }
+    game.acknowledge(batch.sequence, batch.commands.len(), true)
+        .unwrap();
+    audio.render(CONTEXT + 2, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.03125, 0.078125]);
+    assert_eq!(audio.report().unwrap().counters.voice_full, 0);
+    assert_eq!(audio.report().unwrap().counters.commands_applied, 2);
+    let cap = game.retained_capability().unwrap();
+    let prepared = game
+        .prepare_retained_transaction(request(cap), false)
+        .unwrap();
+    audio
+        .try_set_rate_next(
+            1,
+            cap.practice.generation,
+            cap.rate.revision,
+            prepared.preparation.unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 1, Ok(()))
+        .unwrap();
+    audio.render(CONTEXT + 4, 4).unwrap();
+    assert_eq!(&audio.output()[..4], &[0.125, 0.3125, 0.5, 0.6875]);
+    assert_eq!(audio.report().unwrap().counters.voice_full, 0);
+    game.observe_retained_history(history(&audio)).unwrap();
+    game.observe_audio_source_timestamp(1, pair(7_000_000, LATER + 4_000_000))
+        .unwrap();
+    game.record_audio_prefix(host(LATER + 4_000_000)).unwrap();
+    let event = audio.poll_retained_event().unwrap().unwrap();
+    game.retain_output_event(event).unwrap();
+    assert_eq!(
+        game.service_retained_event(&mut inputs, host(LATER + 4_000_000), raw(8_000_000))
+            .unwrap(),
+        Some(event.serial)
+    );
+    audio.acknowledge_retained_event(event.serial).unwrap();
+    game.acknowledge_retained_event(event.serial).unwrap();
+    for (id, _) in members {
+        assert_eq!(game.score(id).unwrap().hits, 1);
+        assert_eq!(
+            split_schedule(&game.effective_header(id).unwrap().options)
+                .unwrap()
+                .1
+                .cuts()[0]
+                .whole(),
+            2_000_000
+        );
+    }
+    game.fail();
+    for (id, _) in members {
+        let file =
+            decode_replay(&game.take_replay(id).unwrap().unwrap(), fixture::limits()).unwrap();
+        assert_eq!(
+            split_schedule(&file.header.options).unwrap().1.cuts()[0].whole(),
+            2_000_000
+        );
+    }
+}
+
+#[test]
+fn cold_bgm_budget_uses_actual_full_geometry_not_total_cues_or_selected_region() {
+    let (mut ordinary, _) = budget_solo(prepared());
+    ordinary
+        .configure_retained_audio_limits(4096, 128, 8, 16, 16)
+        .unwrap();
+    assert_eq!(
+        ordinary.retained_setup().unwrap().config.limits.max_overlap,
+        1
+    );
+    let header = ordinary.effective_header(PlayerId(1)).unwrap().clone();
+    let before = cold_fields(ordinary.retained_setup().unwrap());
+    for total in [0, 1] {
+        assert!(ordinary
+            .configure_retained_audio_limits(total, 128, 8, 16, 16)
+            .is_err());
+        assert_eq!(cold_fields(ordinary.retained_setup().unwrap()), before);
+        assert_eq!(ordinary.effective_header(PlayerId(1)).unwrap(), &header);
+    }
+    ordinary
+        .configure_retained_limits(PracticeLimits::new(8, 2, 128, 8, 16).unwrap(), 16)
+        .unwrap();
+    assert_eq!(
+        ordinary.retained_setup().unwrap().config.limits.max_overlap,
+        2,
+        "explicit PracticeLimits retains its original reservation contract"
+    );
+    ordinary.activate_audio().unwrap();
+    let active = cold_fields(ordinary.retained_setup().unwrap());
+    assert!(ordinary
+        .configure_retained_audio_limits(4096, 128, 8, 16, 16)
+        .is_err());
+    assert_eq!(cold_fields(ordinary.retained_setup().unwrap()), active);
+    let pcm: Vec<_> = (0..32).map(|i| i as f32 / 32.0).collect();
+    let sequential = "#BPM 60\n#WAV01 key.wav\n#00011:01\n#00001:01\n#00101:01\n#00201:01\n";
+    let (mut game, _) = budget_solo(budget_prepared(sequential, &pcm));
+    assert_eq!(game.retained_setup().unwrap().cues.len(), 3);
+    game.configure_retained_audio_limits(2, 128, 8, 16, 16)
+        .unwrap();
+    assert_eq!(game.retained_setup().unwrap().config.limits.max_overlap, 1);
+    let future_overlap = "#BPM 60\n#WAV01 key.wav\n#00011:01\n#00001:01\n#00101:01\n#00101:01\n";
+    let (mut game, _) = budget_solo(budget_prepared(future_overlap, &pcm));
+    let before = cold_fields(game.retained_setup().unwrap());
+    let header = game.effective_header(PlayerId(1)).unwrap().clone();
+    assert!(
+        game.configure_retained_audio_limits(2, 128, 8, 16, 16)
+            .is_err(),
+        "two actual future BGM voices plus gameplay cannot fit total2"
+    );
+    assert_eq!(cold_fields(game.retained_setup().unwrap()), before);
+    assert_eq!(game.effective_header(PlayerId(1)).unwrap(), &header);
+    game.configure_retained_audio_limits(3, 128, 8, 16, 16)
+        .unwrap();
+    assert_eq!(game.retained_setup().unwrap().config.limits.max_overlap, 2);
+}
+
+#[test]
+fn zero_bgm_and_empty_pcm_reserve_zero_while_bgm_only_can_use_the_whole_budget() {
+    let pcm: Vec<_> = (0..32).map(|i| i as f32 / 32.0).collect();
+    for (chart, samples, overlap, expected) in [
+        (
+            "#BPM 60\n#WAV01 key.wav\n#00011:01\n",
+            pcm.as_slice(),
+            0,
+            [0.0, 0.0],
+        ),
+        (
+            "#BPM 60\n#WAV01 key.wav\n#00011:01\n#00001:01\n",
+            &[][..],
+            0,
+            [0.0, 0.0],
+        ),
+        (
+            "#BPM 60\n#WAV01 key.wav\n#00001:01\n",
+            pcm.as_slice(),
+            1,
+            [0.0, 0.015625],
+        ),
+    ] {
+        let (mut game, bank) = budget_solo(budget_prepared(chart, samples));
+        game.configure_retained_audio_limits(1, 128, 8, 16, 16)
+            .unwrap();
+        assert_eq!(
+            game.retained_setup().unwrap().config.limits.max_overlap,
+            overlap
+        );
+        let mut audio = output_before_render(bank, game.retained_setup().unwrap(), 1);
+        audio.render(CONTEXT, 2).unwrap();
+        assert_eq!(&audio.output()[..2], &expected);
+        assert_eq!(audio.report().unwrap().counters.voice_full, 0);
     }
 }

@@ -105,6 +105,24 @@ Q>=T인 첫 E를, T<0이면 Q>T-1인 첫 E를 사용한다. 이 구분은 prerol
 timestamp-only Transport 동작은 유지한다. Finite cap은 수치 상한이며 출력
 완료·native ACK·input drain의 권한을 대신하지 않는다.
 
+## 브라우저의 전체 voice 예산과 BGM 예약
+
+실제 Mixer의 전체 maxVoices와 retained BGM 전용 max_overlap 예약은 구분한다.
+원본 전체 cue geometry와 초기 선택 배속의 기존 exact overlap 계산을 재사용해
+BGM 예약분을 정하고, 나머지 전체 슬롯은 모든 local member의 키음이 공유한다.
+처음 선택한 구간이나 cue 개수, 전체 voice 한도 자체를 BGM 예약량으로 쓰지 않는다.
+무BGM·빈 PCM의 overlap0은 유효하며 실제 필요한 두 풀이 전체 예산에 들어가지
+않으면 cold 단계에서 기존 상태를 보존하고 구체적으로 거절한다. Cold 최소 키음
+예산은 기존 native와 동일하게 원본 notes/invisible/mines가 있으면 공유 슬롯1개
+이상을 요구한다. local 인원수만큼 별도 슬롯을 강제하지 않으며, BGM-only는
+키음 슬롯0개도 허용한다.
+
+향후 배속·구간 변경이 예약된 BGM 예산을 실제로 넘으면 기존 capacity 거절로
+재생과 기록을 보존한다. 전체 용량을 몰래 늘리거나 키음을 훔치거나 버리지 않는다.
+명시 PracticeLimits를 받는 공통 Step API와 기존 native 예산 정책은 유지한다.
+Browser의 실제 total을 받는 cold adapter만 공유 계산으로 정확히 분할하며 전체
+geometry의 추가 중복 scan/sort나 오디오 스레드 작업을 새로 만들지 않는다.
+
 ## 준비, callback과 소유권
 
 전체 cue scan/sort, 저장 공간 확보와 미래 BGM overlap 준비는 오디오 렌더링
