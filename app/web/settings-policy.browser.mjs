@@ -830,7 +830,7 @@ try {
   await bounded(Promise.all([...workerNetworkTasks]), 10000, "Worker network cleanup settlement").catch(error => { evidence.cleanup.workerNetworkSettlementError = String(error); });
   for (const { session, listeners } of workerNetworkSessions.values()) {
     for (const [name, callback] of listeners) session.off(name, callback);
-    await bounded(session.detach(), 3000, "Worker network detach").catch(error => { (evidence.cleanup.workerNetworkDetachErrors ??= []).push(String(error)); });
+    await bounded(networkSession.send("Target.detachFromTarget", { sessionId: session.id() }), 3000, "Worker network detach").catch(error => { (evidence.cleanup.workerNetworkDetachErrors ??= []).push(String(error)); });
   }
   workerNetworkSessions.clear();
   if (networkSession) await bounded(networkSession.send("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }), 3000, "Worker network autoattach cleanup").catch(error => { evidence.cleanup.workerNetworkAutoattachError = String(error); });

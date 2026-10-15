@@ -97,7 +97,9 @@ Keep genuine Module correlation, zero Window preparation, actual Worker CDP
 loading completion and all 13 existing Settings/play/record/replay journeys.
 Acceptance also inspects cleanup errors, owned browser/Xvfb termination and
 removal of owned temporary key/cert/profile/cache; a status string alone is
-insufficient. The reproducible command and snapshot limits are in
+insufficient. Detach page-owned Worker observation sessions through the page
+session that attached them; retain any genuine detach failure as an error.
+The reproducible command and snapshot limits are in
 [the preparation verification guide](../verification/GUIDE__browser-worker-preparation-fixtures.md).
 
 ## Known ceiling

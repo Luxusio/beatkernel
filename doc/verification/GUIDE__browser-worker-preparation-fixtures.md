@@ -144,3 +144,11 @@ Worker CDP loading completion; full body reading and compilation cannot excuse
 an abort. Inspect the rendered screenshots and cleanup diagnostics as well as
 the status. Verify only this run's browser/Xvfb ended and its key, certificate,
 profile and cache were removed, without touching other sessions' resources.
+
+CDP sessions received from a page session's `Target.attachedToTarget` belong to
+that attaching page session. Send `Target.detachFromTarget` with the original
+child session ID through that owner. In the cached Puppeteer implementation,
+calling the child's `detach()` instead sends at the root connection and fails
+with `No session with given id`. An actual Chromium probe confirms the owner
+command succeeds for the same child after the root command fails. Keep genuine
+cleanup errors visible; browser exit alone does not substitute for detachment.
