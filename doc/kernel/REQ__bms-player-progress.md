@@ -7,10 +7,15 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-2026-10-15 실행 중 배속 전환05.13.06을 N에서 W로 옮겼다. 공통 exact phase와
-독립 oracle 테스트를 병렬 작성하며, 연속 attempt·실제 cut·가변 기록·native/browser
-owner/UI의 전체 계약을 [runtime 배속](REQ__runtime-playback-rate.md)에 기록했다.
-기반 수학 구현은 전체 runtime 지원 완료가 아니며 완료 수/분모136/489는 유지한다.
+2026-10-15 실행 중 배속 전환05.13.06은 W다. 공유 phase·PCM·exact Transport
+history·가변 source 기록의 AC001–004를 구현하고 core 전체816/0·app 관련81/0을
+확인했다. 앞선 scoped 검사는 subset이므로 더하지 않는다. 이어서 Worklet public24/0·
+library24/0, typed mailbox30/0과 browser-audio WASM check가 통과했다. 현재 공통
+owner와 retained UI를 두 구현·테스트 쌍으로 병렬 작성 중이다. 실제 native6곳의
+runtime cold 조립·browser 수직 연결과 독립 전체 review/QA는 남는다.
+[runtime 배속](REQ__runtime-playback-rate.md)과
+[실제 변경/검증 범위](../changes/2026-10-15-runtime-playback-rate.md)를 따른다.
+전체 runtime 지원 완료가 아니므로 완료 수/분모136/489는 유지한다.
 
 2026-10-15 현재 browser audio acceptance: `83330c7c`의 실제 두 WASM identity/
 extent 검증과 `53c18114`의 page-owned CDP cleanup 수정은 독립 DEEP code/security

@@ -32,6 +32,17 @@ search나128단계 곱셈 대체 루프를 실행하지 않는다.
 거절/no-op을 보존한다. 기존 boundary receipt API는 opt-in typed event 접근으로
 호환하고 표현할 수 없는 event를 조용히 버리지 않는다.
 
+새 typed rate/restart는 실제 적용 순간의 generation/revision도 검사한다.
+compound restart 거절의 boundary는 원래 cursor anchor의 무변경 marker로
+requested/applied를 같게 두고 correction0을 사용한다. 원래 대상은 request id와
+correlated pending 요청에 남는다. legacy applied region receipt의 보정 의미를
+재사용해 발생하지 않은 seek 차이를 i64에 억지로 넣거나 공개 struct를 확장하지 않는다.
+
+미래 BGM 상한은 현재 suffix뿐 아니라 반복될 전체 pass를 포함한다. 적용된
+rate와 그 준비 상한을 동일 metadata sequence로 전달해, 이후 region admission도
+현재 배속의 시간/용량을 bounded index 조회로 검사한다. 활성 Worklet 메시지에서
+전체 cue를 다시 스캔하지 않는다.
+
 Transport/capture/UI는 실제 owner-qualified 결과를 소비한다. 요청 전 history와
 recording 용량을 확보하고, 실제 cut 뒤 모든 member candidate를 만든 다음 함께
 commit한다. Browser의58-word output-report ABI는 유지하고 rate event를 별도의

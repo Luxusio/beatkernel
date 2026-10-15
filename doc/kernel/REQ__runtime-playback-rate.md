@@ -23,6 +23,23 @@ target projection, native presentation은 서로 다른 사실이다. UI는 실�
 표현 범위·용량 부족, 종료/취소 경합은 상관관계를 보존한 거절로 답한다. 거절된
 요청은 기존 PCM, rate, history, recording, opponent를 바꾸지 않는다.
 
+같은 구간을 반복할 때는 다음 pass에서 다시 발성할 cue도 변경 용량 검사에
+포함한다. 이후 scrub/loop의 시간 표현 범위와 BGM 용량도 현재 적용 배속으로
+검사한다. 초기 선택 배속으로 유효한 요청을 거절하거나, 적용 뒤 실패를 반복하며
+재생이 멈추는 상태로 진입해서는 안 된다.
+
+빈 PCM을 참조하는 cue도 실행 작업 한도를 사용한다. 새 배속에서 cue가 같은
+출력 프레임에 모여 최소 한 프레임조차 처리할 수 없게 되면 명시적인 작업 용량
+거절로 기존 재생을 유지한다. 전체 블록이 너무 커서 생기는 기존 재시도 가능한
+backpressure와 구분한다. Producer가 이 상한도 cold 준비하고 현재 배속과 함께
+보존하며, 활성 Worklet에서 전체 cue를 다시 스캔하지 않는다.
+
+거절된 typed compound restart의 boundary는 보존된 cursor anchor를 표시한다.
+requested/applied anchor가 같고 correction은0이며 실제 frame·generation·iteration과
+원래 request id를 유지한다. 원래 재시작 대상은 상관된 pending 요청에 보존한다.
+거절 marker를 실제 seek나 새 attempt의 적용 결과로 처리하지 않는다. 따라서
+적용하지 않은 두 대상의 차이가 i64를 넘는 경우에도 보정값을 자르지 않는다.
+
 ## 공유하는 정확한 위상
 
 E는 기존 output-phase의 누적 활성 출력 경과 ns이며 승인된 무음만 제외한다.
@@ -105,6 +122,12 @@ codec 검사는 원래 고정 recorder header와 고정 base 길이를 재사용
 변경하지 않는다. 키보드 focus와 Back/stop 복구가 가능해야 한다. Window는 입력과
 gesture를 수집하고 business 준비·PCM·rendering은 Worker/Worklet이 담당한다.
 VDOM이나 매 프레임 UI 재구성은 도입하지 않는다.
+
+Native Play의 배속 편집 focus는 처음에 없다. Tab은 분자·분모·Apply·focus 해제
+순서로 이동하고 Shift+Tab은 역순이다. 편집기 또는 Apply focus에서 Enter로 현재
+draft를 제출하며, 편집기 클릭은 해당 입력을 선택한다. 커서·삭제·IME·clipboard는
+편집기에 focus가 있을 때만 전달한다. Escape/F5/F9의 기존 Play 제어는 유지한다.
+pending 중에도 draft와 실제 적용값을 보존하며 Apply를 중복 실행하지 않는다.
 
 공통 phase의 양/음수 preroll, 분수 cut/no-op, 큰 정수·denominator·역산을 독립
 literal/oracle로 검증한다. 실제 Mixer PCM, 여러 voice 중 마지막 실패의 전체
