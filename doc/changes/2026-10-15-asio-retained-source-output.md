@@ -1,10 +1,12 @@
-# ASIO retained Source output — 진행 중
+# ASIO retained Source output — 소프트웨어 검증 결과
 
 ASIO의 정확한 heterogeneous planar 출력 상태, 남은 원본 PCM과 제출 prefix,
 original native interval을 기존 Source Owner·typed Output UI·solo/local pump에
 연결하는 작업이다. 사전 독립 설계 검토 PASS 뒤 REQ/ADR을 먼저 기록했다.
-아직 전체 구현·독립 소스 리뷰·QA 완료를 주장하지 않는다. 원래 BMS player
-Goal과 WBS07.08.07.14의 실제 SDK/driver acceptance 요구는 유지한다.
+독립 코드·보안 검토와 PLAN이 허용한 가용 소프트웨어 QA를 통과했다. 원래 BMS
+player Goal과 WBS07.08.07.14의 실제 SDK/driver acceptance 요구는 유지한다.
+Hook-owned 완료 gate는 실제 검토·QA 결과와 별도이며 전체 플레이어 완료를 뜻하지
+않는다. 아래 개발 검사는 중간 시점 기록이고 현재 결과는 마지막 독립 검토·QA 절을 따른다.
 설정 변경은 일시정지·출력 정지·재설정·같은 플레이 재개의 순서이며 그동안 소리는
 멈춘다. PCM 중복/누락과 재개 싱크 보존이 목표이고, 무중단 재생이나 물리적인
 무잡음 전환이 입증됐다는 뜻은 아니다.
@@ -139,6 +141,86 @@ HOST/revision 변경을 실제 진행으로 기대해 첫 실행은278 PASS/1 FA
 로그는 `/tmp/beatkernel-asio-renewed-original-host-14038.log`·
 `/tmp/beatkernel-asio-renewed-original-host-final-14038.log`다. 새 회귀의 변경 전 RED는
 실행하지 않았으므로 RED 증거로 주장하지 않는다. 최종 독립 재검토와 QA는 남아 있다.
+
+## 최종 독립 검토·소프트웨어 QA
+
+소스 동결 HEAD `1a1aa5b018c5700395d86e3e9d9c7baae6f4c489`에서 세 번째
+독립 DEEP code review와 별도 security review가 각각 실제 PASS0을 반환한 뒤,
+단일 독립 qa-cli가 아래 matrix를 실행하고 실제 PASS를 반환했다. CODE 검토는
+발견 예산을 모두 사용한 뒤 새 hunter 없이 전체53개 경로와 이전3건의 수정 근거를
+독립적으로 확인했다. 검증 중 tracked source 변경은 없었다. 이 결과는 PLAN이
+허용한 소프트웨어 범위이며 authentic SDK·Windows/driver·음향 acceptance가 아니다.
+
+| 실행/검사 | 결과 | 로그 |
+|---|---|---|
+| Core lib/integration + doctest | 733 +16 PASS, 실패0; 기존749 기준 유지 | `/tmp/qa-asio-core-14038.log`, `/tmp/qa-asio-core-doc-14038.log` |
+| Core examples 검사 | 별도1 PASS/실패0 | `/tmp/qa-asio-core-examples-14038.log` |
+| Platform lib/integration | lib507/실패0/ignored2, integration285/실패0 | `/tmp/qa-asio-platform-14038.log` |
+| App desktop,webtransport | lib3319/실패0/ignored9, bins670/실패0/ignored17, Source allocation1/실패0 | `/tmp/qa-asio-app-featureful-14038.log` |
+| Host no-default bins / browser WASM | 각각 check exit0 | `/tmp/qa-asio-host-bins-14038.log`, `/tmp/qa-asio-wasm-14038.log` |
+| Windows/macOS 일반 foreign typing | 각각 exit0 | `/tmp/qa-asio-native-14038-windows.log`, `/tmp/qa-asio-native-14038-macos.log` |
+| Windows ASIO-cfg alltargets | Rust-only check exit0 | `/tmp/qa-asio-native-14038-asio-cfg.log` |
+| 실제 production C++ dispatch | assertions 활성화6개 함수 compile/run exit0 | `/tmp/qa-asio-portable-14038-cpp.log` |
+| Source Clippy lib/bins | exit0, 기존 경고 유지 | `/tmp/qa-asio-clippy-14038.log` |
+| 공개 CLI | 19/19 예상 exit·출력 일치 | `/tmp/qa-asio-cli-14038.log`, `/tmp/qa-asio-cli-14038.jsonl` |
+| WBS / 로컬 링크 / whitespace | 50 PASS, 8개 문서154링크 누락0, diff exit0 | `/tmp/qa-asio-portable-14038-wbs.log`, `/tmp/qa-asio-portable-14038-links.log`, `/tmp/qa-asio-portable-14038-diff.log` |
+
+숫자를 고유 coverage 합계로 더하지 않는다. Platform integration에는 format23·
+ASIO delivery9·library와 중복되는 external allocator128이 포함된다. App에는
+queue15·실제 controller8·delivery8·typed finalizer5가 포함된다. 새 Windows
+portable15개는 main/Windows bin에서 각각 실행되어 고유30개가 아니다. Native
+lifecycle21·canonical adapter17·Windows gated composition1은 **typed-only**다.
+실제 QUIC owner 종료1개는 CERT/KEY 환경이 없어 ignored이며 통과로 세지 않는다.
+
+재현에는 기존 `target/toolchain/env.sh`, `RUSTUP_AUTO_INSTALL=0`, cached
+host CC/AR와 jobs2를 사용한다. 실제 주요 명령은 다음과 같다.
+
+```text
+cargo test -p beatkernel --lib --tests --locked --offline -j2
+cargo test -p beatkernel --doc --locked --offline -j2
+cargo test -p beatkernel --examples --locked --offline -j2
+cargo test -p beatkernel-platform --lib --tests --locked --offline -j2
+cargo test -p beatkernel-bms-runtime --features desktop,webtransport --lib --bins --test coordinate_source_replacement_allocations --locked --offline -j2
+cargo check -p beatkernel-bms-runtime --bins --no-default-features --locked --offline -j2
+cargo check -p beatkernel-bms-runtime --target wasm32-unknown-unknown --lib --no-default-features --features browser --locked --offline -j2
+cargo clippy --workspace --lib --bins --features desktop,webtransport --locked --offline -j2
+cargo build -p beatkernel --example audio --locked --offline -j2
+cargo build -p beatkernel-platform --example windows_audio --locked --offline -j2
+cargo build -p beatkernel-bms-runtime --bin windows_bms --features desktop,webtransport --locked --offline -j2
+```
+
+Foreign 검사는 기존 `xcheck.sh windows|macos`의 platform/app lib/tests/bins
+no-default typing과 앞 절의 별도 ASIO-cfg alltargets 명령이다. C stubs와 target별
+Rust cfg를 사용했고 실제 Cargo SDK feature는 OFF다. 정확한 command/exit 목록은
+`/tmp/qa-asio-host-tail-14038.json`과 각 foreign 로그에 있다. C++ 명령은 앞 절과
+같이 기존 env를 적용해 actual production header fixture를 compile/run했다.
+
+공개 CLI의 help·실제 메모리 PCM fixture·invalid·중복 옵션·동시 help를 실행했다.
+실제 fixture 출력은 `frames=8 commands_applied=3 partition_invariance=PASS`와
+`frames=4 literal_check=PASS`다. Linux의 Windows 전용 CLI는 유효한 ASIO 인자를
+parse한 뒤 `native playback requires Windows`로 거절한다. 이를 Windows의
+SDK-disabled native guard 실행으로 확대하지 않는다. SDK-disabled selector/UI의
+상관된 단일 거절은 실제 portable bin tests에서 확인했으며 HWND/local native
+caller의 실패 경로는 static-only다.
+
+실제 rustfmt42경로의 raw exit1 중4개는 base와 HEAD의 formatter 변경 내용이
+같았다: `app/src/asio_replay.rs`, `app/src/gameplay/output/adapters/observation.rs`,
+`crates/beatkernel-platform/src/audio/asio/calibration.rs`,
+`crates/beatkernel-platform/src/audio/presentation/validation.rs`다. 나머지38개 명시
+경로 check는 exit0이며 새 포맷 회귀는 없다. `/tmp/qa-asio-portable-14038-format.log`,
+`/tmp/qa-asio-portable-14038-format-baseline.log`, `/tmp/qa-asio-portable-14038-format-scoped.log`에
+기록했다. 전체 formatter clean이나 strict Clippy clean을 주장하지 않는다.
+
+기존 note freshness 검사도53개 변경 경로에 대해0개 invalidation/exit0이다.
+금지된 `doc/HANDOFF.md`와 protected task 디렉터리를 walk에서 제외했고 실제 파일을
+읽거나 변경하지 않았다. `/tmp/beatkernel-asio-note-freshness-14038.log`를 따른다.
+동일 callback 재매핑·history 없는 pending·cleanup 오류 보존 규칙은 각 REQ와
+커밋된 회귀에 반영했다. 기존 C++ 환경 gotcha는 앞 절의 재현 명령에 기록했으며,
+동일 검사를 감싸는 추가 shell 테스트나 설치/SDK 변경은 추가하지 않았다.
+
+WBS는 .14.01–.06 V, .14.07 W, 실제 SDK/driver .14.08 E와 전체136/489를
+유지한다. 완료 표시는 hook-owned 최종 gate를 따르며 실제 리뷰/QA PASS 자체를
+그 기록의 대체물로 쓰지 않는다. 전체 BMS player Goal은 계속 미완료다.
 
 ## Known ceiling
 
