@@ -1,5 +1,6 @@
 /** Production retained Settings regression. Run after all writers stop and a fresh WASM build:
- * EXPECTED_WASM_SHA256=<sha256> CHROMIUM=/usr/bin/chromium \
+ * EXPECTED_WASM_SHA256=<ui-sha256> EXPECTED_AUDIO_WASM_SHA256=<audio-sha256> \
+ * CHROMIUM=/usr/bin/chromium \
  * PUPPETEER_MODULE=/absolute/path/to/puppeteer-core \
  * SETTINGS_POLICY_OUT=target/wf/settings-policy-<unique-run> \
  * node app/web/settings-policy.browser.mjs
@@ -20,15 +21,20 @@ import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const expected = process.env.EXPECTED_WASM_SHA256;
+const expectedAudio = process.env.EXPECTED_AUDIO_WASM_SHA256;
 assert.match(expected ?? "", /^[a-f0-9]{64}$/, "EXPECTED_WASM_SHA256 must identify the coordinator's fresh build");
+assert.match(expectedAudio ?? "", /^[a-f0-9]{64}$/, "EXPECTED_AUDIO_WASM_SHA256 must identify the coordinator's fresh audio build");
 for (const name of ["CHROMIUM", "PUPPETEER_MODULE", "SETTINGS_POLICY_OUT"]) assert(process.env[name], `${name} is required`);
 const out = resolve(root, process.env.SETTINGS_POLICY_OUT);
-await mkdir(out); // Refuse reuse of evidence from another run.
 const sources = {};
-for (const file of ["main.js", "worker.js", "renderer-worker.js", "record-store.mjs", "completed-results-model.mjs", "local-play-host.mjs", "settings-profile.mjs", "display-settings.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"])
+for (const file of ["main.js", "worker.js", "renderer-worker.js", "record-store.mjs", "completed-results-model.mjs", "local-play-host.mjs", "settings-profile.mjs", "display-settings.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm",
+  "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm", "audio-host.mjs", "audio-worklet.js", "native-audio-clock.mjs", "worklet-native-frame-probe.mjs", "worklet-encoding.mjs", "audio-failure.mjs"])
   sources[file] = await readFile(resolve(root, "app/web", file));
 assert.equal(sha(sources["pkg/beatkernel_bms_runtime_bg.wasm"]), expected, "production WASM identity mismatch");
-const evidence = { status: "RUNNING", wasmSha256: expected, source: Object.fromEntries(Object.entries(sources).map(([name, bytes]) => [name, sha(bytes)])),
+assert.equal(sha(sources["audio-pkg/beatkernel_bms_runtime_bg.wasm"]), expectedAudio, "production audio WASM identity mismatch");
+const audioWasmByteLength = sources["audio-pkg/beatkernel_bms_runtime_bg.wasm"].byteLength;
+await mkdir(out); // Refuse reuse of evidence from another run.
+const evidence = { status: "RUNNING", wasmSha256: expected, audioWasmSha256: expectedAudio, audioWasmByteLength, source: Object.fromEntries(Object.entries(sources).map(([name, bytes]) => [name, sha(bytes)])),
   steps: [], snapshots: [], errors: [], consoleErrors: [], networkErrors: [], networkLifecycle: [], networkOverflow: false, cleanup: {}, ceilings: [
     "Actual Chromium SwiftShader, production Window/Worker/RenderWorker and genuine finite audio-output completion; no physical GPU, device latency or throughput claim.",
     "Trusted pointer and keyboard acquisitions; injected DOM composition proves bridge ordering only. Physical OS IME remains unverified.",
@@ -777,16 +783,19 @@ try {
   const setup = evidence.business.audioSetup;
   assert(Array.isArray(setup), "production business Worker audio observation missing");
   const setupOf = kind => setup.filter(record => record.kind === kind);
+  const audioBodies = evidence.networkLifecycle.filter(record => record.kind === "server-audio-body");
+  assert.equal(audioBodies.length, 1, "one actual server audio body required");
+  assert.equal(audioBodies[0].byteLength, audioWasmByteLength); assert.equal(audioBodies[0].sha256, expectedAudio);
   assert.equal(setupOf("fetch-start").length, 1, "one actual Worker audio fetch");
   assert.equal(setupOf("fetch-response").length, 1); assert.equal(setupOf("fetch-response")[0].status, 200);
   assert.equal(setupOf("reader-acquired").length, 1);
   const doneReads = setupOf("reader-read").filter(record => record.done);
-  assert.equal(doneReads.length, 1); assert.equal(doneReads[0].bytes, 62096, "entire real audio module body consumed");
+  assert.equal(doneReads.length, 1); assert.equal(doneReads[0].bytes, audioWasmByteLength, "entire real audio module body consumed");
   assert.equal(setupOf("reader-cancel").length, 0, "completed actual reader must not be canceled");
-  assert.equal(setupOf("reader-release").length, 1); assert.equal(setupOf("reader-release")[0].bytes, 62096);
-  assert.equal(setupOf("wasm-compile-start").length, 1); assert.equal(setupOf("wasm-compile-start")[0].byteLength, 62096);
+  assert.equal(setupOf("reader-release").length, 1); assert.equal(setupOf("reader-release")[0].bytes, audioWasmByteLength);
+  assert.equal(setupOf("wasm-compile-start").length, 1); assert.equal(setupOf("wasm-compile-start")[0].byteLength, audioWasmByteLength);
   assert.equal(setupOf("wasm-compile-done").length, 1);
-  const compiled = setupOf("wasm-compile-done")[0]; assert.equal(compiled.byteLength, 62096); assert.equal(compiled.actualModule, true);
+  const compiled = setupOf("wasm-compile-done")[0]; assert.equal(compiled.byteLength, audioWasmByteLength); assert.equal(compiled.actualModule, true);
   assert.equal(setupOf("audio-load").length, 1); assert.equal(setupOf("audio-module-ready").length, 1);
   const publication = setupOf("audio-module-ready")[0];
   assert.equal(publication.actualModule, true); assert.equal(publication.compileId, compiled.compileId);

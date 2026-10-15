@@ -106,3 +106,41 @@ before discovering keyboard plus touch sources. Desktop Chromium can expose
 only the keyboard by default; waiting for a second source without enabling it
 does not exercise local recording or storage. Preserve real source discovery,
 explicit member selection and exact per-member capture/archive assertions.
+
+## Current production audio acceptance
+
+Use the cached toolchain; build `browser-audio` and immediately run the existing
+wasm-bindgen into `app/web/audio-pkg`, then build `browser` and immediately run
+bindgen into `app/web/pkg`. Both builds use the same intermediate cdylib path,
+so generating both packages after both builds would mix their identities.
+The cached offline commands are recorded in
+[the native-frame diagnostic guide](../platform/GUIDE__browser-native-frame-diagnostic.md).
+Do not install or update tooling as part of this acceptance run.
+
+After all writers stop and both fresh packages exist, compute each actual WASM
+SHA256 independently and provide both values:
+
+```sh
+EXPECTED_WASM_SHA256=<fresh-ui-wasm-sha256> \
+EXPECTED_AUDIO_WASM_SHA256=<fresh-audio-wasm-sha256> \
+CHROMIUM=/usr/bin/chromium \
+PUPPETEER_MODULE=<existing-absolute-puppeteer-core-path> \
+SETTINGS_POLICY_OUT=target/wf/<unique-existing-parent>/<new-run> \
+node app/web/settings-policy.browser.mjs
+```
+
+The driver must reject missing/malformed hashes or either actual digest mismatch
+before creating the evidence directory or starting processes. Freeze both
+generated packages and the named host/worklet/clock/probe/encoding/failure
+sources in its existing source snapshot. Serve those buffers, check their disk
+hashes after the run, and assert the actual single server audio body matches
+the supplied audio digest and frozen byte length. This establishes identity
+for the explicitly snapshotted files, not the entire UI transitive import tree.
+
+Preserve all 13 current journey steps and every strict page/console/network
+assertion. Independently correlate Worker EOF, no completed-reader cancellation,
+one release, compile extent and genuine Module publication with the actual
+Worker CDP loading completion; full body reading and compilation cannot excuse
+an abort. Inspect the rendered screenshots and cleanup diagnostics as well as
+the status. Verify only this run's browser/Xvfb ended and its key, certificate,
+profile and cache were removed, without touching other sessions' resources.

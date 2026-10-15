@@ -87,6 +87,19 @@ Keep all strict page, console and network assertions. A reported audio-WASM
 abort remains a failure even when application reading and compilation complete.
 Worker migration alone is not proof that the browser diagnostic was repaired.
 
+Current production acceptance requires independent coordinator hashes for both
+the UI and audio WASM builds. Freeze the named source files and both generated
+JS/WASM packages before serving them, and derive reader/release/compile extents
+from the frozen audio binary rather than a historical byte count. The one actual
+HTTPS audio response must match that binary's extent and external digest.
+Validate both artifact identities before creating output or owned processes.
+Keep genuine Module correlation, zero Window preparation, actual Worker CDP
+loading completion and all 13 existing Settings/play/record/replay journeys.
+Acceptance also inspects cleanup errors, owned browser/Xvfb termination and
+removal of owned temporary key/cert/profile/cache; a status string alone is
+insufficient. The reproducible command and snapshot limits are in
+[the preparation verification guide](../verification/GUIDE__browser-worker-preparation-fixtures.md).
+
 ## Known ceiling
 
 Setup can temporarily compete with preview work in the existing business
