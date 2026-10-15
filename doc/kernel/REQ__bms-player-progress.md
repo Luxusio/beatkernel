@@ -7,6 +7,20 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+현재 진행 작업(2026-10-16): TASK__runtime-input-allocation-budget에서13.06.01의
+실제 Judge/Runtime/Solo/Group 입력 계측과 고정 case별 상한을 구현했다.
+교정 기준선 debug/release 각각13/0, 상한 삽입 후 최종 root Verify 각각14/0이다.
+각 profile의66측정 row는 교정9개·실제 public 호출57개이며66상한 모두 통과했다.
+Runtime legacy fresh fixture는 alloc10회/2372B, observed는11회/2628B다.
+이는 반환 report를 포함한 요청량이며 live/RSS·실제 지연·lock/IO 부재 증거가 아니다.
+Linux x86_64 경험적 상한이며 다른 target은 의미 검사를 유지하고 미검증을 명시한다.
+실제 artifact 대조에서 browser4개는 같지만 native 실행파일은6f5bed91…로 바뀌어,
+아래 c43 GUI 증거는 해당 과거 바이너리에만 한정한다. 현재 native GUI PASS를 주지 않는다.
+독립 정식 code review→qa-cli가 남았다.13.06.01은 lock/IO·물리 경계 의무가 남아
+W를 유지하고 전체136/489·오디오12/27은 변하지 않는다.
+[실행·실패 교정·효과 한계](../changes/2026-10-16-runtime-input-allocations.md)를 따른다.
+직전 배속 전환 child는 실제 장치 검증 BLOCKED_ENV로 보존했고 전체 Goal은 활성이다.
+
 현재 checkpoint(2026-10-16): AC042 오류 폭주 수정0cba6616의 관련152개와
 새 독립 DEEP code/security/doc 리뷰가 PASS다. 새 required browser는 원본 strict
 runner1회로 필수14/14·전체15/15, console/page/network0·overflow0이다.

@@ -210,6 +210,45 @@ code size, compile time and runtime costs with evidence before claiming gains.
 Real-time audio callbacks must not gain allocation, blocking I/O or locks.
 Bound queues and work, and make overflow, refusal and cancellation explicit.
 
+## Actual input allocation observation
+
+Measure the existing public JudgeEngine input, Runtime legacy/observed input,
+SoloRuntime and RuntimeGroup entry points with a calibrated per-thread System
+allocator wrapper. Count alloc, alloc_zeroed, realloc and dealloc separately,
+including request bytes and the old/new realloc sizes. State whether counts
+represent attempts or successful requests. These are allocator requests for the
+named workload, target, compiler and debug/release profile; they are not elapsed
+latency, live/peak memory, RSS, or a ranking against another player.
+
+Prepare fixtures, warm associations, completed judgment prefixes, clock scripts
+and queue saturation outside the measured call. Return the original report or
+error before ending measurement; inspect state, provenance and original queue
+outcomes, print evidence and drop returned reports only after the meter stops.
+An owned input consumed inside a refusal/ignored call may legitimately contribute
+deallocation. Calibrate all four hooks, growth/drop, nesting, unwind cleanup and
+thread isolation, and observe positive allocations and actual work in release.
+Derive immutable per-case regression budgets from genuine debug/release baseline
+logs; never set a budget from the same result being checked or force zero costs.
+
+Name cold/reused associations and real completed-prefix state rather than an
+unrelated external history vector. Multi-player input routes to one matching
+member; measure first, last and unassigned source for supported cohorts up to64.
+Preserve the different Solo/Group partial-failure and poisoned-owner semantics.
+Allocation counts that do not grow with players do not establish constant CPU
+routing time, and earlier gauge/publication/audio meters do not replace input
+boundary measurements.
+
+Select RuntimeProcessingClock::Disabled explicitly for the deterministic
+baseline; telemetry capacity0 does not disable the default Native Instant reads.
+Measure scripted External timing and an allocation-positive injected mapper as
+separate controls while preserving original input/game/audio timestamps. Mapper,
+resolver, policy and active-interaction callbacks are caller code, and System may
+perform internal synchronization or OS work. Scope a source call-boundary audit
+separately from runtime observations. Allocator PASS, prepared queue/source
+inspection and Disabled timing do not prove zero lock/IO, arbitrary callback
+behavior, other-thread costs, Native timing or physical output latency. Keep
+unobserved lock/IO and whole native callback/device obligations open in the WBS.
+
 ## Reliability target
 
 The user requests SQLite-grade test stability. Adopt the relevant methods from
