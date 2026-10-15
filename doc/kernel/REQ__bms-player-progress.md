@@ -7,7 +7,7 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-2026-10-15 ASIO .14.01–.06은 구현돼 V, 독립 리뷰/QA .14.07은 W다.90f3e5ec의 native/canonical adapter와 d53b777d의 Windows complete UI·solo/local을 커밋했다. Windows host bin91 PASS/실패0(신규 portable12 포함), platform/app Windows Rust-only 형 검사 exit0이다. native18·adapter17·Windows composition1은 typed-only이며 실제 SDK/driver .14.08은 E다. 최종 독립 리뷰/QA가 남아 전체136/489(27.81%), 남음353·원래91/193을 유지한다. [진행 기록](../changes/2026-10-15-asio-retained-source-output.md)을 따른다.
+2026-10-15 ASIO .14.01–.06은 V, 독립 리뷰/QA .14.07은 W다. 첫 DEEP review의2건을 a56e039b·8ee68fb1에서 수정한 뒤 host Windows bin94/0(신규 portable15 포함)·Windows Rust-only 형 검사 exit0을 확인했다. native21·adapter17·Windows composition1은 typed-only이며 실제 SDK/driver .14.08은 E다. 재검토·독립 QA가 남아 전체136/489(27.81%), 남음353·원래91/193을 유지한다. [진행 기록](../changes/2026-10-15-asio-retained-source-output.md)을 따른다.
 
 2026-10-14 WBS 세분화: 기존 미완료117개를383개 구체 실행 단위로 나눴다.
 기존 완료106개와 원래 요구193개/완료91개는 유지한다. 기존에 실제 검증된 하위

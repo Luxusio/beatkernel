@@ -102,6 +102,23 @@ local cleanup 우선순위와 retry/member-destination 누적 caller는 정적�
 환경의 `cargo test --locked --offline -j2 -p beatkernel-bms-runtime --bin windows_bms`와
 앞 절의 같은 Windows GNU all-target check다. 최종 독립 리뷰·QA는 아직 진행 전이다.
 
+## 독립 리뷰 수정
+
+`7b3779a7`의 첫 DEEP 정식 code review는2건으로 FAIL, 별도 security review는
+PASS0이었다. `a56e039b`는 history 없이 생성한 pending PCM을 history 준비 전에
+거절해 원래 owner와 반복 재시도를 보존한다. `8ee68fb1`는 초기 probe·pre-transfer
+실패의 명시적 close 결과를 기존 typed carrier에 담아 원본 오류·cleanup 오류와
+실제 guard를 보존한다. 새 오류 프레임워크는 추가하지 않았다. 일반적인 guard
+폐기는 Result 채널이 없으므로 원본 cleanup 진단을 출력하고 HWND를 보수적으로
+유지한다.
+
+수정 후 실제 host Windows bin94 PASS/실패0/ignored0, platform/app all-target
+Windows Rust-only check exit0이다. 새 mapper 회귀3개를 실행했고, 새 native
+history 회귀3개를 포함한 lifecycle21개는 **typed-only**다. 성공한 빈 history
+준비·기존 history pending 재사용·실패 후 원본 PCM/queue와 반복 거절을 검사하도록
+작성했다. 로그는 `/tmp/beatkernel-asio-formal-fix-windows-bin-14038.log`·
+`/tmp/beatkernel-asio-formal-fix-rust-only-14038.log`다. 재검토와 독립 QA는 남아 있다.
+
 ## Known ceiling
 
 Authentic MSVC/ASIO SDK build와 설치된 실제 driver/HWND/callback/음향 동작은

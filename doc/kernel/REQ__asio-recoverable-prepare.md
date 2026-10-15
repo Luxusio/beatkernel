@@ -11,6 +11,12 @@ synchronous callback consumes the following prefix. Once Start is attempted,
 quarantine possibly played B after callback drain even if no callback completed.
 Never rerender, pad or replay a short/incompatible pending suffix.
 
+A pending owner without preexisting Source history must refuse before creating
+history or reconfiguring state. Its generated tail predates the Mixer's current
+frontier; enabling history there cannot authenticate that tail. Preserve absent
+history, exact PCM/report/admitted prefix and first-unsent basis across repeated
+refusal. An empty pending tail may enable history at its current frontier.
+
 Preserve original operation and latest cleanup diagnostics separately. Callback
 retirement alone proves neither successful driver release nor HWND safety.
 Close currently consumes native handles even when cleanup fails; repeated
@@ -24,6 +30,11 @@ This is an implementation requirement, not a completed native acceptance claim.
 
 The Windows setup guard covers both native open and subsequent rate/channel
 queries: an implicit control Drop on a query error cannot establish release.
+Failed probes and pre-transfer setup operations explicitly attempt close, then
+retain the original operation error, typed cleanup error and actual guard in the
+existing OutputOpenFailure when close fails. Successful close returns the exact
+original error. An abandoned guard without a Result channel reports the original
+cleanup diagnostic and retains its HWND conservatively on unproved release.
 Transfer the actual control and Window together to successful stream ownership.
 Replacement request windows may coexist with the old output, so hidden window
 class identities must be distinct with checked exhaustion handling.
