@@ -2,7 +2,10 @@
 //! Hosts supply clock relations and genuine completed-render cursors. This
 //! module does not sample a platform clock or infer delivery from admission.
 use crate::{
-    audio_authority::{AudioAuthority, AudioAuthorityError, PreparedFrontier, PreparedInput},
+    audio_authority::{
+        AudioAuthority, AudioAuthorityCoordinateBasis, AudioAuthorityError, PreparedFrontier,
+        PreparedInput,
+    },
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
@@ -22,17 +25,27 @@ use crate::{
     native_judge::NativeJudgeConfig,
     offline::OwnedStopEvidence,
     play_result::CompletedPlayResult,
+    practice_control::{
+        PracticeAction, PracticeApplied, PracticeCapability, PracticeRateState, PracticeReply,
+        PracticeTransactionCapability, PracticeTransactionReply, PracticeTransactionRequest,
+    },
+    practice_playback::{PracticeRuntimeHeader, PreparedRuntimeRateRequest, RuntimePractice},
     replay_audio::{
         before_endpoint, completed_render_cursor_with_stops, section_end_frame, ReplayAudioError,
     },
     replay_capture::{setup_gauge_header, CaptureError, LiveReplayCapture},
     replay_speed::ReplaySpeed,
+    section_start::PreparedRetainedSection,
+    worklet_audio::{WorkletRetainedConfig, WorkletRetainedEnvelope, WorkletRetainedEvent},
     PreparedBms,
 };
 use beatkernel::{
     audio::{
         command_queue, AudioCommand, AudioCounters, AudioLimits, CommandConsumer, CommandPushError,
-        QueuePopError, RenderReport, SampleBank,
+        CommandScope, InterpolatedTargetTime, OutputFrameBasis, PracticeBoundaryKind, PracticeCue,
+        PracticeEvent, PracticeRateCueGeometry, PracticeRateOutcome, PracticeRatePreparation,
+        PracticeRegion, QueuePopError, RenderReport, SampleBank, SourcePlaybackSpan,
+        SourcePlaybackState, TargetTime,
     },
     chart::ObjectId,
     input::{BindingMap, PhysicalInputEvent, Position2, TouchRegion, TouchRouter},
@@ -44,7 +57,7 @@ use beatkernel::{
         RuntimeReport,
     },
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
-    transport::{Rate, Transport},
+    transport::{OutputPhaseBasis, OutputPhasePoint, PositiveRatePhase, Rate, Transport},
 };
 use beatkernel_bms::BmsInputMode;
 use beatkernel_platform::audio::presentation::discipline::{
@@ -52,6 +65,1186 @@ use beatkernel_platform::audio::presentation::discipline::{
     PresentationDiscipline,
 };
 use std::{error::Error, fmt};
+
+#[derive(Clone, Copy, Debug)]
+pub struct StepRetainedOptions {
+    pub worklet: WorkletRetainedConfig,
+    pub chart_seed: u64,
+    pub identity_limits: ReplayCodecLimits,
+}
+#[derive(Clone, Debug)]
+pub struct StepRetainedSetup {
+    pub config: WorkletRetainedConfig,
+    pub cues: Vec<PracticeCue>,
+    pub geometry: Vec<PracticeRateCueGeometry>,
+    pub sample_count: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepRemoteHistorySnapshot {
+    pub program_id: u64,
+    pub context_start: u64,
+    pub source_hz: u32,
+    pub initial_physical: u64,
+    pub initial_playback: u64,
+    pub retained_start: u64,
+    pub pulled_end: u64,
+    pub retirement_revision: u64,
+    pub spans: Vec<SourcePlaybackSpan>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepRetainedControl {
+    pub request: PracticeTransactionRequest,
+    pub preparation: Option<PracticeRatePreparation>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepRetainedAdmissionKind {
+    Transaction,
+    Pause,
+}
+
+struct RetainedPending {
+    request: PracticeTransactionRequest,
+    region: PracticeRegion,
+    rate: Option<PreparedRuntimeRateRequest>,
+    admitted: bool,
+}
+struct StepRetained {
+    setup: StepRetainedSetup,
+    original: beatkernel_bms::BmsChart,
+    options: StepRetainedOptions,
+    business: RuntimePractice,
+    phase: PositiveRatePhase,
+    headers: Vec<PracticeRuntimeHeader>,
+    capture_limits: Vec<Option<ReplayCodecLimits>>,
+    completion_template: SongCompletion,
+    basis: OutputPhaseBasis,
+    region: PracticeRegion,
+    generation: u64,
+    iteration: u64,
+    started: bool,
+    ended: bool,
+    paused: bool,
+    pending: Option<RetainedPending>,
+    pause: Option<(u64, u64, bool, bool)>,
+    history: Option<StepRemoteHistorySnapshot>,
+    event: Option<(WorkletRetainedEnvelope, bool)>,
+    acknowledged: Option<WorkletRetainedEnvelope>,
+    response: Option<PracticeTransactionReply>,
+    retired: Vec<(PlayerId, LiveReplayCapture)>,
+}
+
+fn retained_error(error: impl fmt::Display) -> StepGameplayError {
+    StepGameplayError::Setup(error.to_string())
+}
+fn retained_source_error(error: beatkernel::audio::ConvertedPhaseError) -> StepGameplayError {
+    StepGameplayError::Setup(format!("retained source coordinate: {error:?}"))
+}
+fn transaction_identity(request: PracticeTransactionRequest) -> (u64, u64) {
+    match request {
+        PracticeTransactionRequest::Region(request) => (request.id, request.generation),
+        PracticeTransactionRequest::Rate { id, generation, .. }
+        | PracticeTransactionRequest::RestartOriginal { id, generation, .. } => (id, generation),
+    }
+}
+
+impl StepRemoteHistorySnapshot {
+    pub(crate) fn from_words(words: &[u32]) -> Result<Self, StepGameplayError> {
+        let invalid = || StepGameplayError::InvalidConfiguration("invalid retained history wire");
+        if words.len() < 20 || words.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        let pair =
+            |index: usize| u64::from(words[index * 2]) | (u64::from(words[index * 2 + 1]) << 32);
+        let count = usize::try_from(pair(9)).map_err(|_| invalid())?;
+        if pair(0) != 1
+            || count > 65_536
+            || count.checked_mul(10).and_then(|n| n.checked_add(20)) != Some(words.len())
+        {
+            return Err(invalid());
+        }
+        let mut spans = Vec::new();
+        spans
+            .try_reserve_exact(count)
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        for index in 0..count {
+            let at = 10 + index * 5;
+            let end = match pair(at + 1) {
+                0 if pair(at + 2) == 0 => None,
+                1 => Some(pair(at + 2)),
+                _ => return Err(invalid()),
+            };
+            let state = match pair(at + 4) {
+                0 => SourcePlaybackState::Frozen,
+                1 => SourcePlaybackState::Running,
+                _ => return Err(invalid()),
+            };
+            spans.push(
+                SourcePlaybackSpan::new(pair(at), end, pair(at + 3), state)
+                    .map_err(retained_source_error)?,
+            );
+        }
+        Ok(Self {
+            program_id: pair(1),
+            context_start: pair(2),
+            source_hz: u32::try_from(pair(3)).map_err(|_| invalid())?,
+            initial_physical: pair(4),
+            initial_playback: pair(5),
+            retained_start: pair(6),
+            pulled_end: pair(7),
+            retirement_revision: pair(8),
+            spans,
+        })
+    }
+    fn span_at(
+        &self,
+        query: InterpolatedTargetTime,
+    ) -> Result<SourcePlaybackSpan, StepGameplayError> {
+        if query
+            .compare_source_time_frame(self.retained_start, self.source_hz)
+            .map_err(retained_source_error)?
+            .is_lt()
+            || query
+                .compare_source_time_frame(self.pulled_end, self.source_hz)
+                .map_err(retained_source_error)?
+                .is_gt()
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "query outside retained source pulls",
+            ));
+        }
+        let mut low = 0;
+        let mut high = self.spans.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if query
+                .compare_source_time_frame(self.spans[mid].physical_start(), self.source_hz)
+                .map_err(retained_source_error)?
+                .is_lt()
+            {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        low.checked_sub(1)
+            .and_then(|index| self.spans.get(index).copied())
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained source history is empty",
+            ))
+    }
+}
+
+impl StepRetained {
+    fn commit_control(
+        &mut self,
+        event: WorkletRetainedEnvelope,
+        point: OutputPhasePoint,
+        transport: &mut Transport,
+        captures: &mut [(PlayerId, &mut Option<LiveReplayCapture>)],
+    ) -> Result<(), StepGameplayError> {
+        match event.event {
+            WorkletRetainedEvent::Practice(projected) => {
+                let PracticeEvent::Rate(rate) = projected.event else {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "not a retained rate event",
+                    ));
+                };
+                let pending = self
+                    .pending
+                    .as_ref()
+                    .filter(|pending| pending.admitted)
+                    .ok_or(StepGameplayError::InvalidConfiguration(
+                        "rate outcome lacks admitted request",
+                    ))?;
+                let (id, generation) = transaction_identity(pending.request);
+                if !self.started
+                    || rate.generation != self.generation
+                    || rate.iteration != self.iteration
+                    || rate.request_id != id
+                {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "rate outcome differs from actual generation or iteration",
+                    ));
+                }
+                let reservation = pending
+                    .rate
+                    .as_ref()
+                    .ok_or(StepGameplayError::InvalidConfiguration(
+                        "rate reservation is missing",
+                    ))?
+                    .clone();
+                let phase = if rate.outcome == PracticeRateOutcome::Applied {
+                    self.phase
+                        .with_rate_at_elapsed(rate.active_elapsed_nanos, rate.applied_rate)
+                        .map_err(retained_error)?
+                } else {
+                    self.phase
+                };
+                let prepared = self
+                    .business
+                    .prepare_rate(rate, point, transport, captures, reservation)
+                    .map_err(retained_error)?;
+                self.business.apply_rate(prepared).map_err(retained_error)?;
+                self.phase = phase;
+                self.response = Some(PracticeTransactionReply::Rate {
+                    id,
+                    generation,
+                    result: Ok(rate),
+                });
+                self.pending = None;
+            }
+            WorkletRetainedEvent::Pause(pause) => {
+                if self.pause != Some((pause.request_id, pause.generation, pause.paused, true))
+                    || pause.generation != self.generation
+                    || !self.started
+                {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "actual pause differs from admitted request",
+                    ));
+                }
+                let mut candidate = transport.clone();
+                candidate
+                    .try_reserve_output_phase_controls(1)
+                    .map_err(retained_error)?;
+                if pause.paused {
+                    candidate.pause_at_output_phase(point)
+                } else {
+                    candidate.resume_at_output_phase(point)
+                }
+                .map_err(retained_error)?;
+                *transport = candidate;
+                self.paused = pause.paused;
+                self.pause = None;
+            }
+        }
+        Ok(())
+    }
+    fn commit_boundary(
+        &mut self,
+        update: &RetainedBoundaryUpdate,
+    ) -> Result<(), StepGameplayError> {
+        if !update.fresh && update.rate != self.business.rate_state() {
+            self.business
+                .commit_control_revision(self.business.rate_state(), update.rate.revision)
+                .map_err(retained_error)?;
+        }
+        self.region = update.region;
+        self.generation = update.receipt.generation;
+        self.iteration = update.receipt.iteration;
+        self.started = true;
+        self.ended = update.receipt.kind == PracticeBoundaryKind::Ended;
+        if update.fresh {
+            self.paused = false;
+        }
+        if update.receipt.request_id != 0 {
+            self.pending = None;
+            self.response = update.response.clone();
+        }
+        Ok(())
+    }
+    fn permits_query(&self, query: InterpolatedTargetTime) -> Result<bool, StepGameplayError> {
+        match self.event {
+            Some((event, false)) => Ok(!query
+                .compare_interpolated_time(retained_event_query(event, self.basis.source_hz())?)
+                .is_gt()),
+            _ => Ok(true),
+        }
+    }
+    fn phase_point(
+        &self,
+        logical: ClockPoint,
+        query: InterpolatedTargetTime,
+    ) -> Result<OutputPhasePoint, StepGameplayError> {
+        let history = self
+            .history
+            .as_ref()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained history is unavailable",
+            ))?;
+        let elapsed = history
+            .span_at(query)?
+            .elapsed_nanos_at_source_time(
+                query,
+                self.basis.source_hz(),
+                self.basis.active_origin_frame(),
+            )
+            .map_err(retained_source_error)?;
+        self.basis
+            .point_from_elapsed_nanos(logical, elapsed)
+            .map_err(retained_error)
+    }
+    fn capability(&self) -> Option<PracticeTransactionCapability> {
+        (self.started && !self.ended).then(|| PracticeTransactionCapability {
+            practice: PracticeCapability {
+                generation: self.generation,
+                min_target: Timestamp::ZERO,
+                max_target: self.setup.config.initial_region.end,
+            },
+            rate: self.business.rate_state(),
+        })
+    }
+    fn prepare(
+        &mut self,
+        request: PracticeTransactionRequest,
+        fixed: bool,
+        transport: &mut Transport,
+        captures: &mut [(PlayerId, &mut Option<LiveReplayCapture>)],
+    ) -> Result<StepRetainedControl, StepGameplayError> {
+        if self.pending.is_some()
+            || self.pause.is_some()
+            || self.event.is_some()
+            || self.response.is_some()
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained controls are busy",
+            ));
+        }
+        let capability = self
+            .capability()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained controls are busy or unavailable",
+            ))?;
+        let (id, generation) = transaction_identity(request);
+        if fixed || id == 0 || generation != capability.practice.generation {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained control conflicts with competition or generation",
+            ));
+        }
+        let mut region = self.region;
+        let rate = match request {
+            PracticeTransactionRequest::Rate {
+                expected,
+                requested_rate,
+                ..
+            } => {
+                if expected != capability.rate {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "stale retained rate state",
+                    ));
+                }
+                Some(requested_rate)
+            }
+            PracticeTransactionRequest::RestartOriginal { expected, .. } => {
+                if expected != capability.rate {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "stale retained restart state",
+                    ));
+                }
+                region = self.setup.config.initial_region;
+                Some(self.setup.config.initial_rate)
+            }
+            PracticeTransactionRequest::Region(request) => {
+                region = match request.action {
+                    PracticeAction::Scrub { target } => {
+                        PracticeRegion::new(target, self.setup.config.initial_region.end, false)
+                    }
+                    PracticeAction::Loop { start, end } => PracticeRegion::new(start, end, true),
+                    PracticeAction::DisableLoop => {
+                        PracticeRegion::new(self.region.start, self.region.end, false)
+                    }
+                }
+                .map_err(retained_error)?;
+                if region.start < capability.practice.min_target
+                    || region.end > capability.practice.max_target
+                {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "retained region exceeds original bounds",
+                    ));
+                }
+                None
+            }
+        };
+        capability
+            .rate
+            .revision
+            .checked_add(1)
+            .ok_or(StepGameplayError::SequenceOverflow)?;
+        let preparation = rate
+            .map(|rate| {
+                beatkernel::audio::prepare_practice_rate(
+                    self.setup.config.program_id,
+                    self.basis.source_hz(),
+                    &self.setup.geometry,
+                    rate,
+                )
+            })
+            .transpose()
+            .map_err(retained_error)?;
+        if preparation.is_some_and(|preparation| {
+            preparation.to_words()[6] > self.setup.config.limits.max_overlap as u64
+                || preparation.to_words()[8] > self.setup.config.limits.max_events_per_render as u64
+        }) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "rate exceeds retained overlap or event capacity",
+            ));
+        }
+        let reservation = if matches!(request, PracticeTransactionRequest::Rate { .. }) {
+            Some(
+                self.business
+                    .reserve_rate(request, transport, captures)
+                    .map_err(retained_error)?,
+            )
+        } else {
+            None
+        };
+        self.pending = Some(RetainedPending {
+            request,
+            region,
+            rate: reservation,
+            admitted: false,
+        });
+        Ok(StepRetainedControl {
+            request,
+            preparation,
+        })
+    }
+    fn admission(
+        &mut self,
+        kind: StepRetainedAdmissionKind,
+        id: u64,
+        result: Result<(), String>,
+    ) -> Result<(), StepGameplayError> {
+        match kind {
+            StepRetainedAdmissionKind::Transaction => {
+                let pending =
+                    self.pending
+                        .as_mut()
+                        .ok_or(StepGameplayError::InvalidConfiguration(
+                            "no retained transaction awaits admission",
+                        ))?;
+                if transaction_identity(pending.request).0 != id || pending.admitted {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "retained admission identity differs",
+                    ));
+                }
+                match result {
+                    Ok(()) => pending.admitted = true,
+                    Err(reason) => {
+                        self.response = Some(match pending.request {
+                            PracticeTransactionRequest::Region(request) => {
+                                PracticeTransactionReply::Region {
+                                    reply: PracticeReply {
+                                        id: request.id,
+                                        generation: request.generation,
+                                        result: Err(reason),
+                                    },
+                                    rate: Some(self.business.rate_state()),
+                                }
+                            }
+                            PracticeTransactionRequest::Rate { id, generation, .. } => {
+                                PracticeTransactionReply::Rate {
+                                    id,
+                                    generation,
+                                    result: Err(reason),
+                                }
+                            }
+                            PracticeTransactionRequest::RestartOriginal {
+                                id, generation, ..
+                            } => PracticeTransactionReply::RestartOriginal {
+                                id,
+                                generation,
+                                result: Err(reason),
+                            },
+                        });
+                        self.pending = None;
+                    }
+                }
+            }
+            StepRetainedAdmissionKind::Pause => {
+                let pause = self
+                    .pause
+                    .as_mut()
+                    .ok_or(StepGameplayError::InvalidConfiguration(
+                        "no retained pause awaits admission",
+                    ))?;
+                if pause.0 != id || pause.3 {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "retained pause admission differs",
+                    ));
+                }
+                match result {
+                    Ok(()) => pause.3 = true,
+                    Err(reason) => {
+                        self.pause = None;
+                        return Err(retained_error(reason));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn observe_history(
+        &mut self,
+        next: StepRemoteHistorySnapshot,
+        authority: &AudioAuthority,
+    ) -> Result<(), StepGameplayError> {
+        let invalid = || {
+            StepGameplayError::InvalidConfiguration(
+                "retained source history changed or is malformed",
+            )
+        };
+        if next.program_id != self.setup.config.program_id
+            || next.source_hz != self.basis.source_hz()
+            || next.initial_physical != 0
+            || next.initial_playback != 0
+            || next.retained_start > next.pulled_end
+            || next.spans.len() > self.setup.config.source_history_capacity
+            || next.spans.len() > 65_536
+            || next.spans.is_empty() && (next.retained_start != 0 || next.pulled_end != 0)
+            || next
+                .spans
+                .first()
+                .is_some_and(|span| span.physical_start() != next.retained_start)
+            || next.retained_start == 0
+                && next
+                    .spans
+                    .first()
+                    .is_some_and(|span| span.playback_start() != 0)
+            || next.spans.last().is_some_and(|span| {
+                span.physical_end().is_some() || span.physical_start() >= next.pulled_end
+            })
+        {
+            return Err(invalid());
+        }
+        for spans in next.spans.windows(2) {
+            let (left, right) = (spans[0], spans[1]);
+            let playback = match left.state() {
+                SourcePlaybackState::Frozen => Some(left.playback_start()),
+                SourcePlaybackState::Running => right
+                    .physical_start()
+                    .checked_sub(left.physical_start())
+                    .and_then(|delta| left.playback_start().checked_add(delta)),
+            };
+            if left.physical_end() != Some(right.physical_start())
+                || playback != Some(right.playback_start())
+            {
+                return Err(invalid());
+            }
+        }
+        if let Some(old) = &self.history {
+            if next.context_start != old.context_start
+                || next.pulled_end < old.pulled_end
+                || next.retained_start < old.retained_start
+                || next.retirement_revision < old.retirement_revision
+                || (next.retained_start > old.retained_start)
+                    != (next.retirement_revision > old.retirement_revision)
+            {
+                return Err(invalid());
+            }
+            let (mut old_index, mut new_index) = (0, 0);
+            while old_index < old.spans.len() && new_index < next.spans.len() {
+                let old_span = old.spans[old_index];
+                let new_span = next.spans[new_index];
+                let old_end = old_span.physical_end().unwrap_or(old.pulled_end);
+                let new_end = new_span.physical_end().unwrap_or(next.pulled_end);
+                let start = old_span
+                    .physical_start()
+                    .max(new_span.physical_start())
+                    .max(next.retained_start);
+                let end = old_end.min(new_end).min(old.pulled_end);
+                if start < end {
+                    let playback = |span: SourcePlaybackSpan| match span.state() {
+                        SourcePlaybackState::Frozen => Some(span.playback_start()),
+                        SourcePlaybackState::Running => span
+                            .playback_start()
+                            .checked_add(start - span.physical_start()),
+                    };
+                    if old_span.state() != new_span.state()
+                        || playback(old_span) != playback(new_span)
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if old_end <= new_end {
+                    old_index += 1;
+                }
+                if new_end <= old_end {
+                    new_index += 1;
+                }
+            }
+        }
+        if next.retained_start > 0 {
+            let pin = authority.future_input_retention_query()?;
+            if pin
+                .compare_source_time_frame(next.retained_start, next.source_hz)
+                .map_err(retained_source_error)?
+                .is_lt()
+            {
+                return Err(invalid());
+            }
+            if let Some((event, _)) = self.event {
+                if self.event_frame(event) < next.retained_start {
+                    return Err(invalid());
+                }
+            }
+        }
+        self.history = Some(next);
+        Ok(())
+    }
+    fn event_frame(&self, event: WorkletRetainedEnvelope) -> u64 {
+        match event.event {
+            WorkletRetainedEvent::Pause(pause) => pause.physical_frame,
+            WorkletRetainedEvent::Practice(projected) => projected.boundary.source_frame,
+        }
+    }
+    fn retain_event(&mut self, event: WorkletRetainedEnvelope) -> Result<(), StepGameplayError> {
+        let invalid = || {
+            StepGameplayError::InvalidConfiguration(
+                "retained event identity, order or payload differs",
+            )
+        };
+        // Reuse the canonical codec's complete branch/reserved-field validation.
+        if WorkletRetainedEnvelope::from_words(&event.to_words()).map_err(retained_error)? != event
+            || event.program_id != self.setup.config.program_id
+        {
+            return Err(invalid());
+        }
+        if self.event.is_some_and(|(held, _)| held == event) || self.acknowledged == Some(event) {
+            return Ok(());
+        }
+        if self.event.is_some()
+            || event.serial
+                != self
+                    .acknowledged
+                    .map_or(Some(1), |last| last.serial.checked_add(1))
+                    .ok_or(StepGameplayError::SequenceOverflow)?
+        {
+            return Err(invalid());
+        }
+        if self
+            .history
+            .as_ref()
+            .is_some_and(|history| history.context_start != event.context_start)
+        {
+            return Err(invalid());
+        }
+        self.event = Some((event, false));
+        Ok(())
+    }
+    fn acknowledge(&mut self, serial: u64) -> Result<(), StepGameplayError> {
+        match self.event {
+            Some((event, true)) if event.serial == serial => {
+                self.acknowledged = Some(event);
+                self.event = None;
+                Ok(())
+            }
+            None if self
+                .acknowledged
+                .is_some_and(|event| event.serial == serial) =>
+            {
+                Ok(())
+            }
+            _ => Err(StepGameplayError::InvalidConfiguration(
+                "retained event serial differs or has not committed",
+            )),
+        }
+    }
+}
+
+struct FreshStepMember {
+    player: PlayerId,
+    judge: JudgeEngine,
+    gauge: BmsGauge,
+    capture: Option<LiveReplayCapture>,
+    header: PracticeRuntimeHeader,
+}
+#[allow(clippy::too_many_arguments)]
+fn prepare_fresh_step_member(
+    state: &StepRetained,
+    index: usize,
+    source: &beatkernel_bms::BmsChart,
+    profile: beatkernel::judge::JudgeProfile,
+    gauge: &crate::gauge::GaugeProfile,
+    policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
+    input_mode: BmsInputMode,
+    update: &RetainedBoundaryUpdate,
+) -> Result<FreshStepMember, StepGameplayError> {
+    let player = state.headers[index].player;
+    let compiled = source.compile().map_err(retained_error)?;
+    let judge = prepare_judge_with_timing(
+        source,
+        compiled.chart,
+        profile,
+        input_mode,
+        beatkernel_bms::ParseOptions::default().max_objects,
+        policy
+            .and_then(|policy| policy.timing())
+            .map(|timing| timing.profiles()),
+    )
+    .map_err(retained_error)?;
+    if let Some(policy) = policy {
+        policy
+            .validate_timing(&judge, input_mode)
+            .map_err(retained_error)?;
+    }
+    let sound_identity = InputSoundIdentity::from_source(source).map_err(retained_error)?;
+    let speed = ReplaySpeed::new(update.rate.rate).map_err(retained_error)?;
+    let limits = state.headers[index].limits;
+    let header = if let Some(policy) = policy {
+        crate::replay_capture::setup_play_policy_header_with_speed(
+            &judge,
+            state.basis.domain(),
+            limits,
+            update.region.start,
+            state.options.chart_seed,
+            update.end,
+            input_mode,
+            sound_identity,
+            policy,
+            speed,
+        )
+    } else {
+        setup_gauge_header(
+            &judge,
+            state.basis.domain(),
+            limits,
+            update.region.start,
+            state.options.chart_seed,
+            update.end,
+            input_mode,
+            sound_identity,
+            gauge,
+        )
+        .and_then(|header| {
+            crate::replay_speed_policy::wrap_header(header, speed, limits)
+                .map_err(CaptureError::SourceSpeed)
+        })
+    }
+    .map_err(|error| StepGameplayError::Capture {
+        error,
+        report: None,
+    })?;
+    let capture = state.capture_limits[index]
+        .map(|limits| {
+            if let Some(policy) = policy {
+                LiveReplayCapture::new_with_policy_and_speed(
+                    &judge,
+                    state.basis.domain(),
+                    limits,
+                    update.region.start,
+                    state.options.chart_seed,
+                    update.end,
+                    input_mode,
+                    sound_identity,
+                    policy,
+                    speed,
+                )
+            } else {
+                LiveReplayCapture::new_with_gauge_and_speed(
+                    &judge,
+                    state.basis.domain(),
+                    limits,
+                    update.region.start,
+                    state.options.chart_seed,
+                    update.end,
+                    input_mode,
+                    sound_identity,
+                    gauge,
+                    speed,
+                )
+            }
+        })
+        .transpose()
+        .map_err(|error| StepGameplayError::Capture {
+            error,
+            report: None,
+        })?;
+    if capture
+        .as_ref()
+        .is_some_and(|capture| capture.header() != &header)
+    {
+        return Err(StepGameplayError::InvalidConfiguration(
+            "fresh retained capture differs from effective identity",
+        ));
+    }
+    Ok(FreshStepMember {
+        player,
+        judge,
+        gauge: BmsGauge::new(gauge.try_copy().map_err(retained_error)?),
+        capture,
+        header: PracticeRuntimeHeader {
+            player,
+            header,
+            limits,
+        },
+    })
+}
+
+fn take_retired_capture(
+    state: Option<&mut StepRetained>,
+    player: PlayerId,
+) -> Result<Option<Vec<u8>>, StepGameplayError> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let Some(index) = state.retired.iter().position(|(id, _)| *id == player) else {
+        return Ok(None);
+    };
+    let (_, capture) = state.retired.remove(index);
+    capture
+        .into_bytes()
+        .map(Some)
+        .map_err(|error| StepGameplayError::Capture {
+            error,
+            report: None,
+        })
+}
+
+fn prepare_retained_setup(
+    prepared: &PreparedRetainedSection,
+    config: StepGameplayConfig,
+    end: Option<Timestamp>,
+    options: StepRetainedOptions,
+    authority: &AudioAuthority,
+) -> Result<StepRetainedSetup, StepGameplayError> {
+    let selected =
+        crate::section_start::source_at(&prepared.original_source, prepared.section.start)
+            .map_err(retained_error)?
+            .compile()
+            .map_err(retained_error)?;
+    let worklet = options.worklet;
+    beatkernel::audio::PracticeLimits::new(
+        worklet.limits.max_cues,
+        worklet.limits.max_overlap,
+        worklet.limits.max_events_per_render,
+        worklet.limits.control_capacity,
+        worklet.limits.receipt_capacity,
+    )
+    .map_err(retained_error)?;
+    let hz = prepared.prepared.bank.format().sample_rate();
+    let basis = OutputFrameBasis::new(config.output_origin, hz, 0).map_err(retained_error)?;
+    if worklet.program_id == 0
+        || worklet.initial_region.start != prepared.section.start
+        || worklet.initial_region.start.as_nanos() < 0
+        || worklet.initial_region.start >= worklet.initial_region.end
+        || worklet.output_preroll != config.preroll
+        || worklet.initial_rate.numerator() <= 0
+        || worklet.open_end != end.is_none()
+        || end.is_some_and(|end| end != worklet.initial_region.end)
+        || !(1..=65_536).contains(&worklet.source_history_capacity)
+        || !matches!(authority.coordinate_basis(), Some(AudioAuthorityCoordinateBasis::SourceFrame(actual)) if actual == basis)
+            && !matches!(authority.coordinate_basis(), Some(AudioAuthorityCoordinateBasis::SourceCounter { basis: actual, frequency }) if actual == basis && frequency > 0)
+        || selected.chart.objects() != prepared.prepared.compiled.chart.objects()
+    {
+        return Err(StepGameplayError::InvalidConfiguration(
+            "retained setup differs from original section, PCM or authority basis",
+        ));
+    }
+    let cues =
+        crate::bgm::retained_bgm_cues(&prepared.prepared.bgm_commands).map_err(retained_error)?;
+    if cues.len() > worklet.limits.max_cues {
+        return Err(StepGameplayError::InvalidConfiguration(
+            "retained cues exceed configured capacity",
+        ));
+    }
+    let geometry = crate::bgm::retained_rate_geometry(&prepared.prepared.bank, &cues)
+        .map_err(retained_error)?;
+    let initial = beatkernel::audio::prepare_practice_rate(
+        worklet.program_id,
+        hz,
+        &geometry,
+        worklet.initial_rate,
+    )
+    .map_err(retained_error)?
+    .to_words();
+    if initial[6] > worklet.limits.max_overlap as u64
+        || initial[8] > worklet.limits.max_events_per_render as u64
+    {
+        return Err(StepGameplayError::InvalidConfiguration(
+            "initial retained geometry exceeds capacity",
+        ));
+    }
+    Ok(StepRetainedSetup {
+        config: worklet,
+        cues,
+        geometry,
+        sample_count: u32::try_from(prepared.prepared.bank.len())
+            .map_err(|_| StepGameplayError::SequenceOverflow)?,
+    })
+}
+
+fn prepare_retained_completion(
+    prepared: &mut PreparedRetainedSection,
+    config: StepGameplayConfig,
+    policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
+) -> Result<SongCompletion, StepGameplayError> {
+    let full_compiled = prepared.original_source.compile().map_err(retained_error)?;
+    let selected_source = std::mem::replace(
+        &mut prepared.prepared.source,
+        prepared.original_source.clone(),
+    );
+    let selected_compiled = std::mem::replace(&mut prepared.prepared.compiled, full_compiled);
+    let result = SongCompletion::prepare(
+        &prepared.prepared,
+        policy.map_or(config.late_ns, |policy| policy.completion_late().as_nanos()),
+        config.offset_ns,
+        config.preroll.as_nanos(),
+        config.output_origin.domain,
+    )
+    .map_err(retained_error);
+    prepared.prepared.source = selected_source;
+    prepared.prepared.compiled = selected_compiled;
+    result
+}
+
+fn retained_event_query(
+    event: WorkletRetainedEnvelope,
+    hz: u32,
+) -> Result<InterpolatedTargetTime, StepGameplayError> {
+    let (frame, projected) = match event.event {
+        WorkletRetainedEvent::Pause(pause) => (pause.physical_frame, None),
+        WorkletRetainedEvent::Practice(projected) => {
+            (projected.boundary.source_frame, Some(projected))
+        }
+    };
+    let time = TargetTime::from_frames(frame, hz).map_err(retained_error)?;
+    if projected.is_some_and(|projected| {
+        projected.target_rate != hz
+            || projected.target_frame != frame
+            || projected.boundary.target_time != time
+            || projected.origin != crate::worklet_audio::WORKLET_MIXER_ORIGIN
+    }) {
+        return Err(StepGameplayError::InvalidConfiguration(
+            "retained Worklet projection differs from original source grid",
+        ));
+    }
+    InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1).map_err(retained_error)
+}
+
+struct RetainedBoundaryUpdate {
+    receipt: beatkernel::audio::PracticeReceipt,
+    region: PracticeRegion,
+    rate: PracticeRateState,
+    fresh: bool,
+    restart: bool,
+    end: Option<Timestamp>,
+    response: Option<PracticeTransactionReply>,
+}
+impl StepRetained {
+    fn boundary_update(
+        &self,
+        event: PracticeEvent,
+        end: Option<Timestamp>,
+    ) -> Result<RetainedBoundaryUpdate, StepGameplayError> {
+        let invalid = || {
+            StepGameplayError::InvalidConfiguration(
+                "retained boundary differs from actual attempt or request",
+            )
+        };
+        let (receipt, restart) = match event {
+            PracticeEvent::Boundary(receipt) => (receipt, None),
+            PracticeEvent::Restart(restart) => (restart.boundary, Some(restart)),
+            PracticeEvent::Rate(_) => return Err(invalid()),
+        };
+        let mut region = self.region;
+        let mut rate = self.business.rate_state();
+        let mut fresh = false;
+        let mut new_end = end;
+        let mut response = None;
+        if let Some(restart) = restart {
+            let pending = self
+                .pending
+                .as_ref()
+                .filter(|pending| pending.admitted)
+                .ok_or_else(invalid)?;
+            let PracticeTransactionRequest::RestartOriginal {
+                id,
+                generation,
+                expected,
+            } = pending.request
+            else {
+                return Err(invalid());
+            };
+            if receipt.request_id != id
+                || restart.request_revision != expected.revision
+                || restart.previous_rate != rate.rate
+                || restart.requested_rate != self.setup.config.initial_rate
+            {
+                return Err(invalid());
+            }
+            match restart.outcome {
+                PracticeRateOutcome::Applied => {
+                    if generation != self.generation
+                        || expected != rate
+                        || receipt.kind != PracticeBoundaryKind::Requested
+                        || self.generation.checked_add(1) != Some(receipt.generation)
+                        || receipt.iteration != 0
+                        || restart.applied_rate != self.setup.config.initial_rate
+                        || expected.revision.checked_add(1) != Some(restart.applied_revision)
+                    {
+                        return Err(invalid());
+                    }
+                    region = self.setup.config.initial_region;
+                    new_end = if self.setup.config.open_end {
+                        None
+                    } else {
+                        Some(region.end)
+                    };
+                    rate = PracticeRateState {
+                        revision: restart.applied_revision,
+                        rate: restart.applied_rate,
+                    };
+                    fresh = true;
+                }
+                PracticeRateOutcome::Refused(reason) => {
+                    if receipt.kind != PracticeBoundaryKind::ControlRejectedRevision
+                        || receipt.generation != self.generation
+                        || receipt.iteration != self.iteration
+                        || restart.applied_revision != rate.revision
+                        || restart.applied_rate != rate.rate
+                        || generation != self.generation
+                            && reason != beatkernel::audio::PracticeRateRefusal::StaleGeneration
+                    {
+                        return Err(invalid());
+                    }
+                }
+                PracticeRateOutcome::Noop => return Err(invalid()),
+            }
+            response = Some(PracticeTransactionReply::RestartOriginal {
+                id,
+                generation,
+                result: Ok(restart),
+            });
+        } else {
+            match receipt.kind {
+                PracticeBoundaryKind::Started => {
+                    if self.started
+                        || receipt.request_id != 0
+                        || receipt.generation != 1
+                        || receipt.iteration != 0
+                        || receipt.physical_frame != 0
+                        || receipt.playback_frame != 0
+                        || receipt.requested_song_time != region.start
+                        || receipt.applied_song_time
+                            != self.phase.song_at_elapsed(0).map_err(retained_error)?
+                    {
+                        return Err(invalid());
+                    }
+                }
+                PracticeBoundaryKind::Requested
+                | PracticeBoundaryKind::LoopDisabled
+                | PracticeBoundaryKind::ControlRejectedRevision => {
+                    let pending = self
+                        .pending
+                        .as_ref()
+                        .filter(|pending| pending.admitted)
+                        .ok_or_else(invalid)?;
+                    let PracticeTransactionRequest::Region(request) = pending.request else {
+                        return Err(invalid());
+                    };
+                    if !self.started
+                        || receipt.request_id != request.id
+                        || request.generation > self.generation
+                    {
+                        return Err(invalid());
+                    }
+                    if receipt.kind == PracticeBoundaryKind::Requested {
+                        if request.action == PracticeAction::DisableLoop
+                            || receipt.generation
+                                != self
+                                    .generation
+                                    .checked_add(1)
+                                    .ok_or(StepGameplayError::SequenceOverflow)?
+                            || receipt.iteration != 0
+                        {
+                            return Err(invalid());
+                        }
+                        region = pending.region;
+                        new_end = Some(region.end);
+                        fresh = true;
+                        rate.revision = rate
+                            .revision
+                            .checked_add(1)
+                            .ok_or(StepGameplayError::SequenceOverflow)?;
+                    } else {
+                        if receipt.generation != self.generation
+                            || receipt.iteration != self.iteration
+                        {
+                            return Err(invalid());
+                        }
+                        if receipt.kind == PracticeBoundaryKind::LoopDisabled {
+                            if request.action != PracticeAction::DisableLoop {
+                                return Err(invalid());
+                            }
+                            region.repeat = false;
+                            rate.revision = rate
+                                .revision
+                                .checked_add(1)
+                                .ok_or(StepGameplayError::SequenceOverflow)?;
+                        }
+                    }
+                    response = Some(PracticeTransactionReply::Region {
+                        reply: PracticeReply {
+                            id: request.id,
+                            generation: request.generation,
+                            result: if receipt.kind == PracticeBoundaryKind::ControlRejectedRevision
+                            {
+                                Err("actual output refused stale region revision".into())
+                            } else {
+                                Ok(PracticeApplied {
+                                    generation: receipt.generation,
+                                    physical_frame: receipt.physical_frame,
+                                    playback_frame: receipt.playback_frame,
+                                    requested_target: receipt.requested_song_time,
+                                    applied_target: receipt.applied_song_time,
+                                })
+                            },
+                        },
+                        rate: Some(rate),
+                    });
+                }
+                PracticeBoundaryKind::Looped | PracticeBoundaryKind::Ended => {
+                    if !self.started
+                        || self.ended
+                        || receipt.request_id != 0
+                        || self.generation.checked_add(1) != Some(receipt.generation)
+                        || self.iteration.checked_add(1) != Some(receipt.iteration)
+                        || (receipt.kind == PracticeBoundaryKind::Looped) != region.repeat
+                    {
+                        return Err(invalid());
+                    }
+                    fresh = receipt.kind == PracticeBoundaryKind::Looped;
+                }
+            }
+        }
+        if fresh {
+            if receipt.requested_song_time != region.start
+                || receipt.applied_song_time != region.start
+                || receipt.correction_nanos != 0
+            {
+                return Err(invalid());
+            }
+        } else if receipt.kind == PracticeBoundaryKind::Started {
+            if i128::from(receipt.applied_song_time.as_nanos())
+                - i128::from(receipt.requested_song_time.as_nanos())
+                != i128::from(receipt.correction_nanos)
+            {
+                return Err(invalid());
+            }
+        } else if receipt.kind == PracticeBoundaryKind::Ended {
+            if receipt.requested_song_time != region.end
+                || receipt.applied_song_time != region.end
+                || receipt.correction_nanos != 0
+            {
+                return Err(invalid());
+            }
+        } else if receipt.kind != PracticeBoundaryKind::ControlRejectedRevision
+            && (receipt.requested_song_time != receipt.applied_song_time
+                || receipt.correction_nanos != 0)
+        {
+            return Err(invalid());
+        }
+        Ok(RetainedBoundaryUpdate {
+            receipt,
+            region,
+            rate,
+            fresh,
+            restart: restart.is_some_and(|event| event.outcome == PracticeRateOutcome::Applied),
+            end: new_end,
+            response,
+        })
+    }
+}
 
 /// Explicit mapping and bounded control-side resources for a fresh solo run.
 #[derive(Clone, Copy, Debug)]
@@ -415,6 +1608,7 @@ pub struct StepGameplay {
     acknowledged_commands: u64,
     acknowledged_stops: OwnedStopEvidence,
     failed: bool,
+    retained: Option<StepRetained>,
 }
 
 impl fmt::Debug for StepGameplay {
@@ -437,6 +1631,813 @@ impl fmt::Debug for StepGameplay {
 }
 
 impl StepGameplay {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_retained_audio_section(
+        mut prepared: PreparedRetainedSection,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+        retained: StepRetainedOptions,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        let setup = prepare_retained_setup(&prepared, config, end, retained, &authority)?;
+        let completion = prepare_retained_completion(&mut prepared, config, policy.as_ref())?;
+        let start = prepared.section.start;
+        let (mut owner, bank) = Self::build_mode(
+            prepared.prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            policy,
+            None,
+            true,
+        )?;
+        owner.live_speed = Some(
+            LiveSpeedSetup::new(
+                start,
+                config.preroll,
+                ReplaySpeed::new(retained.worklet.initial_rate).map_err(retained_error)?,
+                end,
+            )
+            .map_err(retained_error)?,
+        );
+        let headers = vec![PracticeRuntimeHeader {
+            player: PlayerId(1),
+            header: owner.recording_header(retained.identity_limits, retained.chart_seed)?,
+            limits: retained.identity_limits,
+        }];
+        owner.install_retained(
+            prepared.original_source,
+            retained,
+            setup,
+            headers,
+            completion,
+        )?;
+        Ok((owner, bank))
+    }
+    fn install_retained(
+        &mut self,
+        original: beatkernel_bms::BmsChart,
+        options: StepRetainedOptions,
+        setup: StepRetainedSetup,
+        headers: Vec<PracticeRuntimeHeader>,
+        completion_template: SongCompletion,
+    ) -> Result<(), StepGameplayError> {
+        let basis = OutputPhaseBasis::new(
+            self.logical_domain,
+            options.worklet.program_id,
+            1,
+            0,
+            self.sample_rate,
+        )
+        .map_err(retained_error)?;
+        let logical = self
+            .authority
+            .as_ref()
+            .expect("retained construction requires authority")
+            .epoch()
+            .logical_origin;
+        let phase = PositiveRatePhase::new(
+            self.start,
+            self.preroll,
+            options.worklet.initial_rate,
+            self.end,
+        )
+        .map_err(retained_error)?;
+        let transport = Transport::new_with_runtime_output_phase(
+            basis,
+            logical,
+            self.start,
+            self.preroll,
+            options.worklet.initial_rate,
+            self.end,
+        )
+        .map_err(retained_error)?;
+        let business = RuntimePractice::new(headers.clone(), &[], phase).map_err(retained_error)?;
+        let source =
+            crate::section_start::source_at(&original, self.start).map_err(retained_error)?;
+        let completion = completion_template
+            .prepare_practice(&source, self.runtime.judge())
+            .map_err(retained_error)?;
+        let mut retired = Vec::new();
+        retired
+            .try_reserve_exact(headers.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        *self.runtime.transport_mut() = transport;
+        match &mut self.runtime {
+            RuntimeOwner::Solo(runtime) => runtime.set_audio_scope(CommandScope(1)),
+            RuntimeOwner::Local { group, .. } => group.set_audio_scope(CommandScope(1)),
+        }
+        self.song = phase.song_at_elapsed(0).map_err(retained_error)?;
+        self.completion = Some(completion);
+        let capture_limits = vec![None; headers.len()];
+        self.retained = Some(StepRetained {
+            setup,
+            original,
+            options,
+            business,
+            phase,
+            headers,
+            capture_limits,
+            completion_template,
+            basis,
+            region: options.worklet.initial_region,
+            generation: 1,
+            iteration: 0,
+            started: false,
+            ended: false,
+            paused: false,
+            pending: None,
+            pause: None,
+            history: None,
+            event: None,
+            acknowledged: None,
+            response: None,
+            retired,
+        });
+        Ok(())
+    }
+    pub fn retained_setup(&self) -> Option<&StepRetainedSetup> {
+        self.retained.as_ref().map(|state| &state.setup)
+    }
+    pub fn configure_retained_limits(
+        &mut self,
+        limits: beatkernel::audio::PracticeLimits,
+        source_history_capacity: usize,
+    ) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        let state = self
+            .retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?;
+        if self.activated
+            || self.started
+            || self.capture_configured
+            || state.capture_limits.iter().any(Option::is_some)
+            || state.started
+            || state.pending.is_some()
+            || state.pause.is_some()
+            || state.event.is_some()
+            || state.history.is_some()
+            || self.authority.as_ref().is_some_and(|authority| {
+                authority.latest_observation().is_some() || authority.acquired_prefix().is_some()
+            })
+            || !(1..=65_536).contains(&source_history_capacity)
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained limits require pristine cold setup",
+            ));
+        }
+        beatkernel::audio::PracticeLimits::new(
+            limits.max_cues,
+            limits.max_overlap,
+            limits.max_events_per_render,
+            limits.control_capacity,
+            limits.receipt_capacity,
+        )
+        .map_err(retained_error)?;
+        let preparation = beatkernel::audio::prepare_practice_rate(
+            state.setup.config.program_id,
+            self.sample_rate,
+            &state.setup.geometry,
+            state.setup.config.initial_rate,
+        )
+        .map_err(retained_error)?
+        .to_words();
+        if state.setup.cues.len() > limits.max_cues
+            || preparation[6] > limits.max_overlap as u64
+            || preparation[8] > limits.max_events_per_render as u64
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained initial geometry exceeds agreed audio capacity",
+            ));
+        }
+        state.setup.config.limits = limits;
+        state.setup.config.source_history_capacity = source_history_capacity;
+        state.options.worklet.limits = limits;
+        state.options.worklet.source_history_capacity = source_history_capacity;
+        Ok(())
+    }
+    pub fn retained_capability(&self) -> Option<PracticeTransactionCapability> {
+        if self.failed {
+            None
+        } else {
+            self.retained.as_ref().and_then(StepRetained::capability)
+        }
+    }
+    pub fn effective_header(&self, player: PlayerId) -> Option<&ReplayHeader> {
+        self.retained.as_ref()?.business.effective_header(player)
+    }
+    pub fn prepare_retained_transaction(
+        &mut self,
+        request: PracticeTransactionRequest,
+        fixed_competition: bool,
+    ) -> Result<StepRetainedControl, StepGameplayError> {
+        self.ensure_usable()?;
+        self.ensure_solo()?;
+        let state = self
+            .retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?;
+        state.prepare(
+            request,
+            fixed_competition,
+            self.runtime.transport_mut(),
+            &mut [(PlayerId(1), &mut self.capture)],
+        )
+    }
+    pub fn prepare_retained_pause(
+        &mut self,
+        id: u64,
+        generation: u64,
+        paused: bool,
+    ) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        let state = self
+            .retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?;
+        if id == 0
+            || !state.started
+            || state.ended
+            || generation != state.generation
+            || state.pause.is_some()
+            || state.event.is_some()
+            || state.pending.is_some() && (paused || !state.paused)
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained pause is busy or stale",
+            ));
+        }
+        self.runtime
+            .transport_mut()
+            .try_reserve_output_phase_controls(1)
+            .map_err(retained_error)?;
+        state.pause = Some((id, generation, paused, false));
+        Ok(())
+    }
+    pub fn acknowledge_retained_admission(
+        &mut self,
+        kind: StepRetainedAdmissionKind,
+        id: u64,
+        result: Result<(), String>,
+    ) -> Result<(), StepGameplayError> {
+        self.retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?
+            .admission(kind, id, result)
+    }
+    pub fn observe_retained_history(
+        &mut self,
+        snapshot: StepRemoteHistorySnapshot,
+    ) -> Result<(), StepGameplayError> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "audio authority is unavailable",
+            ))?;
+        self.retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?
+            .observe_history(snapshot, authority)
+    }
+    pub fn retain_output_event(
+        &mut self,
+        event: WorkletRetainedEnvelope,
+    ) -> Result<(), StepGameplayError> {
+        self.retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?
+            .retain_event(event)
+    }
+    pub fn take_retained_response(&mut self) -> Option<PracticeTransactionReply> {
+        self.retained.as_mut()?.response.take()
+    }
+    pub fn acknowledge_retained_event(&mut self, serial: u64) -> Result<(), StepGameplayError> {
+        self.retained
+            .as_mut()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?
+            .acknowledge(serial)
+    }
+    pub fn retained_history_pin(&self) -> Result<Option<u64>, StepGameplayError> {
+        let Some(state) = &self.retained else {
+            return Ok(None);
+        };
+        let Some(history) = &state.history else {
+            return Ok(Some(0));
+        };
+        let query = self
+            .authority
+            .as_ref()
+            .expect("retained authority")
+            .future_input_retention_query()?;
+        let mut low = 0u64;
+        let mut high = history.pulled_end;
+        while low < high {
+            let mid = low + (high - low) / 2 + 1;
+            if query
+                .compare_source_time_frame(mid, state.basis.source_hz())
+                .map_err(retained_source_error)?
+                .is_lt()
+            {
+                high = mid - 1;
+            } else {
+                low = mid;
+            }
+        }
+        if let Some((event, _)) = state.event {
+            low = low.min(state.event_frame(event));
+        }
+        Ok(Some(low))
+    }
+    pub fn take_retired_replay(
+        &mut self,
+        player: PlayerId,
+    ) -> Result<Option<Vec<u8>>, StepGameplayError> {
+        self.ensure_solo()?;
+        if player != PlayerId(1) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "unknown solo player",
+            ));
+        }
+        take_retired_capture(self.retained.as_mut(), player)
+    }
+    pub fn observe_audio_coordinate(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+        coordinate: crate::native_output_coordinate::NativeOutputCoordinate,
+    ) -> Result<ObservationAdmission, StepGameplayError> {
+        self.ensure_audio()?;
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .observe_coordinate(epoch, pair, coordinate)
+            .map_err(Into::into)
+    }
+    fn retained_input(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<crate::audio_authority::PreparedCoordinateInput>, StepGameplayError> {
+        self.validate_audio_operation(now, audio_at, None)?;
+        loop {
+            let state = self.retained.as_ref().expect("retained branch");
+            let authority = self.authority.as_mut().expect("audio mode checked");
+            let Some(prefix) = authority.acquired_prefix() else {
+                return Ok(None);
+            };
+            let Some(event) = merger
+                .peek_ready(prefix)
+                .map_err(AudioAuthorityError::from)?
+            else {
+                return Ok(None);
+            };
+            let Some(prepared) = authority.prepare_coordinate_input(
+                ClockPoint {
+                    domain: event.meta().clock_domain,
+                    timestamp: event.meta().timestamp,
+                },
+                now,
+            )?
+            else {
+                return Ok(None);
+            };
+            if prepared.is_before_origin() {
+                let count = self
+                    .pre_origin_inputs
+                    .checked_add(1)
+                    .ok_or(StepGameplayError::SequenceOverflow)?;
+                authority.commit_discarded_coordinate_input(prepared, now)?;
+                merger
+                    .pop_ready(prefix)
+                    .map_err(AudioAuthorityError::from)?;
+                self.pre_origin_inputs = count;
+                continue;
+            }
+            if !state.started {
+                return Ok(None);
+            }
+            if !state.permits_query(prepared.query())? {
+                return Ok(None);
+            }
+            state.phase_point(prepared.output(), prepared.query())?;
+            return Ok(Some(prepared));
+        }
+    }
+    fn process_next_retained_input(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        self.ensure_solo()?;
+        self.validate_audio_operation(now, audio_at, position)?;
+        loop {
+            let Some(prepared) = self.retained_input(merger, now, audio_at)? else {
+                return Ok(None);
+            };
+            let state = self.retained.as_ref().expect("retained branch");
+            let phase = state.phase_point(prepared.output(), prepared.query())?;
+            let prefix = self
+                .authority
+                .as_ref()
+                .expect("audio mode")
+                .acquired_prefix()
+                .expect("prepared acquired input");
+            let position = position.or(merger
+                .peek_ready_position(prefix)
+                .map_err(AudioAuthorityError::from)?);
+            let event = merger
+                .pop_ready(prefix)
+                .map_err(AudioAuthorityError::from)?
+                .expect("prepared earliest input");
+            if state.paused || state.ended {
+                self.authority
+                    .as_mut()
+                    .expect("audio mode")
+                    .commit_coordinate_input(prepared, now)?;
+                continue;
+            }
+            self.started = true;
+            let result = match position {
+                Some(position) => self.runtime.solo_mut()?.process_input_at_output_phase(
+                    event,
+                    position,
+                    prepared.mapper(),
+                    audio_at,
+                    phase,
+                ),
+                None => self.runtime.solo_mut()?.process_input_output_phase(
+                    event,
+                    prepared.mapper(),
+                    audio_at,
+                    phase,
+                ),
+            };
+            if result.is_ok() {
+                self.authority
+                    .as_mut()
+                    .expect("audio mode")
+                    .commit_coordinate_input(prepared, now)?;
+            }
+            return self.observe(result).map(Some);
+        }
+    }
+    fn advance_retained_frontier(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        self.ensure_solo()?;
+        self.validate_audio_operation(now, audio_at, None)?;
+        let state = self.retained.as_ref().expect("retained branch");
+        if !state.started {
+            return Ok(None);
+        }
+        let authority = self.authority.as_mut().expect("audio mode");
+        if state.paused || state.ended {
+            if let Some(frontier) = authority.prepare_coordinate_held_frontier(now, merger)? {
+                authority.commit_coordinate_held_frontier(frontier, now, merger)?;
+            }
+            return Ok(None);
+        }
+        let Some(prepared) = authority.prepare_coordinate_frontier(now, merger)? else {
+            return Ok(None);
+        };
+        if !state.permits_query(prepared.query())? {
+            return Ok(None);
+        }
+        let phase = state.phase_point(prepared.output(), prepared.query())?;
+        let Some(output) = prepared.advance() else {
+            authority.commit_coordinate_frontier(prepared, now, merger)?;
+            return Ok(None);
+        };
+        self.started = true;
+        let result = self.runtime.solo_mut()?.advance_to_output_phase(
+            output,
+            &AudioDomains,
+            audio_at,
+            phase,
+        );
+        if result.is_ok() {
+            self.authority
+                .as_mut()
+                .expect("audio mode")
+                .commit_coordinate_frontier(prepared, now, merger)?;
+            self.last_operation = Some(output);
+        }
+        self.observe(result).map(Some)
+    }
+    fn retained_cut(
+        &self,
+        merger: &InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<
+        Option<(
+            WorkletRetainedEnvelope,
+            crate::audio_authority::PreparedCoordinateControlCutoff,
+            OutputPhasePoint,
+        )>,
+        StepGameplayError,
+    > {
+        self.validate_audio_operation(now, audio_at, None)?;
+        let state = self
+            .retained
+            .as_ref()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "retained practice is unavailable",
+            ))?;
+        let Some((event, false)) = state.event else {
+            return Ok(None);
+        };
+        let Some(history) = &state.history else {
+            return Ok(None);
+        };
+        if history.context_start != event.context_start {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained event belongs to another AudioContext arm",
+            ));
+        }
+        // Worklet projections retain their own relative Mixer origin. Only the
+        // actual coordinate authority joins this exact physical duration to the
+        // caller's distinct raw-output and normalized logical clock origins.
+        let query = retained_event_query(event, self.sample_rate)?;
+        let span = history.span_at(query)?;
+        let frame = state.event_frame(event);
+        let playback = match span.state() {
+            SourcePlaybackState::Frozen => Some(span.playback_start()),
+            SourcePlaybackState::Running => span.playback_start().checked_add(
+                frame
+                    .checked_sub(span.physical_start())
+                    .ok_or(StepGameplayError::SequenceOverflow)?,
+            ),
+        };
+        let actual_playback = match event.event {
+            WorkletRetainedEvent::Pause(pause) => pause.playback_frame,
+            WorkletRetainedEvent::Practice(projected) => match projected.event {
+                PracticeEvent::Boundary(receipt) => receipt.playback_frame,
+                PracticeEvent::Rate(rate) => rate.playback_frame,
+                PracticeEvent::Restart(restart) => restart.boundary.playback_frame,
+            },
+        };
+        if playback != Some(actual_playback) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "retained event playback differs from actual source span",
+            ));
+        }
+        let authority = self.authority.as_ref().expect("retained authority");
+        let Some(host) = authority.presented_coordinate_boundary_host(&query, now)? else {
+            return Ok(None);
+        };
+        let resume = matches!(event.event, WorkletRetainedEvent::Pause(pause) if !pause.paused)
+            || matches!(event.event, WorkletRetainedEvent::Practice(projected) if matches!(projected.event, PracticeEvent::Boundary(receipt) if receipt.kind == PracticeBoundaryKind::Started));
+        let cutoff = if resume {
+            authority.prepare_coordinate_resume_control_cutoff(
+                authority.epoch().id,
+                query,
+                host,
+                now,
+                merger,
+            )?
+        } else {
+            authority.prepare_coordinate_control_cutoff(
+                authority.epoch().id,
+                query,
+                host,
+                now,
+                merger,
+            )?
+        };
+        let Some(cutoff) = cutoff else {
+            return Ok(None);
+        };
+        let point = state.phase_point(cutoff.output(), query)?;
+        authority.validate_coordinate_control_cutoff(&cutoff, now, merger)?;
+        Ok(Some((event, cutoff, point)))
+    }
+    pub fn service_retained_event(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<u64>, StepGameplayError> {
+        self.ensure_solo()?;
+        if let Some((event, true)) = self.retained.as_ref().and_then(|state| state.event) {
+            return Ok(Some(event.serial));
+        }
+        let Some((event, cutoff, point)) = self.retained_cut(merger, now, audio_at)? else {
+            return Ok(None);
+        };
+        match event.event {
+            WorkletRetainedEvent::Practice(projected)
+                if !matches!(projected.event, PracticeEvent::Rate(_)) =>
+            {
+                let update = self
+                    .retained
+                    .as_ref()
+                    .expect("retained branch")
+                    .boundary_update(projected.event, self.end)?;
+                if matches!(
+                    update.receipt.kind,
+                    PracticeBoundaryKind::Looped | PracticeBoundaryKind::Ended
+                ) && self
+                    .runtime
+                    .transport_mut()
+                    .position_at_output_phase(point)
+                    .map_err(retained_error)?
+                    != update.region.end
+                {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "actual retained endpoint differs from exact active phase",
+                    ));
+                }
+                if update.fresh {
+                    if !self
+                        .retained
+                        .as_ref()
+                        .expect("retained branch")
+                        .retired
+                        .is_empty()
+                    {
+                        return Ok(None);
+                    }
+                    self.install_retained_solo_attempt(&update, cutoff.output())?;
+                } else {
+                    if update.receipt.kind == PracticeBoundaryKind::Ended {
+                        let result = self.runtime.solo_mut()?.advance_to_output_phase(
+                            cutoff.output(),
+                            &AudioDomains,
+                            audio_at,
+                            point,
+                        );
+                        self.observe(result)?;
+                    }
+                    self.retained
+                        .as_mut()
+                        .expect("retained branch")
+                        .commit_boundary(&update)?;
+                    if update.receipt.kind == PracticeBoundaryKind::Ended {
+                        self.runtime.seal_gameplay_audio();
+                    }
+                }
+                self.started = true;
+            }
+            _ => {
+                let state = self.retained.as_mut().expect("retained branch");
+                state.commit_control(
+                    event,
+                    point,
+                    self.runtime.transport_mut(),
+                    &mut [(PlayerId(1), &mut self.capture)],
+                )?;
+            }
+        }
+        self.authority
+            .as_mut()
+            .expect("retained authority")
+            .commit_coordinate_control_cutoff(cutoff, now, merger)
+            .expect("private preflight remains unchanged during runtime commit");
+        self.retained.as_mut().expect("retained branch").event = Some((event, true));
+        self.last_operation = Some(cutoff.output());
+        Ok(Some(event.serial))
+    }
+    fn install_retained_solo_attempt(
+        &mut self,
+        update: &RetainedBoundaryUpdate,
+        logical: ClockPoint,
+    ) -> Result<(), StepGameplayError> {
+        let state = self.retained.as_ref().expect("retained branch");
+        let source = crate::section_start::source_at(&state.original, update.region.start)
+            .map_err(retained_error)?;
+        let fresh = prepare_fresh_step_member(
+            state,
+            0,
+            &source,
+            self.runtime.judge().profile().clone(),
+            self.gauge.profile(),
+            self.policy.as_ref(),
+            self.input_mode,
+            update,
+        )?;
+        let basis = OutputPhaseBasis::new(
+            self.logical_domain,
+            state.basis.owner(),
+            update.receipt.generation,
+            update.receipt.playback_frame,
+            self.sample_rate,
+        )
+        .map_err(retained_error)?;
+        let phase = PositiveRatePhase::new(
+            update.region.start,
+            Duration::ZERO,
+            update.rate.rate,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let transport = Transport::new_with_runtime_output_phase(
+            basis,
+            logical,
+            update.region.start,
+            Duration::ZERO,
+            update.rate.rate,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let headers = vec![fresh.header];
+        let captured = if fresh.capture.is_some() {
+            vec![PlayerId(1)]
+        } else {
+            Vec::new()
+        };
+        let business = state
+            .business
+            .candidate_for_attempt(headers.clone(), &captured, phase, update.rate)
+            .map_err(retained_error)?;
+        let setup = LiveSpeedSetup::new(
+            update.region.start,
+            Duration::ZERO,
+            ReplaySpeed::new(update.rate.rate).map_err(retained_error)?,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let sound_identity = InputSoundIdentity::from_source(&source).map_err(retained_error)?;
+        let completion = state
+            .completion_template
+            .prepare_practice(&source, &fresh.judge)
+            .map_err(retained_error)?;
+        let original_rate = state.setup.config.initial_rate;
+        if update.restart {
+            self.runtime
+                .solo_mut()?
+                .replace_practice_state_with_runtime_restart(
+                    fresh.judge,
+                    transport,
+                    update.end,
+                    CommandScope(update.receipt.generation),
+                    original_rate,
+                )
+        } else {
+            self.runtime
+                .solo_mut()?
+                .replace_practice_state_with_output_phase(
+                    fresh.judge,
+                    transport,
+                    update.end,
+                    CommandScope(update.receipt.generation),
+                )
+        }
+        .map_err(retained_error)?;
+        let state = self.retained.as_mut().expect("retained branch");
+        if let Some(old) = self.capture.take() {
+            state.retired.push((PlayerId(1), old));
+        }
+        self.capture = fresh.capture;
+        self.gauge = fresh.gauge;
+        self.score = ScoreSummary::default();
+        self.mine_damage = MineDamageSummary::default();
+        self.completed_result = None;
+        self.live_terminal = false;
+        self.start = update.region.start;
+        self.end = update.end;
+        self.preroll = Duration::ZERO;
+        self.live_speed = Some(setup);
+        self.input_sound_identity = sound_identity;
+        self.completion = Some(completion);
+        self.song = update.region.start;
+        state.business = business;
+        state.phase = phase;
+        state.basis = basis;
+        state.headers = headers;
+        state
+            .commit_boundary(update)
+            .expect("fresh candidate already contains the actual revision");
+        Ok(())
+    }
     pub fn new(
         prepared: PreparedBms,
         config: StepGameplayConfig,
@@ -695,6 +2696,23 @@ impl StepGameplay {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        input: InputSetup,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: Option<AudioAuthority>,
+        policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+        speed: Option<ReplaySpeed>,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build_mode(
+            prepared, config, input, start, end, input_mode, authority, policy, speed, false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_mode(
         mut prepared: PreparedBms,
         config: StepGameplayConfig,
         input: InputSetup,
@@ -704,6 +2722,7 @@ impl StepGameplay {
         authority: Option<AudioAuthority>,
         policy: Option<crate::play_policy::ResolvedPlayPolicy>,
         speed: Option<ReplaySpeed>,
+        retained: bool,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
         let logical_origin = if let Some(authority) = &authority {
             let epoch = authority.epoch();
@@ -766,10 +2785,11 @@ impl StepGameplay {
                 .objects()
                 .iter()
                 .any(|object| object.time.start < start)
-                || prepared
-                    .bgm_commands
-                    .iter()
-                    .any(|command| command.at() < start))
+                || (!retained
+                    && prepared
+                        .bgm_commands
+                        .iter()
+                        .any(|command| command.at() < start)))
         {
             return Err(StepGameplayError::InvalidConfiguration(
                 "section contains an earlier object or unselected BGM target",
@@ -835,7 +2855,9 @@ impl StepGameplay {
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?
         };
         let sample_rate = prepared.bank.format().sample_rate();
-        let playback_end_frame = if let Some(setup) = live_speed {
+        let playback_end_frame = if retained {
+            None
+        } else if let Some(setup) = live_speed {
             setup
                 .playback_end_frame(sample_rate)
                 .map_err(|error| StepGameplayError::Setup(error.to_string()))?
@@ -860,7 +2882,7 @@ impl StepGameplay {
                 presented: None,
             })?;
         }
-        let completion = if end.is_none() {
+        let completion = if end.is_none() && !retained {
             Some(
                 SongCompletion::prepare(
                     &prepared,
@@ -984,6 +3006,11 @@ impl StepGameplay {
                 }
             }
         };
+        // Original cues have already reserved the shared voice namespace above.
+        // The retained Worklet is their sole scheduler.
+        if retained {
+            prepared.bgm_commands.clear();
+        }
         let bgm_count = prepared.bgm_commands.len();
         if let Some(end) = end {
             for command in &prepared.bgm_commands {
@@ -1265,6 +3292,7 @@ impl StepGameplay {
             acknowledged_commands: 0,
             acknowledged_stops: OwnedStopEvidence::default(),
             failed: false,
+            retained: None,
         };
         owner.feed_audio(0, config.bgm_pending)?;
         Ok((owner, prepared.bank))
@@ -1409,7 +3437,45 @@ impl StepGameplay {
                 "gauge differs from immutable selected policy",
             ));
         }
+        let replacement = if let Some(state) = &self.retained {
+            let mut headers = state.headers.clone();
+            if self.policy.is_none() {
+                headers[0].header = setup_gauge_header(
+                    self.runtime.judge(),
+                    self.logical_domain,
+                    state.options.identity_limits,
+                    self.start,
+                    state.options.chart_seed,
+                    self.end,
+                    self.input_mode,
+                    self.input_sound_identity,
+                    &profile,
+                )
+                .and_then(|header| {
+                    crate::replay_speed_policy::wrap_header(
+                        header,
+                        state.business.current_speed(),
+                        state.options.identity_limits,
+                    )
+                    .map_err(CaptureError::SourceSpeed)
+                })
+                .map_err(|error| StepGameplayError::Capture {
+                    error,
+                    report: None,
+                })?;
+            }
+            let business =
+                RuntimePractice::new(headers.clone(), &[], state.phase).map_err(retained_error)?;
+            Some((headers, business))
+        } else {
+            None
+        };
         self.gauge = BmsGauge::new(profile);
+        if let Some((headers, business)) = replacement {
+            let state = self.retained.as_mut().expect("retained setup checked");
+            state.headers = headers;
+            state.business = business;
+        }
         Ok(())
     }
     /// Opt in while the original judge is pristine, using the resolved chart
@@ -1459,8 +3525,28 @@ impl StepGameplay {
             error,
             report: None,
         })?;
+        let business = if let Some(state) = &self.retained {
+            if state.pending.is_some()
+                || state.business.effective_header(PlayerId(1)) != Some(capture.header())
+            {
+                return Err(StepGameplayError::InvalidConfiguration(
+                    "capture differs from retained effective identity",
+                ));
+            }
+            Some(
+                RuntimePractice::new(state.headers.clone(), &[PlayerId(1)], state.phase)
+                    .map_err(retained_error)?,
+            )
+        } else {
+            None
+        };
         self.capture = Some(capture);
         self.capture_configured = true;
+        if let Some(business) = business {
+            let state = self.retained.as_mut().expect("checked retained mode");
+            state.business = business;
+            state.capture_limits[0] = Some(limits);
+        }
         Ok(())
     }
 
@@ -1559,6 +3645,9 @@ impl StepGameplay {
         now: ClockPoint,
         audio_at: ClockPoint,
     ) -> Result<Option<PreparedInput>, StepGameplayError> {
+        if self.retained.is_some() {
+            return Ok(None);
+        }
         loop {
             let Some(prepared) = self.prepare_audio_input(merger, now, audio_at, None)? else {
                 return Ok(None);
@@ -1612,6 +3701,9 @@ impl StepGameplay {
         audio_at: ClockPoint,
         position: Option<Position2>,
     ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        if self.retained.is_some() {
+            return self.process_next_retained_input(merger, now, audio_at, position);
+        }
         self.ensure_solo()?;
         self.validate_audio_operation(now, audio_at, position)?;
         let before = self.pre_origin_inputs;
@@ -1663,6 +3755,9 @@ impl StepGameplay {
         now: ClockPoint,
         audio_at: ClockPoint,
     ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        if self.retained.is_some() {
+            return self.advance_retained_frontier(merger, now, audio_at);
+        }
         self.ensure_solo()?;
         self.validate_audio_operation(now, audio_at, None)?;
         let Some(prepared) = self
@@ -2124,7 +4219,11 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepGameplayError> {
         self.ensure_solo()?;
-        if self.live_speed.is_some() && self.end.is_some() && !self.live_terminal {
+        if self.retained.is_none()
+            && self.live_speed.is_some()
+            && self.end.is_some()
+            && !self.live_terminal
+        {
             self.observe_completion_ready(rendered, presented, false, false)?;
             if let Some(frontier) = self.prepare_live_terminal()? {
                 let audio_at = ClockPoint {
@@ -2268,6 +4367,45 @@ impl StepGameplay {
         if let Some(point) = normalized {
             self.last_presented = Some(point.timestamp);
         }
+        if let Some(state) = &self.retained {
+            let terminal = state.ended;
+            let cues_finished = state
+                .setup
+                .cues
+                .last()
+                .is_none_or(|cue| self.song >= cue.at);
+            let ready = state.started
+                && !state.paused
+                && state.pending.is_none()
+                && state.pause.is_none()
+                && state.event.is_none()
+                && members_ready
+                && commands_resolved
+                && (terminal || self.end.is_none() && (cues_finished || numeric_terminal))
+                && actual.is_some_and(|report| {
+                    report.counters.commands_consumed == self.acknowledged_commands
+                        && report.counters.settled_commands() == Some(self.acknowledged_commands)
+                });
+            let completion = self
+                .completion
+                .as_mut()
+                .expect("retained completion is prepared from original assets");
+            let report = rendered.or(actual);
+            return if terminal || numeric_terminal {
+                completion.observe_terminal_ready(ready, bgm, report, normalized)
+            } else {
+                if !ready {
+                    completion.reset_drain();
+                    return Ok(false);
+                }
+                completion.observe(self.runtime.judge(), self.song, bgm, report, normalized)
+            }
+            .map_err(|error| StepGameplayError::Completion {
+                error,
+                rendered,
+                presented,
+            });
+        }
         if let (Some(end), Some(frame)) = (self.end, self.playback_end_frame) {
             // The configured endpoint's ceiling timestamp was checked during
             // setup. Presentation remains the real uncapped output observation.
@@ -2350,7 +4488,7 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<Option<ClockPoint>, StepGameplayError> {
         self.ensure_usable()?;
-        let validated = validate_section_output_evidence_with_stops(
+        let validated = validate_output_evidence_mode(
             self.output_origin,
             self.sample_rate,
             self.last_render,
@@ -2359,6 +4497,7 @@ impl StepGameplay {
             presented,
             self.playback_end_frame,
             &self.acknowledged_stops,
+            self.retained.is_some(),
         )
         .and_then(|normalized| {
             if self.playback_end_frame.is_some() {
@@ -2491,7 +4630,7 @@ impl StepGameplay {
             self.failed = true;
             error
         })?;
-        if self.playback_end_frame.is_some() {
+        if self.playback_end_frame.is_some() || self.retained.is_some() {
             let count = u64::try_from(admitted)
                 .ok()
                 .and_then(|count| self.acknowledged_commands.checked_add(count));
@@ -2516,6 +4655,9 @@ impl StepGameplay {
     }
     /// Immutable speed selected for this source play, independently of replay output.
     pub fn playback_speed(&self) -> ReplaySpeed {
+        if let Some(state) = &self.retained {
+            return state.business.current_speed();
+        }
         self.live_speed.map_or_else(
             || ReplaySpeed::new(Rate::NORMAL).expect("positive normal rate"),
             LiveSpeedSetup::speed,
@@ -2647,6 +4789,607 @@ impl fmt::Debug for StepLocalGameplay {
 }
 
 impl StepLocalGameplay {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_retained_audio_section(
+        mut prepared: PreparedRetainedSection,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+        retained: StepRetainedOptions,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        let setup = prepare_retained_setup(&prepared, config, end, retained, &authority)?;
+        let completion = prepare_retained_completion(&mut prepared, config, policy.as_ref())?;
+        let start = prepared.section.start;
+        let players = plan
+            .members()
+            .iter()
+            .map(|&(player, _)| player)
+            .collect::<Vec<_>>();
+        let objects = prepared
+            .prepared
+            .compiled
+            .chart
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
+        let (mut control, bank) = StepGameplay::build_mode(
+            prepared.prepared,
+            config,
+            InputSetup::Local(plan, bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            policy,
+            None,
+            true,
+        )?;
+        control.live_speed = Some(
+            LiveSpeedSetup::new(
+                start,
+                config.preroll,
+                ReplaySpeed::new(retained.worklet.initial_rate).map_err(retained_error)?,
+                end,
+            )
+            .map_err(retained_error)?,
+        );
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(players.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        for &player in &players {
+            members.push(LocalMemberState {
+                player,
+                score: ScoreSummary::default(),
+                mine_damage: MineDamageSummary::default(),
+                gauge: BmsGauge::new(control.gauge.profile().try_copy().map_err(retained_error)?),
+                completed_result: None,
+                capture: None,
+                capture_configured: false,
+                song: control.song,
+            });
+        }
+        let mut owner = Self {
+            control,
+            players,
+            members,
+            objects,
+            member_error_scratch: Vec::new(),
+        };
+        owner
+            .member_error_scratch
+            .try_reserve_exact(owner.players.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        let mut headers = Vec::new();
+        headers
+            .try_reserve_exact(owner.players.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        for &player in &owner.players {
+            headers.push(PracticeRuntimeHeader {
+                player,
+                header: owner.recording_header(
+                    player,
+                    retained.identity_limits,
+                    retained.chart_seed,
+                )?,
+                limits: retained.identity_limits,
+            });
+        }
+        owner.control.install_retained(
+            prepared.original_source,
+            retained,
+            setup,
+            headers,
+            completion,
+        )?;
+        for member in &mut owner.members {
+            member.song = owner.control.song;
+        }
+        Ok((owner, bank))
+    }
+    pub fn retained_setup(&self) -> Option<&StepRetainedSetup> {
+        self.control.retained_setup()
+    }
+    pub fn configure_retained_limits(
+        &mut self,
+        limits: beatkernel::audio::PracticeLimits,
+        source_history_capacity: usize,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .configure_retained_limits(limits, source_history_capacity)
+            .map_err(Into::into)
+    }
+    pub fn retained_capability(&self) -> Option<PracticeTransactionCapability> {
+        self.control.retained_capability()
+    }
+    pub fn effective_header(&self, player: PlayerId) -> Option<&ReplayHeader> {
+        self.control.effective_header(player)
+    }
+    pub fn prepare_retained_transaction(
+        &mut self,
+        request: PracticeTransactionRequest,
+        fixed_competition: bool,
+    ) -> Result<StepRetainedControl, StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let state =
+            self.control
+                .retained
+                .as_mut()
+                .ok_or(StepGameplayError::InvalidConfiguration(
+                    "retained practice is unavailable",
+                ))?;
+        let mut captures = self
+            .members
+            .iter_mut()
+            .map(|member| (member.player, &mut member.capture))
+            .collect::<Vec<_>>();
+        state
+            .prepare(
+                request,
+                fixed_competition,
+                self.control.runtime.transport_mut(),
+                &mut captures,
+            )
+            .map_err(Into::into)
+    }
+    pub fn prepare_retained_pause(
+        &mut self,
+        id: u64,
+        generation: u64,
+        paused: bool,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .prepare_retained_pause(id, generation, paused)
+            .map_err(Into::into)
+    }
+    pub fn acknowledge_retained_admission(
+        &mut self,
+        kind: StepRetainedAdmissionKind,
+        id: u64,
+        result: Result<(), String>,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .acknowledge_retained_admission(kind, id, result)
+            .map_err(Into::into)
+    }
+    pub fn observe_retained_history(
+        &mut self,
+        snapshot: StepRemoteHistorySnapshot,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .observe_retained_history(snapshot)
+            .map_err(Into::into)
+    }
+    pub fn retain_output_event(
+        &mut self,
+        event: WorkletRetainedEnvelope,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.retain_output_event(event).map_err(Into::into)
+    }
+    pub fn take_retained_response(&mut self) -> Option<PracticeTransactionReply> {
+        self.control.take_retained_response()
+    }
+    pub fn acknowledge_retained_event(
+        &mut self,
+        serial: u64,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .acknowledge_retained_event(serial)
+            .map_err(Into::into)
+    }
+    pub fn retained_history_pin(&self) -> Result<Option<u64>, StepLocalGameplayError> {
+        self.control.retained_history_pin().map_err(Into::into)
+    }
+    pub fn take_retired_replay(
+        &mut self,
+        player: PlayerId,
+    ) -> Result<Option<Vec<u8>>, StepLocalGameplayError> {
+        self.member_index(player)?;
+        take_retired_capture(self.control.retained.as_mut(), player).map_err(Into::into)
+    }
+    pub fn observe_audio_coordinate(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+        coordinate: crate::native_output_coordinate::NativeOutputCoordinate,
+    ) -> Result<ObservationAdmission, StepLocalGameplayError> {
+        self.control
+            .observe_audio_coordinate(epoch, pair, coordinate)
+            .map_err(Into::into)
+    }
+    fn process_next_retained_input(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<Option<InputResult>, StepLocalGameplayError> {
+        self.control
+            .validate_audio_operation(now, audio_at, position)?;
+        let Some(prepared) = self.control.retained_input(merger, now, audio_at)? else {
+            return Ok(None);
+        };
+        let state = self.control.retained.as_ref().expect("retained branch");
+        let phase = state.phase_point(prepared.output(), prepared.query())?;
+        let prefix = self
+            .control
+            .authority
+            .as_ref()
+            .expect("audio mode")
+            .acquired_prefix()
+            .expect("prepared acquired input");
+        let position = position.or(merger
+            .peek_ready_position(prefix)
+            .map_err(AudioAuthorityError::from)
+            .map_err(StepGameplayError::from)?);
+        let event = merger
+            .pop_ready(prefix)
+            .map_err(AudioAuthorityError::from)
+            .map_err(StepGameplayError::from)?
+            .expect("prepared earliest input");
+        if state.paused || state.ended {
+            let device = event.meta().source;
+            self.control
+                .authority
+                .as_mut()
+                .expect("audio mode")
+                .commit_coordinate_input(prepared, now)
+                .map_err(StepGameplayError::from)?;
+            return Ok(Some(InputResult::Ignored { device }));
+        }
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result = match position {
+            Some(position) => self.group_mut().process_input_at_output_phase(
+                event,
+                position,
+                prepared.mapper(),
+                audio_at,
+                phase,
+            ),
+            None => self.group_mut().process_input_output_phase(
+                event,
+                prepared.mapper(),
+                audio_at,
+                phase,
+            ),
+        };
+        let committed = match &result {
+            Ok(InputResult::Processed(_)) => true,
+            Err(error) => !error.completed_reports.is_empty(),
+            Ok(InputResult::Ignored { .. }) => false,
+        };
+        if committed {
+            self.control
+                .authority
+                .as_mut()
+                .expect("audio mode")
+                .commit_coordinate_input(prepared, now)
+                .map_err(StepGameplayError::from)?;
+        }
+        match result {
+            Ok(ignored @ InputResult::Ignored { .. }) => {
+                self.member_error_scratch = errors;
+                Ok(Some(ignored))
+            }
+            Ok(InputResult::Processed(reports)) => self
+                .finish_reports(Ok(reports), errors)
+                .map(InputResult::Processed)
+                .map(Some),
+            Err(error) => self
+                .finish_reports(Err(error), errors)
+                .map(InputResult::Processed)
+                .map(Some),
+        }
+    }
+    fn advance_retained_frontier(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<Vec<PlayerReport>>, StepLocalGameplayError> {
+        self.control.validate_audio_operation(now, audio_at, None)?;
+        let state = self.control.retained.as_ref().expect("retained branch");
+        if !state.started {
+            return Ok(None);
+        }
+        let authority = self.control.authority.as_mut().expect("audio mode");
+        if state.paused || state.ended {
+            if let Some(frontier) = authority
+                .prepare_coordinate_held_frontier(now, merger)
+                .map_err(StepGameplayError::from)?
+            {
+                authority
+                    .commit_coordinate_held_frontier(frontier, now, merger)
+                    .map_err(StepGameplayError::from)?;
+            }
+            return Ok(None);
+        }
+        let Some(prepared) = authority
+            .prepare_coordinate_frontier(now, merger)
+            .map_err(StepGameplayError::from)?
+        else {
+            return Ok(None);
+        };
+        if !state.permits_query(prepared.query())? {
+            return Ok(None);
+        }
+        let phase = state.phase_point(prepared.output(), prepared.query())?;
+        let Some(output) = prepared.advance() else {
+            authority
+                .commit_coordinate_frontier(prepared, now, merger)
+                .map_err(StepGameplayError::from)?;
+            return Ok(None);
+        };
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result =
+            self.group_mut()
+                .advance_to_output_phase(output, &AudioDomains, audio_at, phase);
+        if result
+            .as_ref()
+            .map_or_else(|error| !error.completed_reports.is_empty(), |_| true)
+        {
+            self.control
+                .authority
+                .as_mut()
+                .expect("audio mode")
+                .commit_coordinate_frontier(prepared, now, merger)
+                .map_err(StepGameplayError::from)?;
+            self.control.last_operation = Some(output);
+        }
+        self.finish_reports(result, errors).map(Some)
+    }
+    pub fn service_retained_event(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<u64>, StepLocalGameplayError> {
+        if let Some((event, true)) = self.control.retained.as_ref().and_then(|state| state.event) {
+            return Ok(Some(event.serial));
+        }
+        let Some((event, cutoff, point)) = self.control.retained_cut(merger, now, audio_at)? else {
+            return Ok(None);
+        };
+        match event.event {
+            WorkletRetainedEvent::Practice(projected)
+                if !matches!(projected.event, PracticeEvent::Rate(_)) =>
+            {
+                let update = self
+                    .control
+                    .retained
+                    .as_ref()
+                    .expect("retained branch")
+                    .boundary_update(projected.event, self.control.end)?;
+                if matches!(
+                    update.receipt.kind,
+                    PracticeBoundaryKind::Looped | PracticeBoundaryKind::Ended
+                ) && self
+                    .control
+                    .runtime
+                    .transport_mut()
+                    .position_at_output_phase(point)
+                    .map_err(retained_error)?
+                    != update.region.end
+                {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "actual retained endpoint differs from exact active phase",
+                    )
+                    .into());
+                }
+                if update.fresh {
+                    if !self
+                        .control
+                        .retained
+                        .as_ref()
+                        .expect("retained branch")
+                        .retired
+                        .is_empty()
+                    {
+                        return Ok(None);
+                    }
+                    self.install_retained_attempt(&update, cutoff.output())?;
+                } else {
+                    if update.receipt.kind == PracticeBoundaryKind::Ended {
+                        let errors = std::mem::take(&mut self.member_error_scratch);
+                        let result = self.group_mut().advance_to_output_phase(
+                            cutoff.output(),
+                            &AudioDomains,
+                            audio_at,
+                            point,
+                        );
+                        self.finish_reports(result, errors)?;
+                    }
+                    self.control
+                        .retained
+                        .as_mut()
+                        .expect("retained branch")
+                        .commit_boundary(&update)?;
+                    if update.receipt.kind == PracticeBoundaryKind::Ended {
+                        self.control.runtime.seal_gameplay_audio();
+                    }
+                }
+                self.control.started = true;
+            }
+            _ => {
+                let state = self.control.retained.as_mut().expect("retained branch");
+                let mut captures = self
+                    .members
+                    .iter_mut()
+                    .map(|member| (member.player, &mut member.capture))
+                    .collect::<Vec<_>>();
+                state.commit_control(
+                    event,
+                    point,
+                    self.control.runtime.transport_mut(),
+                    &mut captures,
+                )?;
+            }
+        }
+        self.control
+            .authority
+            .as_mut()
+            .expect("retained authority")
+            .commit_coordinate_control_cutoff(cutoff, now, merger)
+            .expect("private preflight remains unchanged during cohort commit");
+        self.control
+            .retained
+            .as_mut()
+            .expect("retained branch")
+            .event = Some((event, true));
+        self.control.last_operation = Some(cutoff.output());
+        Ok(Some(event.serial))
+    }
+    fn install_retained_attempt(
+        &mut self,
+        update: &RetainedBoundaryUpdate,
+        logical: ClockPoint,
+    ) -> Result<(), StepLocalGameplayError> {
+        let state = self.control.retained.as_ref().expect("retained branch");
+        let source = crate::section_start::source_at(&state.original, update.region.start)
+            .map_err(retained_error)?;
+        let mut fresh = Vec::new();
+        fresh
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        for (index, member) in self.members.iter().enumerate() {
+            fresh.push(prepare_fresh_step_member(
+                state,
+                index,
+                &source,
+                self.judge(member.player)
+                    .expect("actual roster")
+                    .profile()
+                    .clone(),
+                member.gauge.profile(),
+                self.control.policy.as_ref(),
+                self.control.input_mode,
+                update,
+            )?);
+        }
+        let basis = OutputPhaseBasis::new(
+            self.control.logical_domain,
+            state.basis.owner(),
+            update.receipt.generation,
+            update.receipt.playback_frame,
+            self.control.sample_rate,
+        )
+        .map_err(retained_error)?;
+        let phase = PositiveRatePhase::new(
+            update.region.start,
+            Duration::ZERO,
+            update.rate.rate,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let transport = Transport::new_with_runtime_output_phase(
+            basis,
+            logical,
+            update.region.start,
+            Duration::ZERO,
+            update.rate.rate,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let headers = fresh
+            .iter()
+            .map(|member| member.header.clone())
+            .collect::<Vec<_>>();
+        let captured = fresh
+            .iter()
+            .filter(|member| member.capture.is_some())
+            .map(|member| member.player)
+            .collect::<Vec<_>>();
+        let business = state
+            .business
+            .candidate_for_attempt(headers.clone(), &captured, phase, update.rate)
+            .map_err(retained_error)?;
+        let setup = LiveSpeedSetup::new(
+            update.region.start,
+            Duration::ZERO,
+            ReplaySpeed::new(update.rate.rate).map_err(retained_error)?,
+            update.end,
+        )
+        .map_err(retained_error)?;
+        let sound_identity = InputSoundIdentity::from_source(&source).map_err(retained_error)?;
+        let objects = source
+            .compile()
+            .map_err(retained_error)?
+            .chart
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
+        let completion = state
+            .completion_template
+            .prepare_practice(&source, &fresh[0].judge)
+            .map_err(retained_error)?;
+        let original_rate = state.setup.config.initial_rate;
+        let mut judges = Vec::new();
+        judges
+            .try_reserve_exact(fresh.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        let mut replacements = Vec::new();
+        replacements
+            .try_reserve_exact(fresh.len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        for member in fresh {
+            judges.push((member.player, member.judge));
+            replacements.push((member.gauge, member.capture));
+        }
+        if update.restart {
+            self.group_mut()
+                .replace_practice_states_with_runtime_restart(
+                    judges,
+                    transport,
+                    update.end,
+                    CommandScope(update.receipt.generation),
+                    original_rate,
+                )
+        } else {
+            self.group_mut().replace_practice_states_with_output_phase(
+                judges,
+                transport,
+                update.end,
+                CommandScope(update.receipt.generation),
+            )
+        }
+        .map_err(retained_error)?;
+        let state = self.control.retained.as_mut().expect("retained branch");
+        for (member, (gauge, capture)) in self.members.iter_mut().zip(replacements) {
+            if let Some(old) = member.capture.take() {
+                state.retired.push((member.player, old));
+            }
+            member.capture = capture;
+            member.gauge = gauge;
+            member.score = ScoreSummary::default();
+            member.mine_damage = MineDamageSummary::default();
+            member.completed_result = None;
+            member.song = update.region.start;
+        }
+        state.business = business;
+        state.phase = phase;
+        state.basis = basis;
+        state.headers = headers;
+        state
+            .commit_boundary(update)
+            .expect("fresh candidate already contains the actual revision");
+        self.objects = objects;
+        self.control.completed_result = None;
+        self.control.live_terminal = false;
+        self.control.start = update.region.start;
+        self.control.end = update.end;
+        self.control.preroll = Duration::ZERO;
+        self.control.live_speed = Some(setup);
+        self.control.input_sound_identity = sound_identity;
+        self.control.completion = Some(completion);
+        self.control.song = update.region.start;
+        Ok(())
+    }
     /// Own an already selected chart and its resolved source routes. Even a
     /// one-member local owner uses common local voice remapping; existing solo
     /// constructors retain their original sound IDs and command order.
@@ -3215,7 +5958,49 @@ impl StepLocalGameplay {
             )
             .into());
         }
+        let replacement = if let Some(state) = &self.control.retained {
+            let mut headers = state.headers.clone();
+            if self.control.policy.is_none() {
+                headers[index].header = setup_gauge_header(
+                    self.judge(player).expect("checked member"),
+                    self.control.logical_domain,
+                    state.options.identity_limits,
+                    self.control.start,
+                    state.options.chart_seed,
+                    self.control.end,
+                    self.control.input_mode,
+                    self.control.input_sound_identity,
+                    &profile,
+                )
+                .and_then(|header| {
+                    crate::replay_speed_policy::wrap_header(
+                        header,
+                        state.business.current_speed(),
+                        state.options.identity_limits,
+                    )
+                    .map_err(CaptureError::SourceSpeed)
+                })
+                .map_err(|error| StepGameplayError::Capture {
+                    error,
+                    report: None,
+                })?;
+            }
+            let business =
+                RuntimePractice::new(headers.clone(), &[], state.phase).map_err(retained_error)?;
+            Some((headers, business))
+        } else {
+            None
+        };
         self.members[index].gauge = BmsGauge::new(profile);
+        if let Some((headers, business)) = replacement {
+            let state = self
+                .control
+                .retained
+                .as_mut()
+                .expect("retained setup checked");
+            state.headers = headers;
+            state.business = business;
+        }
         Ok(())
     }
     pub fn configure_capture(
@@ -3263,8 +6048,39 @@ impl StepLocalGameplay {
             error,
             report: None,
         })?;
+        let business = if let Some(state) = &self.control.retained {
+            if state.pending.is_some()
+                || state.business.effective_header(player) != Some(capture.header())
+            {
+                return Err(StepGameplayError::InvalidConfiguration(
+                    "capture differs from retained effective identity",
+                )
+                .into());
+            }
+            let captured = self
+                .members
+                .iter()
+                .filter(|member| member.capture.is_some() || member.player == player)
+                .map(|member| member.player)
+                .collect::<Vec<_>>();
+            Some(
+                RuntimePractice::new(state.headers.clone(), &captured, state.phase)
+                    .map_err(retained_error)?,
+            )
+        } else {
+            None
+        };
         self.members[index].capture = Some(capture);
         self.members[index].capture_configured = true;
+        if let Some(business) = business {
+            let state = self
+                .control
+                .retained
+                .as_mut()
+                .expect("checked retained mode");
+            state.business = business;
+            state.capture_limits[index] = Some(limits);
+        }
         Ok(())
     }
 
@@ -3411,6 +6227,9 @@ impl StepLocalGameplay {
         audio_at: ClockPoint,
         position: Option<Position2>,
     ) -> Result<Option<InputResult>, StepLocalGameplayError> {
+        if self.control.retained.is_some() {
+            return self.process_next_retained_input(merger, now, audio_at, position);
+        }
         self.control
             .validate_audio_operation(now, audio_at, position)?;
         let before = self.pre_origin_inputs();
@@ -3484,6 +6303,9 @@ impl StepLocalGameplay {
         now: ClockPoint,
         audio_at: ClockPoint,
     ) -> Result<Option<Vec<PlayerReport>>, StepLocalGameplayError> {
+        if self.control.retained.is_some() {
+            return self.advance_retained_frontier(merger, now, audio_at);
+        }
         self.control.validate_audio_operation(now, audio_at, None)?;
         let Some(prepared) = self
             .control
@@ -3744,7 +6566,8 @@ impl StepLocalGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepLocalGameplayError> {
         self.control.ensure_usable()?;
-        if self.control.live_speed.is_some()
+        if self.control.retained.is_none()
+            && self.control.live_speed.is_some()
             && self.control.end.is_some()
             && !self.control.live_terminal
         {
@@ -3968,6 +6791,31 @@ pub(crate) fn validate_section_output_evidence_with_stops(
     expected_end: Option<u64>,
     stops: &OwnedStopEvidence,
 ) -> Result<Option<ClockPoint>, CompletionError> {
+    validate_output_evidence_mode(
+        output_origin,
+        sample_rate,
+        last_render,
+        last_presented,
+        rendered,
+        presented,
+        expected_end,
+        stops,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_output_evidence_mode(
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    last_render: Option<RenderReport>,
+    last_presented: Option<Timestamp>,
+    rendered: Option<RenderReport>,
+    presented: Option<ClockPoint>,
+    expected_end: Option<u64>,
+    stops: &OwnedStopEvidence,
+    retained: bool,
+) -> Result<Option<ClockPoint>, CompletionError> {
     if sample_rate == 0 {
         return Err(CompletionError("completion output sample rate is zero"));
     }
@@ -4044,6 +6892,20 @@ pub(crate) fn validate_section_output_evidence_with_stops(
                 "completion output differs from its configured finite playback grid",
             ));
         }
+    } else if retained {
+        if report.playback_end_physical_frame.is_some()
+            || report.producer_disconnected
+            || report.playback_start_frame > report.start_frame
+            || report.playback_frames != if report.paused { 0 } else { report.frames }
+            || report
+                .playback_start_frame
+                .checked_add(report.playback_frames as u64)
+                .is_none_or(|playback| playback > end)
+        {
+            return Err(CompletionError(
+                "retained output differs from its actual pause-excluding grid",
+            ));
+        }
     } else {
         if report.paused
             || report.playback_end_physical_frame.is_some()
@@ -4097,6 +6959,23 @@ pub(crate) fn validate_section_output_evidence_with_stops(
         ));
     }
     if let Some(previous) = last_render {
+        if retained {
+            let previous_playback = previous
+                .playback_start_frame
+                .checked_add(previous.playback_frames as u64)
+                .ok_or(CompletionError("retained playback cursor overflow"))?;
+            if report.start_frame != previous.start_frame
+                && (report.playback_start_frame < previous_playback
+                    || report.start_frame - report.playback_start_frame
+                        < previous.start_frame - previous.playback_start_frame
+                    || report.start_frame == previous.counters.rendered_frames
+                        && report.playback_start_frame != previous_playback)
+            {
+                return Err(CompletionError(
+                    "retained playback or silent-frame history regressed",
+                ));
+            }
+        }
         if report.start_frame == previous.start_frame {
             if report != previous {
                 return Err(CompletionError(

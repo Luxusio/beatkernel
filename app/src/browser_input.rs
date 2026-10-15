@@ -638,6 +638,22 @@ impl BrowserInputQueue {
     ) -> Result<Option<RuntimeReport>, StepGameplayError> {
         game.advance_audio_frontier(&mut self.merger, now, audio_at)
     }
+    pub fn service_retained_solo(
+        &mut self,
+        game: &mut StepGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<u64>, StepGameplayError> {
+        game.service_retained_event(&mut self.merger, now, audio_at)
+    }
+    pub fn service_retained_local(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<u64>, StepLocalGameplayError> {
+        game.service_retained_event(&mut self.merger, now, audio_at)
+    }
     pub fn advance_local(
         &mut self,
         game: &mut StepLocalGameplay,

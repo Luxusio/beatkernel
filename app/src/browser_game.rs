@@ -1,11 +1,14 @@
 //! Worker-owned gameplay bindings; audio lives in a separate Worklet instance.
 use std::{
+    cell::Cell,
     collections::{BTreeSet, VecDeque},
     sync::Arc,
 };
 
 use crate::{
-    audio_authority::{AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch},
+    audio_authority::{
+        AudioAuthority, AudioAuthorityConfig, AudioAuthorityCoordinateBasis, AudioAuthorityEpoch,
+    },
     browser::BrowserPrepared,
     browser_hid_input::BrowserHidSetup,
     browser_input::{
@@ -16,15 +19,29 @@ use crate::{
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
+    practice_control::{
+        PracticeAction, PracticeRequest, PracticeTransactionCapability, PracticeTransactionReply,
+        PracticeTransactionRequest,
+    },
     pressed_keys::PressedKeys,
     replay_speed::ReplaySpeed,
     saved_opponent_hud::SavedOpponentHud,
     saved_opponents::SavedOpponents,
-    step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
-    worklet_audio::{decode_output, decode_section_output, OutputEvidence},
+    step_gameplay::{
+        StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError,
+        StepRemoteHistorySnapshot, StepRetainedAdmissionKind, StepRetainedControl,
+        StepRetainedOptions, StepRetainedSetup,
+    },
+    worklet_audio::{
+        decode_output, decode_retained_output, decode_section_output, OutputEvidence,
+        WorkletRetainedConfig, WorkletRetainedEnvelope, WorkletRetainedEvent,
+    },
 };
 use beatkernel::{
-    audio::{AudioCommand, PcmSample, SampleId},
+    audio::{
+        AudioCommand, OutputFrameBasis, PcmSample, PracticeBoundaryKind, PracticeEvent,
+        PracticeLimits, PracticeRateOutcome, PracticeRegion, SampleId,
+    },
     input::{
         codec::CodecLimits, Binding, BindingMap, ButtonEvent, ButtonState, DeviceId,
         DeviceSelector, EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent, Position2,
@@ -33,6 +50,7 @@ use beatkernel::{
     replay::codec::ReplayCodecLimits,
     runtime::RuntimeReport,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp},
+    transport::Rate,
 };
 use beatkernel_bms::BmsInputMode;
 use wasm_bindgen::prelude::*;
@@ -58,6 +76,258 @@ fn unsigned(value: u64) -> JsValue {
 }
 fn signed(value: i64) -> JsValue {
     js_sys::BigInt::from(value).into()
+}
+
+thread_local! {
+    static NEXT_RETAINED_PROGRAM: Cell<u64> = const { Cell::new(1) };
+}
+
+pub(crate) fn retained_options(
+    prepared: &crate::PreparedBms,
+    start: Timestamp,
+    end: Option<Timestamp>,
+    preroll: Duration,
+    speed: Option<ReplaySpeed>,
+    chart_seed: u64,
+) -> Result<StepRetainedOptions, JsValue> {
+    let program_id = NEXT_RETAINED_PROGRAM.with(|next| {
+        let id = next.get();
+        let successor = id
+            .checked_add(1)
+            .ok_or_else(|| error("retained program identity exhausted"))?;
+        next.set(successor);
+        Ok::<_, JsValue>(id)
+    })?;
+    Ok(StepRetainedOptions {
+        worklet: WorkletRetainedConfig {
+            program_id,
+            initial_region: PracticeRegion::new(
+                start,
+                end.unwrap_or(Timestamp::from_nanos(i64::MAX)),
+                false,
+            )
+            .map_err(error)?,
+            initial_rate: speed.map_or(Rate::NORMAL, ReplaySpeed::rate),
+            output_preroll: preroll,
+            open_end: end.is_none(),
+            limits: PracticeLimits::new(prepared.bgm_commands.len().max(1), 4096, 4096, 16, 16)
+                .map_err(error)?,
+            source_history_capacity: 256,
+        },
+        chart_seed,
+        identity_limits: crate::competition_live::replay_limits().map_err(error)?,
+    })
+}
+
+pub(crate) fn browser_audio_authority(
+    source_hz: u32,
+    retained: bool,
+) -> Result<AudioAuthority, JsValue> {
+    let config = AudioAuthorityConfig {
+        input_extrapolation: ExtrapolationPolicy::Bounded {
+            before: Duration::from_nanos(70_000_000_000),
+            after: Duration::ZERO,
+        },
+        ..AudioAuthorityConfig::default()
+    };
+    let epoch = AudioAuthorityEpoch {
+        id: 1,
+        stream_origin: point(OUTPUT, 0),
+        logical_origin: point(LOGICAL, 0),
+        host_domain: HOST,
+    };
+    if retained {
+        AudioAuthority::new_with_coordinates(
+            config,
+            epoch,
+            AudioAuthorityCoordinateBasis::SourceCounter {
+                basis: OutputFrameBasis::new(epoch.stream_origin, source_hz, 0).map_err(error)?,
+                frequency: 1_000_000_000,
+            },
+        )
+        .map_err(error)
+    } else {
+        AudioAuthority::new(config, epoch).map_err(error)
+    }
+}
+
+fn retained_words(values: impl IntoIterator<Item = u64>) -> Vec<u32> {
+    values
+        .into_iter()
+        .flat_map(|value| [value as u32, (value >> 32) as u32])
+        .collect()
+}
+
+pub(crate) fn retained_setup_words(setup: &StepRetainedSetup) -> Vec<u32> {
+    let config = setup.config;
+    retained_words([
+        1,
+        config.program_id,
+        config.initial_region.start.as_nanos() as u64,
+        config.initial_region.end.as_nanos() as u64,
+        u64::from(config.initial_region.repeat),
+        config.initial_rate.numerator() as u64,
+        config.initial_rate.denominator(),
+        config.output_preroll.as_nanos() as u64,
+        u64::from(config.open_end),
+        setup.cues.len() as u64,
+        u64::from(setup.sample_count),
+        config.limits.max_overlap as u64,
+        config.limits.max_events_per_render as u64,
+        config.limits.control_capacity as u64,
+        config.limits.receipt_capacity as u64,
+        config.source_history_capacity as u64,
+    ])
+}
+
+pub(crate) fn retained_cue_words(
+    setup: &StepRetainedSetup,
+    index: u32,
+) -> Result<Vec<u32>, JsValue> {
+    let cue = setup
+        .cues
+        .get(index as usize)
+        .ok_or_else(|| error("retained cue index is out of range"))?;
+    let mut words = retained_words([cue.voice.0, cue.sample.0, cue.at.as_nanos() as u64]);
+    words.extend([cue.gain.to_bits(), 0, 0]);
+    Ok(words)
+}
+
+pub(crate) fn retained_capability_words(
+    setup: Option<&StepRetainedSetup>,
+    capability: Option<PracticeTransactionCapability>,
+) -> Vec<u32> {
+    match (setup, capability) {
+        (Some(setup), Some(capability)) => retained_words([
+            1,
+            setup.config.program_id,
+            capability.practice.generation,
+            capability.practice.min_target.as_nanos() as u64,
+            capability.practice.max_target.as_nanos() as u64,
+            capability.rate.revision,
+            capability.rate.rate.numerator() as u64,
+            capability.rate.rate.denominator(),
+        ]),
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn retained_preparation_words(
+    control: StepRetainedControl,
+) -> Result<Vec<u32>, JsValue> {
+    control
+        .preparation
+        .map(|preparation| retained_words(preparation.to_words()))
+        .ok_or_else(|| error("retained transaction has no rate preparation"))
+}
+
+pub(crate) fn retained_admission(
+    kind: u32,
+    accepted: bool,
+    reason: String,
+) -> Result<(StepRetainedAdmissionKind, Result<(), String>), JsValue> {
+    let kind = match kind {
+        0 => StepRetainedAdmissionKind::Transaction,
+        1 => StepRetainedAdmissionKind::Pause,
+        _ => return Err(error("unknown retained admission kind")),
+    };
+    if reason.len() > 4096 || accepted && !reason.is_empty() || !accepted && reason.is_empty() {
+        return Err(error("invalid retained admission result"));
+    }
+    Ok((kind, if accepted { Ok(()) } else { Err(reason) }))
+}
+
+pub(crate) fn retained_history(
+    words: &[u32],
+    setup: &StepRetainedSetup,
+) -> Result<StepRemoteHistorySnapshot, JsValue> {
+    let max_words = setup
+        .config
+        .source_history_capacity
+        .checked_mul(10)
+        .and_then(|value| value.checked_add(20))
+        .ok_or_else(|| error("retained history capacity overflow"))?;
+    if words.len() > max_words {
+        return Err(error("retained history exceeds configured capacity"));
+    }
+    StepRemoteHistorySnapshot::from_words(words).map_err(error)
+}
+
+pub(crate) fn retained_response_words(
+    reply: Option<PracticeTransactionReply>,
+    words: &mut Option<[u32; 80]>,
+) -> Result<Vec<u32>, JsValue> {
+    let Some(reply) = reply else {
+        return Ok(Vec::new());
+    };
+    let result = match reply {
+        PracticeTransactionReply::Region { reply, .. } => reply.result.map(|_| ()),
+        PracticeTransactionReply::Rate { result, .. } => result.map(|_| ()),
+        PracticeTransactionReply::RestartOriginal { result, .. } => result.map(|_| ()),
+    };
+    result.map_err(error)?;
+    words
+        .take()
+        .map(Vec::from)
+        .ok_or_else(|| error("committed retained response has no original event"))
+}
+
+pub(crate) struct RetainedVisualCandidate {
+    pub(crate) serial: u64,
+    pub(crate) generation: u64,
+    pub(crate) chart: Arc<PlayerChart>,
+    pub(crate) progress: Vec<NoteProgress>,
+}
+
+pub(crate) fn retained_selected_chart(
+    original: &Arc<PlayerChart>,
+    start: Timestamp,
+) -> Result<Arc<PlayerChart>, JsValue> {
+    let mut transfer = original.export_visual();
+    transfer.notes.retain(|note| note.start >= start);
+    PlayerChart::import_visual(transfer)
+        .map(Arc::new)
+        .map_err(error)
+}
+
+pub(crate) fn retained_visual_candidate(
+    event: WorkletRetainedEnvelope,
+    original: &Arc<PlayerChart>,
+    members: usize,
+) -> Result<Option<RetainedVisualCandidate>, JsValue> {
+    let receipt = match event.event {
+        WorkletRetainedEvent::Practice(projected) => match projected.event {
+            PracticeEvent::Boundary(receipt)
+                if matches!(
+                    receipt.kind,
+                    PracticeBoundaryKind::Requested | PracticeBoundaryKind::Looped
+                ) =>
+            {
+                receipt
+            }
+            PracticeEvent::Restart(restart)
+                if restart.outcome == PracticeRateOutcome::Applied
+                    && restart.boundary.kind == PracticeBoundaryKind::Requested =>
+            {
+                restart.boundary
+            }
+            _ => return Ok(None),
+        },
+        WorkletRetainedEvent::Pause(_) => return Ok(None),
+    };
+    let chart = retained_selected_chart(original, receipt.requested_song_time)?;
+    let initial = NoteProgress::new(chart.clone()).map_err(error)?;
+    let mut progress = Vec::new();
+    progress
+        .try_reserve_exact(members)
+        .map_err(|_| error("retained presentation cohort allocation failed"))?;
+    progress.extend(std::iter::repeat_n(initial, members));
+    Ok(Some(RetainedVisualCandidate {
+        serial: event.serial,
+        generation: receipt.generation,
+        chart,
+        progress,
+    }))
 }
 
 /// One setup asset; either export consumes the same immutable PCM handle once.
@@ -135,6 +405,11 @@ pub struct BrowserGame {
     chart_seed: u64,
     opponent_source: Option<beatkernel_bms::BmsChart>,
     opponents: Option<SavedOpponents>,
+    retained_event: Option<WorkletRetainedEnvelope>,
+    retained_response: Option<[u32; 80]>,
+    peer_competition: bool,
+    retained_original_chart: Option<Arc<PlayerChart>>,
+    retained_visual: Option<RetainedVisualCandidate>,
     pub(crate) saved_hud: SavedOpponentHud,
 }
 #[wasm_bindgen]
@@ -510,7 +785,13 @@ impl BrowserGame {
             .try_reserve_exact(input.bindings.bindings().len())
             .map_err(|_| error("browser binding snapshot allocation failed"))?;
         input_bindings.extend_from_slice(input.bindings.bindings());
-        let chart = Arc::new(prepared.chart);
+        let original_chart = Arc::new(prepared.chart);
+        let chart = if prepared.retained.is_some() {
+            retained_selected_chart(&original_chart, prepared.start)?
+        } else {
+            original_chart.clone()
+        };
+        let retained_original_chart = prepared.retained.is_some().then_some(original_chart);
         let progress = NoteProgress::new(chart.clone()).map_err(error)?;
         let config = StepGameplayConfig {
             host_origin: point(HOST, host_origin_ns),
@@ -526,66 +807,85 @@ impl BrowserGame {
         };
         // Comparison admission reconstructs genuine records from this source.
         // Clone only during preparation and release it after activation.
-        let opponent_source = prepared.prepared.source.clone();
-        let authority = AudioAuthority::new(
-            AudioAuthorityConfig {
-                // Permission covers the maximum existing latency hint plus startup;
-                // this never assigns an observation accuracy or forward prediction.
-                input_extrapolation: ExtrapolationPolicy::Bounded {
-                    before: Duration::from_nanos(70_000_000_000),
-                    after: Duration::ZERO,
+        let opponent_source = prepared
+            .retained
+            .as_ref()
+            .map_or(&prepared.prepared.source, |retained| {
+                &retained.original_source
+            })
+            .clone();
+        let authority = browser_audio_authority(
+            prepared.prepared.bank.format().sample_rate(),
+            prepared.retained.is_some(),
+        )?;
+        let (game, bank) = if let Some(retained) = prepared.retained {
+            let options = retained_options(
+                &prepared.prepared,
+                prepared.start,
+                end,
+                config.preroll,
+                speed,
+                prepared.chart_seed,
+            )?;
+            StepGameplay::new_retained_audio_section(
+                crate::section_start::PreparedRetainedSection {
+                    prepared: prepared.prepared,
+                    original_source: retained.original_source,
+                    section: retained.section,
                 },
-                ..AudioAuthorityConfig::default()
-            },
-            AudioAuthorityEpoch {
-                id: 1,
-                stream_origin: point(OUTPUT, 0),
-                logical_origin: point(LOGICAL, 0),
-                host_domain: HOST,
-            },
-        )
-        .map_err(error)?;
-        let (game, bank) = match (prepared.play_policy, speed) {
-            (Some(policy), None) => StepGameplay::new_audio_section_with_policy(
-                prepared.prepared,
                 config,
                 input.bindings,
-                prepared.start,
                 end,
                 input_mode,
                 authority,
-                policy,
-            ),
-            (None, None) => StepGameplay::new_audio_section(
-                prepared.prepared,
-                config,
-                input.bindings,
-                prepared.start,
-                end,
-                input_mode,
-                authority,
-            ),
-            (Some(policy), Some(speed)) => StepGameplay::new_audio_section_with_policy_and_speed(
-                prepared.prepared,
-                config,
-                input.bindings,
-                prepared.start,
-                end,
-                input_mode,
-                authority,
-                policy,
-                speed,
-            ),
-            (None, Some(speed)) => StepGameplay::new_audio_section_with_speed(
-                prepared.prepared,
-                config,
-                input.bindings,
-                prepared.start,
-                end,
-                input_mode,
-                authority,
-                speed,
-            ),
+                prepared.play_policy,
+                options,
+            )
+        } else {
+            match (prepared.play_policy, speed) {
+                (Some(policy), None) => StepGameplay::new_audio_section_with_policy(
+                    prepared.prepared,
+                    config,
+                    input.bindings,
+                    prepared.start,
+                    end,
+                    input_mode,
+                    authority,
+                    policy,
+                ),
+                (None, None) => StepGameplay::new_audio_section(
+                    prepared.prepared,
+                    config,
+                    input.bindings,
+                    prepared.start,
+                    end,
+                    input_mode,
+                    authority,
+                ),
+                (Some(policy), Some(speed)) => {
+                    StepGameplay::new_audio_section_with_policy_and_speed(
+                        prepared.prepared,
+                        config,
+                        input.bindings,
+                        prepared.start,
+                        end,
+                        input_mode,
+                        authority,
+                        policy,
+                        speed,
+                    )
+                }
+                (None, Some(speed)) => StepGameplay::new_audio_section_with_speed(
+                    prepared.prepared,
+                    config,
+                    input.bindings,
+                    prepared.start,
+                    end,
+                    input_mode,
+                    authority,
+                    speed,
+                ),
+            }
         }
         .map_err(error)?;
         Ok(Self {
@@ -612,6 +912,11 @@ impl BrowserGame {
             chart_seed: prepared.chart_seed,
             opponent_source: Some(opponent_source),
             opponents: None,
+            retained_event: None,
+            retained_response: None,
+            peer_competition: false,
+            retained_original_chart,
+            retained_visual: None,
             saved_hud: SavedOpponentHud::default(),
         })
     }
@@ -621,6 +926,340 @@ impl BrowserGame {
 impl BrowserGame {
     pub fn sample_count(&self) -> usize {
         self.samples.len()
+    }
+
+    pub fn configure_retained_limits(
+        &mut self,
+        max_overlap: u32,
+        max_events_per_render: u32,
+        control_capacity: u32,
+        receipt_capacity: u32,
+        source_history_capacity: u32,
+    ) -> Result<(), JsValue> {
+        let cues = self
+            .game
+            .retained_setup()
+            .ok_or_else(|| error("retained playback is not configured"))?
+            .cues
+            .len();
+        let limits = PracticeLimits::new(
+            cues.max(1),
+            max_overlap as usize,
+            max_events_per_render as usize,
+            control_capacity as usize,
+            receipt_capacity as usize,
+        )
+        .map_err(error)?;
+        self.game
+            .configure_retained_limits(limits, source_history_capacity as usize)
+            .map_err(error)
+    }
+    pub fn retained_setup_words(&self) -> Result<Vec<u32>, JsValue> {
+        self.game
+            .retained_setup()
+            .map(retained_setup_words)
+            .ok_or_else(|| error("retained playback is not configured"))
+    }
+    pub fn retained_cue_count(&self) -> Result<u32, JsValue> {
+        u32::try_from(
+            self.game
+                .retained_setup()
+                .ok_or_else(|| error("retained playback is not configured"))?
+                .cues
+                .len(),
+        )
+        .map_err(error)
+    }
+    pub fn retained_cue_words(&self, index: u32) -> Result<Vec<u32>, JsValue> {
+        retained_cue_words(
+            self.game
+                .retained_setup()
+                .ok_or_else(|| error("retained playback is not configured"))?,
+            index,
+        )
+    }
+    pub fn retained_capability_words(&self) -> Result<Vec<u32>, JsValue> {
+        Ok(retained_capability_words(
+            self.game.retained_setup(),
+            self.game.retained_capability(),
+        ))
+    }
+    pub fn retained_prepare_rate(
+        &mut self,
+        id: u64,
+        numerator: i64,
+        denominator: u64,
+    ) -> Result<Vec<u32>, JsValue> {
+        let capability = self
+            .game
+            .retained_capability()
+            .ok_or_else(|| error("retained control capability is unavailable"))?;
+        let request = PracticeTransactionRequest::Rate {
+            id,
+            generation: capability.practice.generation,
+            expected: capability.rate,
+            requested_rate: Rate::new(numerator, denominator).map_err(error)?,
+        };
+        let fixed_competition = self
+            .opponents
+            .as_ref()
+            .is_some_and(|opponents| opponents.count() != 0)
+            || self.peer_competition;
+        retained_preparation_words(
+            self.game
+                .prepare_retained_transaction(request, fixed_competition)
+                .map_err(error)?,
+        )
+    }
+    pub fn retained_prepare_region(
+        &mut self,
+        id: u64,
+        start: i64,
+        end: i64,
+        repeat: bool,
+    ) -> Result<(), JsValue> {
+        let capability = self
+            .game
+            .retained_capability()
+            .ok_or_else(|| error("retained control capability is unavailable"))?;
+        let action = if repeat {
+            PracticeAction::Loop {
+                start: Timestamp::from_nanos(start),
+                end: Timestamp::from_nanos(end),
+            }
+        } else {
+            if self
+                .game
+                .retained_setup()
+                .is_none_or(|setup| setup.config.initial_region.end.as_nanos() != end)
+            {
+                return Err(error(
+                    "scrub endpoint must preserve the original section endpoint",
+                ));
+            }
+            PracticeAction::Scrub {
+                target: Timestamp::from_nanos(start),
+            }
+        };
+        self.game
+            .prepare_retained_transaction(
+                PracticeTransactionRequest::Region(PracticeRequest {
+                    id,
+                    generation: capability.practice.generation,
+                    action,
+                }),
+                self.peer_competition
+                    || self
+                        .opponents
+                        .as_ref()
+                        .is_some_and(|opponents| opponents.count() != 0),
+            )
+            .map(|_| ())
+            .map_err(error)
+    }
+    pub fn retained_prepare_disable_loop(&mut self, id: u64) -> Result<(), JsValue> {
+        let capability = self
+            .game
+            .retained_capability()
+            .ok_or_else(|| error("retained control capability is unavailable"))?;
+        self.game
+            .prepare_retained_transaction(
+                PracticeTransactionRequest::Region(PracticeRequest {
+                    id,
+                    generation: capability.practice.generation,
+                    action: PracticeAction::DisableLoop,
+                }),
+                self.peer_competition
+                    || self
+                        .opponents
+                        .as_ref()
+                        .is_some_and(|opponents| opponents.count() != 0),
+            )
+            .map(|_| ())
+            .map_err(error)
+    }
+    pub fn retained_prepare_original_restart(&mut self, id: u64) -> Result<Vec<u32>, JsValue> {
+        let capability = self
+            .game
+            .retained_capability()
+            .ok_or_else(|| error("retained control capability is unavailable"))?;
+        let request = PracticeTransactionRequest::RestartOriginal {
+            id,
+            generation: capability.practice.generation,
+            expected: capability.rate,
+        };
+        retained_preparation_words(
+            self.game
+                .prepare_retained_transaction(
+                    request,
+                    self.peer_competition
+                        || self
+                            .opponents
+                            .as_ref()
+                            .is_some_and(|opponents| opponents.count() != 0),
+                )
+                .map_err(error)?,
+        )
+    }
+    pub fn retained_prepare_pause(&mut self, id: u64, paused: bool) -> Result<(), JsValue> {
+        let generation = self
+            .game
+            .retained_capability()
+            .ok_or_else(|| error("retained control capability is unavailable"))?
+            .practice
+            .generation;
+        self.game
+            .prepare_retained_pause(id, generation, paused)
+            .map_err(error)
+    }
+    pub fn retained_admission(
+        &mut self,
+        kind: u32,
+        id: u64,
+        accepted: bool,
+        reason: String,
+    ) -> Result<(), JsValue> {
+        let (kind, result) = retained_admission(kind, accepted, reason)?;
+        self.game
+            .acknowledge_retained_admission(kind, id, result)
+            .map_err(error)
+    }
+    pub fn retained_history(&mut self, words: Vec<u32>) -> Result<(), JsValue> {
+        let history = retained_history(
+            &words,
+            self.game
+                .retained_setup()
+                .ok_or_else(|| error("retained playback is not configured"))?,
+        )?;
+        self.game.observe_retained_history(history).map_err(error)
+    }
+    pub fn retained_event(&mut self, words: Vec<u32>) -> Result<(), JsValue> {
+        let event = WorkletRetainedEnvelope::from_words(&words).map_err(error)?;
+        if self.retained_event == Some(event) {
+            return self.game.retain_output_event(event).map_err(error);
+        }
+        let visual = retained_visual_candidate(
+            event,
+            self.retained_original_chart
+                .as_ref()
+                .ok_or_else(|| error("retained original visual chart is unavailable"))?,
+            1,
+        )?;
+        self.game.retain_output_event(event).map_err(error)?;
+        self.retained_event = Some(event);
+        self.retained_visual = visual;
+        Ok(())
+    }
+    pub fn retained_service(
+        &mut self,
+        now_host_ns: i64,
+        audio_ns: i64,
+    ) -> Result<Option<u64>, JsValue> {
+        if now_host_ns < 0 || audio_ns < 0 {
+            return Err(error("retained service points must be nonnegative"));
+        }
+        let serial = self
+            .input_queue
+            .as_mut()
+            .ok_or_else(|| error("input queue is not activated"))?
+            .service_retained_solo(
+                &mut self.game,
+                point(HOST, now_host_ns),
+                point(OUTPUT, audio_ns),
+            )
+            .map_err(error)?;
+        if let Some(serial) = serial {
+            let event = self
+                .retained_event
+                .filter(|event| event.serial == serial)
+                .ok_or_else(|| error("committed retained serial has no matching original event"))?;
+            self.retained_response = Some(event.to_words());
+            if self
+                .retained_visual
+                .as_ref()
+                .is_some_and(|visual| visual.serial == serial)
+            {
+                let generation = self
+                    .game
+                    .retained_capability()
+                    .map(|capability| capability.practice.generation);
+                if self
+                    .retained_visual
+                    .as_ref()
+                    .is_none_or(|visual| Some(visual.generation) != generation)
+                {
+                    return Err(error(
+                        "fresh retained presentation generation differs from actual owner",
+                    ));
+                }
+                let visual = self
+                    .retained_visual
+                    .take()
+                    .expect("matching prepared visual was checked");
+                self.chart = visual.chart;
+                self.progress = visual
+                    .progress
+                    .into_iter()
+                    .next()
+                    .expect("solo visual preparation has one member");
+                self.recent.clear();
+                self.pressed_owners.clear();
+                self.pressed = 0;
+            }
+        }
+        Ok(serial)
+    }
+    pub fn retained_event_ack(&mut self, serial: u64) -> Result<(), JsValue> {
+        self.game
+            .acknowledge_retained_event(serial)
+            .map_err(error)?;
+        if self
+            .retained_event
+            .is_some_and(|event| event.serial == serial)
+        {
+            self.retained_event = None;
+        }
+        Ok(())
+    }
+    pub fn retained_response_words(&mut self) -> Result<Vec<u32>, JsValue> {
+        retained_response_words(
+            self.game.take_retained_response(),
+            &mut self.retained_response,
+        )
+    }
+    pub fn retained_history_pin(&self) -> Result<Option<u64>, JsValue> {
+        self.game.retained_history_pin().map_err(error)
+    }
+    pub fn retained_observe_presentation(
+        &mut self,
+        output_ns: i64,
+        host_ns: i64,
+    ) -> Result<(), JsValue> {
+        if output_ns < 0 || host_ns < 0 || self.game.retained_setup().is_none() {
+            return Err(error(
+                "retained presentation requires nonnegative actual output and HOST points",
+            ));
+        }
+        let epoch = self
+            .game
+            .audio_authority()
+            .ok_or_else(|| error("audio authority is unavailable"))?
+            .epoch()
+            .id;
+        self.game
+            .observe_audio_coordinate(
+                epoch,
+                ClockPair {
+                    source: point(OUTPUT, output_ns),
+                    target: point(HOST, host_ns),
+                },
+                crate::native_output_coordinate::NativeOutputCoordinate::Counter {
+                    position: output_ns as u64,
+                    frequency: 1_000_000_000,
+                },
+            )
+            .map(|_| ())
+            .map_err(error)
     }
 
     /// Actual pristine judge/profile/chart-branch identity for the shared native
@@ -692,7 +1331,9 @@ impl BrowserGame {
     }
     /// Explicit actual peer evidence, with no local clock or scoring authority.
     pub fn update_peer_hud(&mut self, status: u32, words: Vec<u32>) -> Result<(), JsValue> {
-        self.saved_hud.update_peer(status, &words).map_err(error)
+        self.saved_hud.update_peer(status, &words).map_err(error)?;
+        self.peer_competition = true;
+        Ok(())
     }
     pub fn disable_peer_hud(&mut self) {
         self.saved_hud.mark_peer_failed();
@@ -773,6 +1414,11 @@ impl BrowserGame {
     /// once. The binding does not create a file or infer a complete-song label.
     pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
         self.game.take_replay().map_err(error)
+    }
+    pub fn take_retired_replay(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
+        self.game
+            .take_retired_replay(crate::local_players::PlayerId(1))
+            .map_err(error)
     }
     pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
         if host_ns < 0 || self.input_queue.is_some() {
@@ -871,6 +1517,9 @@ impl BrowserGame {
     /// Retain an original Window/audio correspondence for queued input.
     /// Only serviced actual output evidence advances gameplay; no rate is applied.
     pub fn observe_presentation(&mut self, output_ns: i64, host_ns: i64) -> Result<(), JsValue> {
+        if self.game.retained_setup().is_some() {
+            return self.retained_observe_presentation(output_ns, host_ns);
+        }
         if output_ns < 0 || host_ns < 0 {
             self.game.fail();
             return Err(error("browser presentation points must be nonnegative"));
@@ -912,9 +1561,13 @@ impl BrowserGame {
         if self.game.failed() {
             return Err(error(StepGameplayError::Failed));
         }
-        let decoded = match self.game.playback_end_frame() {
-            Some(end) => decode_section_output(&words, Some(end)),
-            None => decode_output(&words),
+        let decoded = if self.game.retained_setup().is_some() {
+            decode_retained_output(&words)
+        } else {
+            match self.game.playback_end_frame() {
+                Some(end) => decode_section_output(&words, Some(end)),
+                None => decode_output(&words),
+            }
         };
         let evidence = match decoded {
             Ok(evidence) => evidence,

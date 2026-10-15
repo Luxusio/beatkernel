@@ -829,6 +829,13 @@ impl BrowserPreparationJob {
             movies,
             replay,
         } = original;
+        // Preserve the full lane/visual inventory before selecting only the
+        // initial judge section; backward retained seeks reuse this geometry.
+        let retained_chart = self
+            .retained_practice
+            .then(|| PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart))
+            .transpose()
+            .map_err(js_error)?;
         let (prepared, start, play_policy, retained) = if self.retained_practice {
             let (start, policy) = match self.mode {
                 BrowserPreparationMode::Original => (Timestamp::ZERO, None),
@@ -909,8 +916,11 @@ impl BrowserPreparationJob {
             };
             (prepared, start, play_policy, None)
         };
-        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
-            .map_err(js_error)?;
+        let chart = match retained_chart {
+            Some(chart) => chart,
+            None => PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+                .map_err(js_error)?,
+        };
         Ok(BrowserPrepared {
             prepared,
             visual_preview: None,

@@ -24,6 +24,13 @@ pub struct WorkletAudioConfig {
     pub pcm_limits: PcmLimits,
     pub audio_limits: AudioLimits,
 }
+
+/// Mixer-relative projection grid, independent of external browser clock epochs.
+pub(crate) const WORKLET_MIXER_ORIGIN: ClockPoint = ClockPoint {
+    domain: ClockDomainId(1),
+    timestamp: Timestamp::ZERO,
+};
+
 #[derive(Clone, Copy, Debug)]
 pub struct WorkletRetainedConfig {
     pub program_id: u64,
@@ -130,8 +137,8 @@ impl WorkletAudioBuilder {
         let (producer, consumer) = command_queue(self.config.audio_limits.queue_capacity())?;
         let mixer_config = MixerConfig::new(
             self.config.format,
-            ClockDomainId(1),
-            Timestamp::ZERO,
+            WORKLET_MIXER_ORIGIN.domain,
+            WORKLET_MIXER_ORIGIN.timestamp,
             self.config.audio_limits,
         );
         let mixer_config = match playback_end_frame {
