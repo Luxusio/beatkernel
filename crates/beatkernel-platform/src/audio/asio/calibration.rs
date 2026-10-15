@@ -18,29 +18,20 @@ pub struct AsioPresentationClock {
 fn validate(
     observation: AsioPresentationObservation,
 ) -> Result<(i64, i128, u64), AsioPresentationError> {
-    if observation.sample_rate == 0
-        || observation.render.frames == 0
-        || observation.host.before.domain != observation.host.after.domain
-        || observation.host.before.timestamp > observation.host.after.timestamp
-        || observation.output_origin.domain != observation.output.domain
-        || observation.output.domain == observation.host.before.domain
-    {
+    let validated = AsioPresentationObservation::from_delivery(
+        observation.render,
+        observation.delivered_first_frame,
+        observation.delivered_frames,
+        observation.sample_rate,
+        observation.host,
+        0,
+        0,
+        observation.output_origin,
+    )?;
+    if validated.output != observation.output {
         return Err(AsioPresentationError::Malformed);
     }
-    let end = observation
-        .render
-        .start_frame
-        .checked_add(
-            u64::try_from(observation.render.frames)
-                .map_err(|_| AsioPresentationError::Overflow)?,
-        )
-        .ok_or(AsioPresentationError::Overflow)?;
-    let grid = i128::from(observation.output_origin.timestamp.as_nanos())
-        + i128::from(observation.render.start_frame) * 1_000_000_000
-            / i128::from(observation.sample_rate);
-    if grid != i128::from(observation.output.timestamp.as_nanos()) {
-        return Err(AsioPresentationError::Malformed);
-    }
+    let end = validated.delivered_end_frame()?;
     let before = i128::from(observation.host.before.timestamp.as_nanos());
     let width = i128::from(observation.host.after.timestamp.as_nanos()) - before;
     let midpoint =
@@ -75,8 +66,8 @@ impl AsioPresentationClock {
         if first.output_origin != second.output_origin
             || first.output.domain != second.output.domain
             || first.host.before.domain != second.host.before.domain
-            || second.render.start_frame <= first.render.start_frame
-            || second.render.start_frame < first_end
+            || second.delivered_first_frame <= first.delivered_first_frame
+            || second.delivered_first_frame < first_end
             || second_midpoint <= first_midpoint
         {
             return Err(AsioPresentationError::Malformed);
@@ -294,6 +285,7 @@ mod fixtures {
         );
         let mut overlapping = first;
         overlapping.render.frames = 11;
+        overlapping.delivered_frames = 11;
         assert!(
             AsioPresentationClock::from_observations(
                 overlapping,

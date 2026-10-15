@@ -1,7 +1,7 @@
 //! Supplied original ASIO blocks exercise admission, without SDK or device claims.
 use super::*;
-use beatkernel::audio::{AudioCounters, RenderReport};
 use crate::audio::asio::MultimediaHostInterval;
+use beatkernel::audio::{AudioCounters, RenderReport};
 
 fn point(domain: u32, ns: i64) -> ClockPoint {
     ClockPoint {
@@ -297,4 +297,201 @@ fn actual_scalar_discipline_keeps_native_and_estimator_owners_atomic_at_flat_nan
         Ok(ObservationAdmission::Unchanged)
     );
     assert_eq!(format!("{discipline:?}"), progressed);
+}
+
+fn delivered(
+    render: RenderReport,
+    first: u64,
+    frames: usize,
+    hz: u32,
+    before: i64,
+    after: i64,
+) -> AsioPresentationObservation {
+    AsioPresentationObservation::from_delivery(
+        render,
+        first,
+        frames,
+        hz,
+        MultimediaHostInterval {
+            before: point(1, before),
+            after: point(1, after),
+        },
+        0,
+        0,
+        point(2, 0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn adjacent_deliveries_from_same_original_report_progress_even_at_equal_nanoseconds() {
+    for hz in [1_000_000_000, 2_000_000_000, u32::MAX] {
+        for use_basis in [false, true] {
+            let basis = use_basis.then(|| OutputFrameBasis::new(point(2, 0), hz, 0).unwrap());
+            let render = block(0, 4, hz, 90, 110).render;
+            let first = delivered(render, 0, 1, hz, 90, 110);
+            let second = delivered(render, 1, 1, hz, 190, 230);
+            let mut v = validator();
+            admit(&mut v, first, basis);
+            admit(&mut v, second, basis);
+            assert_eq!(v.latest_pair().unwrap().source, second.output);
+            assert_eq!(v.latest_pair().unwrap().target, point(1, 210));
+            let OriginalNativePresentationEvidence::Asio { observation, .. } =
+                *v.latest_record().unwrap().evidence()
+            else {
+                panic!("ASIO evidence was replaced by a scalar relation");
+            };
+            assert_eq!(observation.render, render);
+            assert_eq!(observation.delivered_first_frame, 1);
+            assert_eq!(observation.delivered_frames, 1);
+        }
+    }
+}
+
+#[test]
+fn captured_basis_applies_to_first_delivery_instead_of_original_report_start() {
+    let hz = 1_000_000_000;
+    let render = block(0, 16, hz, 90, 110).render;
+    let basis = OutputFrameBasis::new(point(2, 0), hz, 8).unwrap();
+    let mut v = NativePresentationValidator::new(7, point(2, 8), ClockDomainId(1));
+    admit(&mut v, delivered(render, 8, 4, hz, 90, 110), Some(basis));
+    let before = v.state;
+    assert_eq!(
+        v.prepare_asio(7, delivered(render, 7, 1, hz, 190, 210), Some(basis)),
+        Err(DisciplineError::AsioPresentation(
+            AsioPresentationError::Malformed
+        ))
+    );
+    assert_eq!(v.state, before);
+    admit(&mut v, delivered(render, 12, 4, hz, 190, 210), Some(basis));
+    assert_eq!(v.latest_pair().unwrap().source, point(2, 12));
+}
+
+#[test]
+fn duplicate_prefix_never_refreshes_original_host_or_report() {
+    let hz = 1_000_000_000;
+    let render = block(10, 16, hz, 90, 110).render;
+    let first = delivered(render, 10, 4, hz, 90, 110);
+    let mut v = validator();
+    admit(&mut v, first, None);
+    let before = v.state;
+    let prepared = v
+        .prepare_asio(7, delivered(render, 10, 4, hz, 9_000, 11_000), None)
+        .unwrap();
+    assert_eq!(prepared.admission(), NativeObservationAdmission::Unchanged);
+    assert_eq!(prepared.correlation_pair(), None);
+    assert_eq!(
+        v.commit(prepared),
+        Ok(NativeObservationAdmission::Unchanged)
+    );
+    assert_eq!(v.state, before);
+    assert_eq!(
+        v.latest_record().unwrap().evidence(),
+        &OriginalNativePresentationEvidence::Asio {
+            observation: first,
+            basis: None
+        }
+    );
+    let mut changed_report = render;
+    changed_report.counters.commands_consumed = 1;
+    for changed in [
+        delivered(render, 10, 3, hz, 190, 210),
+        delivered(render, 10, 5, hz, 190, 210),
+        delivered(changed_report, 10, 4, hz, 190, 210),
+    ] {
+        assert_eq!(
+            v.prepare_asio(7, changed, None),
+            Err(DisciplineError::NonIncreasing)
+        );
+        assert_eq!(v.state, before);
+    }
+}
+
+#[test]
+fn prefix_overlap_frame_or_host_regression_refuse_without_losing_pending_progress() {
+    let hz = 1_000_000_000;
+    let render = block(10, 16, hz, 90, 110).render;
+    let mut v = validator();
+    admit(&mut v, delivered(render, 12, 4, hz, 90, 110), None);
+    let before = v.state;
+    for changed in [
+        delivered(render, 11, 1, hz, 190, 210),
+        delivered(render, 15, 1, hz, 190, 210),
+        delivered(render, 16, 4, hz, 80, 100),
+    ] {
+        assert_eq!(
+            v.prepare_asio(7, changed, None),
+            Err(DisciplineError::NonIncreasing)
+        );
+        assert_eq!(v.state, before);
+    }
+    let deferred = v
+        .prepare_asio(7, delivered(render, 16, 4, hz, 95, 105), None)
+        .unwrap();
+    assert_eq!(
+        deferred.admission(),
+        NativeObservationAdmission::AwaitingHostProgress
+    );
+    assert_eq!(
+        v.commit(deferred),
+        Ok(NativeObservationAdmission::AwaitingHostProgress)
+    );
+    assert_eq!(v.state, before);
+    admit(&mut v, delivered(render, 16, 4, hz, 190, 210), None);
+}
+
+#[test]
+fn forged_delivery_extents_and_grid_refuse_before_duplicate_classification() {
+    let hz = 1_000_000_000;
+    let render = block(10, 16, hz, 90, 110).render;
+    let first = delivered(render, 10, 4, hz, 90, 110);
+    let mut v = validator();
+    admit(&mut v, first, None);
+    let before = v.state;
+    let mut empty = first;
+    empty.delivered_frames = 0;
+    let mut outside = first;
+    outside.delivered_frames = 17;
+    let mut wrong_grid = first;
+    wrong_grid.output.timestamp = Timestamp::from_nanos(11);
+    let mut original_overflow = first;
+    original_overflow.render.start_frame = u64::MAX - 1;
+    original_overflow.render.frames = 2;
+    for malformed in [empty, outside, wrong_grid] {
+        assert_eq!(
+            v.prepare_asio(7, malformed, None),
+            Err(DisciplineError::AsioPresentation(
+                AsioPresentationError::Malformed
+            ))
+        );
+        assert_eq!(v.state, before);
+    }
+    assert_eq!(
+        v.prepare_asio(7, original_overflow, None),
+        Err(DisciplineError::AsioPresentation(
+            AsioPresentationError::Overflow
+        ))
+    );
+    assert_eq!(v.state, before);
+}
+
+#[test]
+fn prepared_prefix_is_bound_to_original_delivered_extent_even_with_same_pair() {
+    let hz = 1_000_000_000;
+    let render = block(10, 16, hz, 90, 110).render;
+    let mut a = validator();
+    let mut b = validator();
+    admit(&mut a, delivered(render, 10, 2, hz, 90, 110), None);
+    admit(&mut b, delivered(render, 10, 4, hz, 90, 110), None);
+    assert_eq!(a.latest_pair(), b.latest_pair());
+    let next = a
+        .prepare_asio(7, delivered(render, 14, 2, hz, 190, 210), None)
+        .unwrap();
+    let before = b.state;
+    assert_eq!(
+        b.commit(next),
+        Err(NativePreparationError::StalePreparation)
+    );
+    assert_eq!(b.state, before);
+    assert_eq!(a.commit(next), Ok(NativeObservationAdmission::Progress));
 }

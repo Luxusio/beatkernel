@@ -6,19 +6,23 @@ use beatkernel::{
     time::{ClockPoint, Timestamp},
 };
 
-/// One actual rendered block paired with a caller-bounded host presentation interval.
+/// One delivered part of an actual render paired with a host presentation interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AsioPresentationObservation {
     /// Immutable Mixer sample rate used to define the output grid.
     pub sample_rate: u32,
     /// Caller-assigned frame-zero origin, retained for calibration validation.
     pub output_origin: ClockPoint,
-    /// Output-grid point of the actual block's first rendered frame.
+    /// Output-grid point of the first frame actually delivered to native output.
     pub output: ClockPoint,
     /// Inclusive host interval after explicit driver latency and error accounting.
     pub host: MultimediaHostInterval,
     /// Actual successful Mixer report identifying the prepared block.
     pub render: RenderReport,
+    /// First physical frame actually delivered from the original render.
+    pub delivered_first_frame: u64,
+    /// Number of frames actually delivered from the original render.
+    pub delivered_frames: usize,
 }
 
 /// Invalid, unavailable or unrepresentable ASIO presentation relation.
@@ -72,7 +76,7 @@ impl From<beatkernel::time::CalibrationError> for AsioPresentationError {
 }
 
 impl AsioPresentationObservation {
-    /// Maps an actual rendered frame using an explicitly established switch interval.
+    /// Maps an entire render using an explicitly established switch interval.
     ///
     /// Output time floors the rational frame time, losing less than one nanosecond.
     /// Host latency floors the lower endpoint and ceils the upper endpoint, then
@@ -80,6 +84,32 @@ impl AsioPresentationObservation {
     /// do not establish physical precision. Native sample position is not used.
     pub fn from_render(
         render: RenderReport,
+        sample_rate: u32,
+        switch_host: MultimediaHostInterval,
+        output_latency_frames: u32,
+        latency_error_ns: u64,
+        output_origin: ClockPoint,
+    ) -> Result<Self, AsioPresentationError> {
+        Self::from_delivery(
+            render,
+            render.start_frame,
+            render.frames,
+            sample_rate,
+            switch_host,
+            output_latency_frames,
+            latency_error_ns,
+            output_origin,
+        )
+    }
+
+    /// Maps a positive delivered interval contained in the unchanged original render.
+    ///
+    /// Output time floors the delivered first frame's rational time. HOST bounds
+    /// retain the same explicit latency/error accounting as [`Self::from_render`].
+    pub fn from_delivery(
+        render: RenderReport,
+        delivered_first_frame: u64,
+        delivered_frames: usize,
         sample_rate: u32,
         switch_host: MultimediaHostInterval,
         output_latency_frames: u32,
@@ -94,12 +124,9 @@ impl AsioPresentationObservation {
         {
             return Err(AsioPresentationError::Malformed);
         }
-        render
-            .start_frame
-            .checked_add(u64::try_from(render.frames).map_err(|_| AsioPresentationError::Overflow)?)
-            .ok_or(AsioPresentationError::Overflow)?;
+        checked_delivery_end(render, delivered_first_frame, delivered_frames)?;
         let rate = i128::from(sample_rate);
-        let frame_ns = i128::from(render.start_frame) * 1_000_000_000 / rate;
+        let frame_ns = i128::from(delivered_first_frame) * 1_000_000_000 / rate;
         let output_ns = i128::from(output_origin.timestamp.as_nanos()) + frame_ns;
         let latency_numerator = i128::from(output_latency_frames) * 1_000_000_000;
         let latency_floor = latency_numerator / rate;
@@ -132,8 +159,40 @@ impl AsioPresentationObservation {
                 },
             },
             render,
+            delivered_first_frame,
+            delivered_frames,
         })
     }
+
+    /// Checks original-render containment and returns the exclusive delivered end.
+    pub fn delivered_end_frame(self) -> Result<u64, AsioPresentationError> {
+        checked_delivery_end(
+            self.render,
+            self.delivered_first_frame,
+            self.delivered_frames,
+        )
+    }
+}
+
+fn checked_delivery_end(
+    render: RenderReport,
+    first_frame: u64,
+    frames: usize,
+) -> Result<u64, AsioPresentationError> {
+    if render.frames == 0 || frames == 0 {
+        return Err(AsioPresentationError::Malformed);
+    }
+    let render_end = render
+        .start_frame
+        .checked_add(u64::try_from(render.frames).map_err(|_| AsioPresentationError::Overflow)?)
+        .ok_or(AsioPresentationError::Overflow)?;
+    let delivered_end = first_frame
+        .checked_add(u64::try_from(frames).map_err(|_| AsioPresentationError::Overflow)?)
+        .ok_or(AsioPresentationError::Overflow)?;
+    if first_frame < render.start_frame || delivered_end > render_end {
+        return Err(AsioPresentationError::Malformed);
+    }
+    Ok(delivered_end)
 }
 
 #[cfg(test)]

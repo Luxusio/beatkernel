@@ -400,7 +400,7 @@ impl NativePresentationValidator {
         self.validate_epoch(epoch)?;
         let expected_origin = if let Some(basis) = basis {
             if basis.sample_rate() != observation.sample_rate
-                || observation.render.start_frame < basis.start_physical_frame()
+                || observation.delivered_first_frame < basis.start_physical_frame()
             {
                 return Err(DisciplineError::AsioPresentation(
                     AsioPresentationError::Malformed,
@@ -423,8 +423,10 @@ impl NativePresentationValidator {
         {
             return Err(DisciplineError::DomainMismatch);
         }
-        let validated = AsioPresentationObservation::from_render(
+        let validated = AsioPresentationObservation::from_delivery(
             observation.render,
+            observation.delivered_first_frame,
+            observation.delivered_frames,
             observation.sample_rate,
             observation.host,
             0,
@@ -470,13 +472,18 @@ impl NativePresentationValidator {
             if previous_observation.sample_rate != observation.sample_rate {
                 return Err(DisciplineError::FrequencyChanged);
             }
-            if observation.render.start_frame < previous_observation.render.start_frame {
+            if observation.delivered_first_frame < previous_observation.delivered_first_frame {
                 return Err(DisciplineError::NonIncreasing);
             }
-            if observation.render.start_frame == previous_observation.render.start_frame {
+            if observation.delivered_first_frame == previous_observation.delivered_first_frame {
+                if observation.delivered_frames != previous_observation.delivered_frames
+                    || observation.render != previous_observation.render
+                {
+                    return Err(DisciplineError::NonIncreasing);
+                }
                 return Ok(self.prepared(candidate, NativeObservationAdmission::Unchanged));
             }
-            if observation.render.start_frame < asio_end(previous_observation)?
+            if observation.delivered_first_frame < asio_end(previous_observation)?
                 // Original nonoverlapping block progress may occupy the same integer
                 // nanosecond on a high-rate grid; rounding cannot replace frame order.
                 || pair.source.timestamp < previous.pair.source.timestamp
@@ -593,10 +600,6 @@ mod frame_fixtures;
 mod asio_coordinate_fixtures;
 fn asio_end(observation: AsioPresentationObservation) -> Result<u64, DisciplineError> {
     observation
-        .render
-        .start_frame
-        .checked_add(
-            u64::try_from(observation.render.frames).map_err(|_| DisciplineError::Overflow)?,
-        )
-        .ok_or(DisciplineError::Overflow)
+        .delivered_end_frame()
+        .map_err(DisciplineError::AsioPresentation)
 }
