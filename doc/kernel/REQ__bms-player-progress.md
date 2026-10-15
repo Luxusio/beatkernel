@@ -10,9 +10,12 @@
 2026-10-15 실행 중 배속 전환05.13.06은 W다. 공유 phase·PCM·exact Transport
 history·가변 source 기록의 AC001–004를 구현하고 core 전체816/0·app 관련81/0을
 확인했다. 앞선 scoped 검사는 subset이므로 더하지 않는다. 이어서 Worklet public24/0·
-library24/0, typed mailbox30/0과 browser-audio WASM check가 통과했다. 현재 공통
-owner와 retained UI를 두 구현·테스트 쌍으로 병렬 작성 중이다. 실제 native6곳의
-runtime cold 조립·browser 수직 연결과 독립 전체 review/QA는 남는다.
+library24/0, typed mailbox30/0과 browser-audio WASM check가 통과했다. 이어서 공통
+owner10/0·capture12/0·SessionLaunch7/0·lineage5/0, browser retained 준비5/0·
+timing policy7/0, public native control11/0·retained RateView8/0·실제 desktop
+제어14/0·IME3/0을 확인했다. 겹치는 library 검사 수는 더하지 않는다. 현재 공통
+native pump·browser Step/WASM owner·실제 native6곳 runtime 시작 조립을 세 쌍으로
+병렬 진행하며, browser JS 수직 연결과 독립 전체 review/QA는 남는다.
 [runtime 배속](REQ__runtime-playback-rate.md)과
 [실제 변경/검증 범위](../changes/2026-10-15-runtime-playback-rate.md)를 따른다.
 전체 runtime 지원 완료가 아니므로 완료 수/분모136/489는 유지한다.

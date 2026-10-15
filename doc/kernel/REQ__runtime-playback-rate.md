@@ -78,6 +78,11 @@ callback은 모든 head와 cursor의 변경 가능성을 먼저 검사하고, �
 할당/해제, 잠금, I/O를 새로 도입하지 않는다. 기존 명령 credit/ACK도 보존한다.
 
 Browser는 arm 전에 원본 cue와 초기 구간으로 retained Program을 설치한다.
+준비 job의 첫 advance 전에 retained 모드를 명시적으로 선택한다. 이 모드에서는
+초기 judge의 구간만 선택하고 원본 채보·sample ID·PCM bank·sound binding·전체
+BGM cue를 보존한다. 뒤로 이동하거나 F5를 실행할 때 이미 잘린 PCM suffix에서
+복원하지 않는다. 이미 진행·완료·취소·인계된 job이나 recorded replay 준비를
+나중에 retained live 준비로 바꾸지 않는다. 기존 일반·replay 준비 경로는 유지한다.
 기존 고정 BgmFeeder와 이중으로 같은 cue를 예약하지 않는다. 게임 Worker가
 불변 원본 cue/sample geometry에서 rate 준비를 수행하고 전용 제어 포트로
 bounded 결과를 전달한다. Worklet은 원래 Program 식별자·revision·rate와 현재
@@ -86,6 +91,10 @@ bounded 결과를 전달한다. Worklet은 원래 Program 식별자·revision·r
 
 Native Source/Target와 solo/local은 같은 business port를 사용한다. local cohort는
 하나의 실제 cut/rate를 공유하고 모든 member의 commit을 준비한 뒤 반영한다.
+원시 출력 domain과 기록용 normalized logical domain은 서로 다를 수 있다.
+member들의 header는 같은 logical domain을 사용하고 실제 Transport basis와
+native proof의 logical output으로 검증한다. Mixer의 raw origin과 같다고 가정하지
+않으며 잘못된 domain의 준비는 기존 owner와 pending 요청을 보존한 채 거절한다.
 요청 전에 capacity를 확보하되, 실제 event가 오기 전 예상 cut으로 Transport를
 확정하지 않는다. backend 교체나 sample-rate 변경으로 배속을 흉내 내지 않는다.
 
@@ -94,6 +103,19 @@ Native Source/Target와 solo/local은 같은 business port를 사용한다. loca
 scrub/loop는 현재 적용된 배속을 유지한다. F5는 기존 계약대로 원래 invocation의
 start/end/선택 배속을 하나의 compound 경계에서 복원한다. region 변경과 rate
 변경을 따로 승인해 중간 상태를 만들지 않는다.
+
+RuntimeGroup과 SoloRuntime의 일반 구간 교체는 초기 anchor가 아닌 현재 적용된
+runtime 배속을 보존하고 fixed/runtime 모드를 섞지 않는다. 서로 다른 배속의 새
+attempt는 실제 compound original-restart를 확인한 전용 경로에서만 설치한다.
+이때도 원래 출력 owner/domain/sample grid, 증가한 generation, 새 judge와 원본
+object/profile 검증을 유지한다. fresh business는 실제 누적 revision을 이어받는다.
+
+Browser의 fresh 구간 경계는 이전 모든 member의 accepted capture를 하나의
+bounded retired-cohort slot으로 이동한다. Worker가 기존 기록 저장 흐름으로
+전원을 회수하기 전에는 다음 fresh 경계를 확정·ACK하지 않는다. 현재 capture의
+기존 stopped export 의미는 유지하며, 이미 종료된 attempt의 별도 export로
+이전 prefix를 회수한다. 종료·오류에서도 남은 prefix를 버리지 않고, 미완료
+prefix를 완료 결과로 표시하지 않는다. Rate 변경 자체는 attempt를 종료하지 않는다.
 
 실제 non-noop 전환만 원본 곡의 정확한 phase와 rate를 포함한 canonical 이력에
 추가한다. 원래 배속으로 돌아와도 가변 배속 기록이다. 원본 replay operation과
@@ -109,6 +131,12 @@ framework를 추가하지 않고 app이 effective header를 소유한다.
 pending 중 새 report도 예약한 header 증가분을 file limit에 포함한다. report별
 codec 검사는 원래 고정 recorder header와 고정 base 길이를 재사용하고, 점점
 길어지는 배속 이력 전체를 입력마다 clone/encode하지 않는다.
+
+실제 event를 받은 뒤 준비 검사가 실패하거나 준비 payload를 폐기해도 원래
+pending 예약은 commit·거절까지 유지한다. 그 사이 새 report가 예약된 공간을
+차지하거나, 실제 PCM 배속은 바뀌었는데 기록 이력을 확정하지 못하면 안 된다.
+Cold 준비 token의 복제본은 하나의 예약을 공유하고 첫 commit 또는 명시 취소가
+다른 복제본을 무효화한다. 마지막 미확정 token을 폐기하면 예약이 해제된다.
 
 고정 조건으로 이미 admission된 saved/network 경쟁은 배속 전환을 이유와 함께
 거절하고 상대 기록을 유지한다. 가변 배속 기록은 열기·리플레이·기록 조회가

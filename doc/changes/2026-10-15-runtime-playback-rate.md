@@ -26,6 +26,12 @@ calibrated allocation/reallocation/deallocation0을 확인했다. 앞선 독립 
   실제 Applied/Noop/Refused 상태·revision 검증, legacy host 기본 거절.
 - `144bf04c`: retained Worklet Program·portable 배속 준비·실제 PCM 이벤트와
   pause/history pin·strict numeric ABI 및 BrowserAudio export.
+- `faed4bec`: 초기 judge만 선택하고 원본 PCM/binding/BGM을 이동 보존하는
+  browser retained 준비와 최초 advance 이전 opt-in.
+- `7247d64c`: 실제 native proof와 공통 controller-free rate business,
+  모든 member의 Transport/header/capture 반영과 현재 배속 구간·원래 설정 F5.
+- `6cad2ac3`: Play lifecycle에 붙는 retained 선언형 RateView와 typed host 전달,
+  키보드·IME·clipboard·실제 결과 기반 배속 제어.
 
 현재 core 전체는82개 suite의 **816/0**, app의 기록·리플레이 관련7개 suite는
 **81/0**이다. app에는 새 identity9개·capture10개와 기존 회귀62개가 포함된다.
@@ -64,11 +70,11 @@ legacy owner1개가 포함되며 별도 신규 개수로 중복 합산하지 않
 누적 physical end 일치 검사를 추가해24/0이 됐다. 기존 plain/finite decoder는
 변경하지 않았다. 실패 로그와 corrected 로그는 같은 작업 폴더에 따로 보존한다.
 
-이는 실행 중 배속 전환 전체의 완료가 아니다. 현재 AC001–004와 AC013의 기반
-검증을 마쳤다. AC012 오디오 WASM의 첫 check는 cold sample_limit accessor 누락으로
+이는 실행 중 배속 전환 전체의 완료가 아니다. 현재 AC001–005·007·012·013·015의
+소프트웨어 기반 검증을 마쳤다. AC012 오디오 WASM의 첫 check는 cold sample_limit accessor 누락으로
 실패했고 누락을 추가한 뒤 browser-audio lib check가 통과했다. scoped format은
 기존 파일별2021/2024 style을 유지해 통과했다.
-공통 owner와 native/browser UI 수직 연결, 실제
+공통 native pump·실제 시작 경로와 browser 수직 연결, 실제
 WASM/화면 동작, 전체 독립 code/security review와 필수 QA는 남아 있다.
 WBS05.13.06은 W, 완료 수는136/489다. 기존 Chromium strict network와 실제 장치
 acceptance의 환경 한계도 유지한다. Native IO06은 입력 항목도 포함하므로
@@ -77,5 +83,36 @@ acceptance의 환경 한계도 유지한다. Native IO06은 입력 항목도 포
 실제 native launcher6곳과 공통 audio/startup/policy가 여전히 fixed constructor를
 사용하는 연결 누락도 확인했다. AC014를 같은 기능의 후속 조립 단위로 명시하고
 AC010 통합 검사의 선행으로 추가했다. 새로운 제품 요구나 WBS 완료 수 증가는
-아니다. 현재 AC005 owner와 AC007 UI의 구현·독립 테스트 작성 두 쌍이 병렬 진행
-중이며, 작성 중 source에 대한 빌드는 두 쌍의 writer가 멈춘 뒤 수행한다.
+아니다. 이어서 AC005 owner·AC007 UI·AC015 원본 browser 준비의 구현/독립 테스트
+후보를 작성했다. 모든 writer가 멈춘 뒤 합친 browser WASM lib check가 통과했다.
+공통 owner10/0, SessionLaunch7/0, 기존 lineage5/0, capture12/0,
+retained 준비5/0, timing policy7/0, native presentation97/0 및 rate library108/0을
+확인했다. presentation97과 rate108에는 같은 새 native proof4개가 포함되므로
+합산하지 않는다. timing policy7개 중 retained 신규3개와 public 준비5개가 AC015의
+신규8개다. public native controls11/0과 retained RateView 신규8개(rate108 내부)도
+통과했다. 실제 desktop main bin 제어는 첫13/1의 marker를 수정한 뒤14/0,
+정확한 IME module 검사는3/0이다. 두 잘못된 lib/bin IME·desktop 필터의0개
+실행은 검증 근거로 계산하지 않았다. 실제 명령 결과는
+ui-desktop-bin-controls-marker-corrected.log와 ui-desktop-bin-ime-correct-filter.log에 있다.
+
+AC005 후보 검토에서 실제 적용 후 prepare 실패/폐기 시 기록 공간 예약이 풀리는
+공백도 확인했다. pending 원본 token을 유지하고 cold clone을 준비에 사용하도록
+수정했다. clone은 같은 예약 수명을 공유하며 commit/명시 취소는 다른 clone을
+무효화한다. 이 경로의 late report·동일 실제 cut retry·stale clone에 대한 신규
+회귀3개를 추가해 실제 통과했다. callback이나 입력마다 header를 clone하는 변경은
+아니다. 두 fixture의32f32에64byte asset cap을 준 오류는128byte로 바로잡았고
+PCM 기대값은 유지했다.
+
+이후 owner constructor가 raw Mixer domain과 normalized replay domain의 equality를
+잘못 요구하는 실제 결함도 확인했다. 원래 epoch 계약에 맞게 header 논리 domain의
+member 일관성과 실제 Transport/native proof의 logical output을 검사하도록 수정해
+owner10/0을 확인했다. RAW2/LOGICAL3은 그대로 검증하며 실제 입력이나 시계를
+재작성하지 않았다. desktop F5 fixture의 Refused marker를 Requested로 표기한
+입력도 ControlRejectedRevision으로 바로잡고 거짓 성공 marker 거절을 추가했다.
+
+다음 병렬 단위는 AC006 공통 native pump·AC008 browser Step/WASM owner·AC014
+6개 실제 native 시작 경로다. 각 구현과 독립 테스트 작성자를 분리하고 빌드는
+관련 writer가 모두 멈춘 뒤 실행한다. 이 연결 중 발견한 기존 group의 초기
+anchor-rate 비교와 F5 원래 배속 복구 충돌은 공통 RuntimeGroup/SoloRuntime에서
+해결하며, browser fresh 경계의 old capture 회수는 bounded 단일 cohort slot과
+별도 export로 유지한다. 이 후속 변경은 아직 검증 완료로 표시하지 않는다.
