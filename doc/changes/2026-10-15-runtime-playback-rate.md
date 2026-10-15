@@ -245,6 +245,16 @@ audio WASM은 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`
 이는 범위 내 software 검증이며 AC010 실제 browser 전체·독립 review/QA는 남는다.
 WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.
 
+
+아홉 번째 실제 실행74875는 같은7개 검사를 통과하고 loop 적용·자율 retired
+capture 회수·disable-loop까지 진행했다. 원래 NegativeElapsed는 발생하지 않았다.
+이후 비반복1→2초 구간이2x에서 정상 종료됐는데 runner가 뒤늦게 scrub용 checkbox를
+누르려 해 hidden Node 클릭 오류가 났다. 실제 stopped.songNs=2000000000,
+console/network0·owned browser/Xvfb exit0이며 원본은
+`target/wf/runtime-rate-browser-ninth-14113/evidence.json`이다. 정상 finite-end와
+recording/custody 의미를 유지하며 남은 실제 scrub/F5·local·fixed-opponent 흐름의
+runner 구성을 수정한다. 전체12개 검사를 통과한 것으로 표시하지 않는다.
+
 다섯 번째 실제 browser49352는 fresh artifact·solo 배속·pause/pending/resume·잘못된
 값 거절·자연 완료 variable record의5개 검사를 통과했다. 이후 retained 기록은
 명시 선택해야 하는 정상 UI인데 runner가 자동 선택을 가정해 Save 활성 대기에서
@@ -275,3 +285,45 @@ coordinate/region 경계의 원인을 분석하고 기존 기록·원본 시계 
 `target/wf/runtime-rate-browser-eighth-14111/evidence.json`이다. 두 실행의
 console/network는0이고 owned browser/Xvfb exit0이다. source checkpoint는
 `7fb921fc`이며, 실제 전체 strict browser와 독립 review/QA는 계속 미완료다.
+
+AC024 원인 분석: 실제 cut110191@44100의 HOST는19920821517이며,
+A=(2453154181ns,19875320000HOST), B=(2700699181ns,20122829999HOST)와
+획득 prefix20112629999가 A<cut<B·host(cut)≤prefix<host(B)를 만족했다.
+Authority가 선택한 원본 A는 이미 commit된 cut보다 앞서므로 advance=None인
+정상 prefix 확정이다. Step 솔로·로컬이 진행 여부 검사 전에 새 attempt 기준 phase를
+계산해 −45507950−229/441ns를 요구한 것이 오류 원인이다. 두 경로에서 실제
+Some(output)인 경우에만 phase를 계산하도록 순서를 수정했다. 기존 None 경로의
+authority commit·입력 prefix·원본 시계·retired File·실제 ACK 계약은 보존했다.
+추가 public seam 없이 기존 Worklet/Step rig의 capture on/off·solo/local 회귀를
+작성했다. 실제 fresh4ms를 둘러싼 원본3/5ms 관측과 획득 HOST4에서 None·새 상태
+불변을 확인하고, 같은5ms 관측까지 prefix를 올린 뒤 정확히 song3ms로 진행한다.
+기록의 이전/새 header·FIRST 원본 입력·retired/current File도 유지된다. Root의
+통합34/0(signed10·Step21·실제 PCM/replay3)이 통과했으며 원본은
+`target/wf/runtime-rate-14043/rust-fresh-frontier-first-14112.log`다. 새 release WASM과
+실제 browser 전체는 아직 미확인이라 전체 acceptance·WBS 완료 수는 올리지 않는다.
+
+AC025 관련 경로 감사에서 native solo/cohort도 같은 순서를 사용함을 확인했다.
+기존 Source rig의 lagged acquisition은 A29<C30≤prefix31<B34의 정상 frontier를
+만들 수 있고, Target/converted 경로도 같은 구조다. 기존 native correspondence
+검증을 공유하고, 진행 없는 경우에는 이를 검증하되 새 attempt 경과를 계산하지
+않도록 수정한다. Source/Target solo/cohort의 실제 production-port software 회귀와
+기존 identity/query/descriptor/logical 거절 검증을 병렬 작성 중이다. 이 분석이나
+software fixture로 실제 장치·SDK·드라이버 acceptance를 대신하지 않는다.
+
+AC025 첫 검증은 새 native 네 테스트의 두 번째 top-level run 진입이 기존 pristine
+보호 규칙에 걸렸다. 이 규칙은 유지하고 short/long stop마다 독립된 새 fixture로
+하나의 연속 run을 검증하도록 테스트 구성만 수정했다. Pure helper·기존 native
+검증은 그대로 유지했다. Rust libtest의 실제 다중 filter를 사용한 owning 재검증은
+51/0(ignored0, filtered3348)으로 통과했다. 원본은
+`target/wf/runtime-rate-14043/rust-native-fresh-regression-second-14113.log`다.
+각 Source/Target solo/cohort의 원본 cut·지연 prefix·pristine 새 상태와 후속
+양수 song9ms/9999999ns/1ms/3ms·capture·native ACK·replay hash를 확인했다.
+원래 public phase의 음수 경과 거절과 identity/query/descriptor/logical/domain
+거절도 유지됐다. 새 UI/audio release WASM·즉시 matching bindgen이 모두 통과했다.
+UI SHA256은 `b558327a6407d2fdcb3fe783c65a031796e5203f774e7c4b02448c2077f4347f`,
+audio는 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`다.
+원본 빌드는 `target/wf/runtime-rate-14043/browser-fresh-frontier-release-wasm-14113.log`,
+`browser-audio-fresh-frontier-release-wasm-14113.log`,
+`browser-fresh-frontier-bindgen-sha256-14113.log`에 있다. 실제 아홉 번째 browser로
+전체12개 journey를 재확인한다. 독립 review/QA와 hardware acceptance는 별도이며
+WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.

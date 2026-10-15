@@ -316,16 +316,16 @@ impl NativePlaybackMapping {
         Ok((query, point))
     }
 
-    /// Validates original chronology separately from the once-floored active duration.
-    /// The supplied attempt is the caller's actual transport binding, not an epoch ID.
-    pub fn phase(
+    /// Validate original correspondence even when a closure-only frontier
+    /// predates the current attempt's active origin. This grants no advance.
+    pub(crate) fn validate_correspondence(
         &self,
         presentation: &NativeAudioPresentation,
         expected_identity: SourcePlaybackIdentity,
         expected_query: &InterpolatedTargetTime,
         attempt: OutputPhaseBasis,
         logical: ClockPoint,
-    ) -> Result<OutputPhasePoint, NativePlaybackPhaseError> {
+    ) -> Result<(), NativePlaybackPhaseError> {
         use NativePlaybackPhaseError as Error;
         if self.epoch != presentation.authority().epoch().id
             || self.identity != expected_identity
@@ -341,8 +341,8 @@ impl NativePlaybackMapping {
             return Err(Error::Query);
         }
         let descriptor = presentation.authority().coordinate_basis();
-        let (origin, elapsed) = match self.mapping {
-            Mapping::Source { basis, facts } => {
+        let origin = match self.mapping {
+            Mapping::Source { basis, .. } => {
                 let matches = match descriptor {
                     Some(AudioAuthorityCoordinateBasis::SourceFrame(actual)) => actual == basis,
                     Some(AudioAuthorityCoordinateBasis::SourceCounter {
@@ -361,19 +361,9 @@ impl NativePlaybackMapping {
                 {
                     return Err(Error::Descriptor);
                 }
-                (
-                    basis.origin(),
-                    facts
-                        .playback
-                        .elapsed_nanos_at_source_time(
-                            self.query,
-                            self.identity.hz(),
-                            attempt.active_origin_frame(),
-                        )
-                        .map_err(|_| Error::Arithmetic)?,
-                )
+                basis.origin()
             }
-            Mapping::Converted { basis, facts } => {
+            Mapping::Converted { basis, .. } => {
                 if descriptor != Some(AudioAuthorityCoordinateBasis::TargetFrame(basis))
                     || presentation.basis().is_some()
                     || presentation
@@ -386,18 +376,7 @@ impl NativePlaybackMapping {
                 {
                     return Err(Error::Descriptor);
                 }
-                (
-                    basis.origin(),
-                    facts
-                        .phase
-                        .playback_elapsed_nanos_at_interpolated_time(
-                            self.query,
-                            facts.segment_end,
-                            facts.playback,
-                            attempt.active_origin_frame(),
-                        )
-                        .map_err(|_| Error::Arithmetic)?,
-                )
+                basis.origin()
             }
         };
         let raw = self.query.point(origin).map_err(|_| Error::Arithmetic)?;
@@ -409,6 +388,46 @@ impl NativePlaybackMapping {
         if normalized != logical {
             return Err(Error::LogicalPoint);
         }
+        if logical.domain != attempt.domain() {
+            return Err(Error::Phase);
+        }
+        Ok(())
+    }
+
+    /// Validates original chronology separately from the once-floored active duration.
+    /// The supplied attempt is the caller's actual transport binding, not an epoch ID.
+    pub fn phase(
+        &self,
+        presentation: &NativeAudioPresentation,
+        expected_identity: SourcePlaybackIdentity,
+        expected_query: &InterpolatedTargetTime,
+        attempt: OutputPhaseBasis,
+        logical: ClockPoint,
+    ) -> Result<OutputPhasePoint, NativePlaybackPhaseError> {
+        use NativePlaybackPhaseError as Error;
+        self.validate_correspondence(
+            presentation,
+            expected_identity,
+            expected_query,
+            attempt,
+            logical,
+        )?;
+        let elapsed = match self.mapping {
+            Mapping::Source { facts, .. } => facts.playback.elapsed_nanos_at_source_time(
+                self.query,
+                self.identity.hz(),
+                attempt.active_origin_frame(),
+            ),
+            Mapping::Converted { facts, .. } => {
+                facts.phase.playback_elapsed_nanos_at_interpolated_time(
+                    self.query,
+                    facts.segment_end,
+                    facts.playback,
+                    attempt.active_origin_frame(),
+                )
+            }
+        }
+        .map_err(|_| Error::Arithmetic)?;
         attempt
             .point_from_elapsed_nanos(logical, elapsed)
             .map_err(|_| Error::Phase)

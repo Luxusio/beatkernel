@@ -846,6 +846,84 @@ fn actual_source_frame_three_halves_loop_keeps_selected_rate_and_replay() {
         20
     );
 }
+
+#[test]
+fn actual_source_loop_closes_an_old_prefix_without_advancing_the_fresh_attempt() {
+    for stop_at in [7, 9] {
+        let mut f = Rig::new(Rate::NORMAL, true, false);
+        let pristine_judge = f.runtime.judge().stable_hash().unwrap();
+        let pristine_gauge = *f.gauge.snapshot();
+        f.device.stop_at = stop_at;
+        f.cfg.audio.gameplay.advance_lag = Duration::from_nanos(3_000_000);
+        assert!(f.device.events.is_empty());
+        // Genuine observations A29/C30/B34ms: HOST prefix31ms covers the
+        // actual loop, but the ordinary frontier still selects original A29.
+        let original_header = f.capture.as_ref().unwrap().header().clone();
+        assert!(f.run().unwrap().is_none());
+        f.assert_phase(2, Rate::NORMAL);
+        assert_eq!(
+            f.runtime
+                .transport_mut()
+                .output_phase_basis()
+                .unwrap()
+                .active_origin_frame(),
+            30
+        );
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert!(!f.playback.transition_pending());
+        assert!(f.playback.peek_receipt().unwrap().is_none());
+        assert!(f.device.mapped.borrow().iter().any(|(query, _)| query
+            .compare_target_time(TargetTime::from_frames(29, 1000).unwrap())
+            .is_eq()));
+        if stop_at == 7 {
+            assert_eq!(f.runtime.judge().stable_hash().unwrap(), pristine_judge);
+            assert_eq!(f.runtime.judge().effective_song_time(), None);
+            assert_eq!(*f.gauge.snapshot(), pristine_gauge);
+            assert!(f.capture.as_ref().unwrap().records().is_empty());
+        }
+
+        assert_eq!(f.recording.captures.len(), 1);
+        let old_header = f.recording.captures[0].header().clone();
+        assert_eq!(old_header, original_header);
+        assert_eq!(
+            f.recording.captures[0].records().last().unwrap().song_time,
+            Timestamp::from_nanos(30_000_000)
+        );
+        assert!(f.recording.captures[0]
+            .records()
+            .iter()
+            .all(|record| matches!(record.operation, ReplayOperation::Advance)));
+
+        // In the longer continuous run, the later acquired prefix covers
+        // original39ms: fresh elapsed39-30 =9ms.
+        if stop_at == 7 {
+            continue;
+        }
+        assert_eq!(f.playback.generation(), 2);
+        assert_eq!(
+            f.runtime.judge().effective_song_time(),
+            Some(Timestamp::from_nanos(9_000_000))
+        );
+        assert_eq!(
+            f.host.reports.last().unwrap().song_time,
+            Timestamp::from_nanos(9_000_000)
+        );
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert_eq!(f.recording.captures.len(), 1);
+        assert_eq!(f.recording.captures[0].header(), &old_header);
+        let fresh = f.capture.take().unwrap();
+        let setup = crate::replay_playback::decode_section_setup(&fresh.header().options).unwrap();
+        assert_eq!(setup.start, Timestamp::ZERO);
+        assert_eq!(setup.source_speed.rate(), Rate::NORMAL);
+        assert_eq!(
+            fresh.records().last().unwrap().song_time,
+            Timestamp::from_nanos(9_000_000)
+        );
+        f.assert_replay_matches_live_judge(fresh);
+    }
+}
 #[test]
 fn actual_source_frame_scrub_preserves_selected_speed_and_exact_cut() {
     let rate = Rate::new(3, 2).unwrap();

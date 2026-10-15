@@ -2207,11 +2207,11 @@ impl StepGameplay {
         if !state.permits_query(prepared.query())? {
             return Ok(None);
         }
-        let phase = state.phase_point(prepared.output(), prepared.query())?;
         let Some(output) = prepared.advance() else {
             authority.commit_coordinate_frontier(prepared, now, merger)?;
             return Ok(None);
         };
+        let phase = state.phase_point(prepared.output(), prepared.query())?;
         self.started = true;
         let result = self.runtime.solo_mut()?.advance_to_output_phase(
             output,
@@ -5221,13 +5221,13 @@ impl StepLocalGameplay {
         if !state.permits_query(prepared.query())? {
             return Ok(None);
         }
-        let phase = state.phase_point(prepared.output(), prepared.query())?;
         let Some(output) = prepared.advance() else {
             authority
                 .commit_coordinate_frontier(prepared, now, merger)
                 .map_err(StepGameplayError::from)?;
             return Ok(None);
         };
+        let phase = state.phase_point(prepared.output(), prepared.query())?;
         let errors = std::mem::take(&mut self.member_error_scratch);
         let result =
             self.group_mut()

@@ -181,6 +181,15 @@ pin도 따로 검사한다. event ACK나 최신 rendered frontier로 pin을 추�
 
 ## 구간 제어와 기록
 
+새 attempt의 실제 cut을 commit한 뒤에도 입력 획득 prefix가 오른쪽 관측 HOST에
+도달하기 전이면 일반 frontier가 cut 이전의 정상 관측을 선택할 수 있다. Authority가
+진행 없음(advance=None)을 반환한 경우 기존 prefix/frontier commit만 수행하며,
+그 관측을 새 attempt phase로 투영하지 않는다. 이후 실제 prefix가 도달했을 때만
+새 phase로 진행한다. 시계의 음수를 숨기거나 관측·cut을 합성하지 않는다.
+Native에서도 진행 없는 frontier의 원본 packet·epoch/identity/query·장치 descriptor·
+생성 origin·정규화 logical/attempt domain 검증을 유지한다. 음수 경과가 필요하지
+않다는 이유로 native correspondence 검증을 생략하지 않는다.
+
 scrub/loop는 현재 적용된 배속을 유지한다. F5는 기존 계약대로 원래 invocation의
 start/end/선택 배속을 하나의 compound 경계에서 복원한다. region 변경과 rate
 변경을 따로 승인해 중간 상태를 만들지 않는다.

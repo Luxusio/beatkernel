@@ -3981,23 +3981,36 @@ fn service_audio_cohort<
         else {
             return Ok(());
         };
-        let phase = mapping.phase(
-            presentation,
-            identity,
-            &query,
-            session
-                .group
-                .transport()
-                .output_phase_basis()
-                .ok_or("coordinate cohort lost output-phase binding")?,
-            frontier.output(),
-        )?;
+        let attempt = session
+            .group
+            .transport()
+            .output_phase_basis()
+            .ok_or("coordinate cohort lost output-phase binding")?;
+        let advance = if let Some(output) = frontier.advance() {
+            let phase = mapping.phase(
+                presentation,
+                identity,
+                &query,
+                attempt,
+                frontier.output(),
+            )?;
+            Some((output, phase))
+        } else {
+            mapping.validate_correspondence(
+                presentation,
+                identity,
+                &query,
+                attempt,
+                frontier.output(),
+            )?;
+            None
+        };
         if let Some(cut) = practice_source_cut {
             if !mapping.compare_physical_source_frame(cut)?.is_lt() {
                 return Ok(());
             }
         }
-        if let Some(output) = frontier.advance() {
+        if let Some((output, phase)) = advance {
             if let Some(end) = practice_end {
                 if session.group.transport().position_at_output_phase(phase)? >= end {
                     return Ok(());

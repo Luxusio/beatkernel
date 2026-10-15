@@ -70,6 +70,7 @@ struct Device {
     converted: ConvertedRenderReport,
     step: Rc<Cell<usize>>,
     frame: u64,
+    observation_stride: u64,
     generated: u64,
     last_acquired_frame: Option<u64>,
     close_at: usize,
@@ -87,7 +88,7 @@ struct Device {
 }
 impl Device {
     fn generate(&mut self) -> NativeGameplayResult<()> {
-        self.frame = 1 + self.step.get() as u64;
+        self.frame = 1 + self.step.get() as u64 * self.observation_stride;
         while self.generated < self.frame
             || (!self.allow_exclusive_clock && self.generated == self.frame)
         {
@@ -723,6 +724,7 @@ impl Fixture {
             converted,
             step: step.clone(),
             frame: 1,
+            observation_stride: 1,
             generated: 8,
             last_acquired_frame: None,
             close_at: 55,
@@ -1170,6 +1172,131 @@ fn runtime_target_cohort_unprojected_cut_preserves_all_gap_inputs_and_effective_
                     assert!(state.capture.is_none());
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn actual_target_cohort_loop_preserves_every_fresh_attempt_under_a_lagged_prefix() {
+    for stop_at in [5, 6] {
+        let ids = [7, 29];
+        let mut f = Fixture::new(&ids, true, false);
+        let pristine: Vec<_> = f
+            .states
+            .iter()
+            .map(|state| {
+                (
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .stable_hash()
+                        .unwrap(),
+                    *state.gauge.snapshot(),
+                )
+            })
+            .collect();
+        f.device.ids.clear();
+        f.device.observation_stride = 8;
+        f.device.close_at = stop_at;
+        f.config.audio.gameplay.advance_lag = Duration::from_nanos(2);
+        // Source20/firstTarget30 is the actual30ms song loop at selected3/2.
+        // Original HOST=100+4*target ns: A25<C30<B33, acquired32.5 covers
+        // the actual cut but ordinary presentation must still select A25.
+        assert!(f.run().unwrap().is_none());
+        let fresh_basis = f.group.transport().output_phase_basis().unwrap();
+        assert_eq!(fresh_basis.active_origin_frame(), 20);
+        assert_eq!(fresh_basis.generation(), 2);
+        assert_eq!(f.group.audio_scope(), CommandScope(2));
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert!(!f.practice.transition_pending());
+        assert!(f.practice.peek_receipt().unwrap().is_none());
+        assert!(f.device.queries.borrow().iter().any(|query| query
+            .compare_target_time(TargetTime::from_frames(25, 1500).unwrap())
+            .is_eq()));
+        assert_eq!(f.recordings.0.len(), ids.len());
+        if stop_at == 5 {
+            for (index, state) in f.states.iter().enumerate() {
+                assert_eq!(state.last_song, Timestamp::ZERO);
+                assert_eq!(
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .stable_hash()
+                        .unwrap(),
+                    pristine[index].0
+                );
+                assert_eq!(
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .effective_song_time(),
+                    None
+                );
+                assert_eq!(*state.gauge.snapshot(), pristine[index].1);
+                assert_eq!((state.score.hits, state.score.misses), (0, 0));
+                assert!(state.capture.as_ref().unwrap().records().is_empty());
+            }
+        }
+        for (player, old) in &f.recordings.0 {
+            assert!(ids.contains(&player.0));
+            assert_eq!(
+                old.records().last().unwrap().song_time,
+                Timestamp::from_nanos(30_000_000)
+            );
+            assert!(old.records().iter().all(|record| matches!(
+                record.operation,
+                beatkernel::replay::ReplayOperation::Advance
+            )));
+        }
+
+        // The original B33 maps exactly to Source22. Once the real acquired
+        // prefix covers it, new elapsed(22-20)ms at3/2 reaches song3ms.
+        if stop_at == 5 {
+            continue;
+        }
+        assert_eq!(f.group.transport().output_phase_basis(), Some(fresh_basis));
+        assert_eq!(f.practice.generation(), 2);
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert_eq!(f.recordings.0.len(), ids.len());
+        assert_eq!(f.device.scalar_calls, 0);
+        assert!(!f.group.poisoned());
+        for state in &f.states {
+            assert_eq!(state.last_song, Timestamp::from_nanos(3_000_000));
+            assert_eq!(
+                f.group
+                    .member_judge(state.player)
+                    .unwrap()
+                    .effective_song_time(),
+                Some(Timestamp::from_nanos(3_000_000))
+            );
+            let capture = state.capture.as_ref().unwrap();
+            let setup =
+                crate::replay_playback::decode_section_setup(&capture.header().options).unwrap();
+            assert_eq!(setup.start, Timestamp::ZERO);
+            assert_eq!(setup.source_speed.rate(), Rate::new(3, 2).unwrap());
+            assert_eq!(
+                capture.records().last().unwrap().song_time,
+                Timestamp::from_nanos(3_000_000)
+            );
+            let replay = crate::replay_playback::reconstruct_section(
+                &f.original,
+                beatkernel::replay::codec::ReplayFile::new(
+                    capture.header().clone(),
+                    capture.records().to_vec(),
+                ),
+                limits(),
+            )
+            .unwrap();
+            assert_eq!(
+                replay.engine().stable_hash().unwrap(),
+                f.group
+                    .member_judge(state.player)
+                    .unwrap()
+                    .stable_hash()
+                    .unwrap()
+            );
         }
     }
 }

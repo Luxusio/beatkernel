@@ -3745,23 +3745,36 @@ fn service_audio_solo<
         else {
             return Ok(());
         };
-        let phase = mapping.phase(
-            session.discipline.audio().expect("audio timing"),
-            identity,
-            &frontier.query(),
-            session
-                .runtime
-                .transport_mut()
-                .output_phase_basis()
-                .ok_or("coordinate Runtime lacks output phase")?,
-            frontier.output(),
-        )?;
+        let attempt = session
+            .runtime
+            .transport_mut()
+            .output_phase_basis()
+            .ok_or("coordinate Runtime lacks output phase")?;
+        let advance = if let Some(output) = frontier.advance() {
+            let phase = mapping.phase(
+                session.discipline.audio().expect("audio timing"),
+                identity,
+                &frontier.query(),
+                attempt,
+                frontier.output(),
+            )?;
+            Some((output, phase))
+        } else {
+            mapping.validate_correspondence(
+                session.discipline.audio().expect("audio timing"),
+                identity,
+                &frontier.query(),
+                attempt,
+                frontier.output(),
+            )?;
+            None
+        };
         if let Some(cut) = practice_source_cut {
             if !mapping.compare_physical_source_frame(cut)?.is_lt() {
                 return Ok(());
             }
         }
-        let report = if let Some(output) = frontier.advance() {
+        let report = if let Some((output, phase)) = advance {
             if let Some(end) = practice_end {
                 if session
                     .runtime

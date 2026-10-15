@@ -67,6 +67,7 @@ struct Device {
     report: RenderReport,
     step: Rc<Cell<usize>>,
     frame: u64,
+    observation_stride: u64,
     last_acquired_frame: Option<u64>,
     close_at: usize,
     unavailable: bool,
@@ -90,7 +91,7 @@ impl Device {
         .unwrap()
     }
     fn generate(&mut self) -> NativeGameplayResult<()> {
-        self.frame = 1 + self.step.get() as u64;
+        self.frame = 1 + self.step.get() as u64 * self.observation_stride;
         while self.mixer.frame_cursor() <= self.frame {
             self.report = self.mixer.render(&mut [0.0; 8])?;
         }
@@ -629,6 +630,7 @@ impl Fixture {
             report,
             step: step.clone(),
             frame: 1,
+            observation_stride: 1,
             last_acquired_frame: None,
             close_at: 55,
             unavailable: false,
@@ -888,6 +890,136 @@ fn direct_source_equal_cut_is_fresh_for_normal_and_selected_two_and_four_members
                     Some(host(cut))
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn actual_source_cohort_loop_preserves_every_fresh_attempt_under_a_lagged_prefix() {
+    for stop_at in [7, 8] {
+        let ids = [7, 29];
+        let mut f = Fixture::new_with_end(
+            &ids,
+            true,
+            false,
+            Rate::NORMAL,
+            Timestamp::from_nanos(30_000_000),
+        );
+        let pristine: Vec<_> = f
+            .states
+            .iter()
+            .map(|state| {
+                (
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .stable_hash()
+                        .unwrap(),
+                    *state.gauge.snapshot(),
+                )
+            })
+            .collect();
+        f.device.ids.clear();
+        f.device.observation_stride = 5;
+        f.device.close_at = stop_at;
+        f.config.audio.gameplay.advance_lag = Duration::from_nanos(2);
+        // Original HOST=100+4*frame ns. A26<C30<B31 and prefixHOST222
+        // (=Source30.5ms) cover the cut while selecting original A26.
+        assert!(f.run().unwrap().is_none());
+        let fresh_basis = f.group.transport().output_phase_basis().unwrap();
+        assert_eq!(fresh_basis.active_origin_frame(), 30);
+        assert_eq!(fresh_basis.generation(), 2);
+        assert_eq!(f.group.audio_scope(), CommandScope(2));
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert!(!f.practice.transition_pending());
+        assert!(f.practice.peek_receipt().unwrap().is_none());
+        assert!(f.device.queries.borrow().iter().any(|query| query
+            .compare_target_time(TargetTime::from_frames(26, 1000).unwrap())
+            .is_eq()));
+        assert_eq!(f.recordings.0.len(), ids.len());
+        if stop_at == 7 {
+            for (index, state) in f.states.iter().enumerate() {
+                assert_eq!(state.last_song, Timestamp::ZERO);
+                assert_eq!(
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .stable_hash()
+                        .unwrap(),
+                    pristine[index].0
+                );
+                assert_eq!(
+                    f.group
+                        .member_judge(state.player)
+                        .unwrap()
+                        .effective_song_time(),
+                    None
+                );
+                assert_eq!(*state.gauge.snapshot(), pristine[index].1);
+                assert_eq!((state.score.hits, state.score.misses), (0, 0));
+                assert!(state.capture.as_ref().unwrap().records().is_empty());
+            }
+        }
+        for (player, old) in &f.recordings.0 {
+            assert!(ids.contains(&player.0));
+            assert_eq!(
+                old.records().last().unwrap().song_time,
+                Timestamp::from_nanos(30_000_000)
+            );
+            assert!(old.records().iter().all(|record| matches!(
+                record.operation,
+                beatkernel::replay::ReplayOperation::Advance
+            )));
+        }
+
+        // The next acquired prefix covers the genuine B31 observation already
+        // retained by the owner, so each new attempt advances31-30 =1ms.
+        if stop_at == 7 {
+            continue;
+        }
+        assert_eq!(f.group.transport().output_phase_basis(), Some(fresh_basis));
+        assert_eq!(f.practice.generation(), 2);
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert_eq!(f.recordings.0.len(), ids.len());
+        assert_eq!(f.device.scalar_calls, 0);
+        assert!(!f.group.poisoned());
+        for state in &f.states {
+            assert_eq!(state.last_song, Timestamp::from_nanos(1_000_000));
+            assert_eq!(
+                f.group
+                    .member_judge(state.player)
+                    .unwrap()
+                    .effective_song_time(),
+                Some(Timestamp::from_nanos(1_000_000))
+            );
+            let capture = state.capture.as_ref().unwrap();
+            let setup =
+                crate::replay_playback::decode_section_setup(&capture.header().options).unwrap();
+            assert_eq!(setup.start, Timestamp::ZERO);
+            assert_eq!(setup.source_speed.rate(), Rate::NORMAL);
+            assert_eq!(
+                capture.records().last().unwrap().song_time,
+                Timestamp::from_nanos(1_000_000)
+            );
+            let replay = crate::replay_playback::reconstruct_section(
+                &f.original,
+                beatkernel::replay::codec::ReplayFile::new(
+                    capture.header().clone(),
+                    capture.records().to_vec(),
+                ),
+                limits(),
+            )
+            .unwrap();
+            assert_eq!(
+                replay.engine().stable_hash().unwrap(),
+                f.group
+                    .member_judge(state.player)
+                    .unwrap()
+                    .stable_hash()
+                    .unwrap()
+            );
         }
     }
 }

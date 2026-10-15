@@ -829,6 +829,87 @@ fn actual_target_solo_loop_replaces_phase_and_keeps_equal_cut_input_in_fresh_cap
 }
 
 #[test]
+fn actual_target_loop_closes_an_old_prefix_without_projecting_a_negative_fresh_phase() {
+    for stop_at in [4, 6] {
+        let rate = Rate::new(3, 2).unwrap();
+        let mut f = Rig::new(rate, true);
+        let pristine_judge = f.runtime.judge().stable_hash().unwrap();
+        let pristine_gauge = *f.gauge.snapshot();
+        f.device.stop_at = stop_at;
+        f.cfg.audio.gameplay.advance_lag = Duration::from_nanos(1_000_000);
+        assert!(f.device.events.is_empty());
+        // Source20 is the real loop cut/first Target30. Genuine Target24/32
+        // observations bracket it at16ms/21+1/3ms; acquired20+1/3ms selects A24.
+        let original_header = f.capture.as_ref().unwrap().header().clone();
+        assert!(f.run().unwrap().is_none());
+        f.assert_phase(2, rate);
+        assert_eq!(
+            f.runtime
+                .transport_mut()
+                .output_phase_basis()
+                .unwrap()
+                .active_origin_frame(),
+            20
+        );
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert!(!f.playback.transition_pending());
+        assert!(f.playback.peek_receipt().unwrap().is_none());
+        assert!(f.device.mapped.borrow().iter().any(|(query, _)| query
+            .compare_target_time(TargetTime::from_frames(24, 1500).unwrap())
+            .is_eq()));
+        if stop_at == 4 {
+            assert_eq!(f.runtime.judge().stable_hash().unwrap(), pristine_judge);
+            assert_eq!(f.runtime.judge().effective_song_time(), None);
+            assert_eq!(*f.gauge.snapshot(), pristine_gauge);
+            assert!(f.capture.as_ref().unwrap().records().is_empty());
+        }
+
+        assert_eq!(f.recording.captures.len(), 1);
+        let old_header = f.recording.captures[0].header().clone();
+        assert_eq!(old_header, original_header);
+        assert_eq!(
+            f.recording.captures[0].records().last().unwrap().song_time,
+            Timestamp::from_nanos(30_000_000)
+        );
+        assert!(f.recording.captures[0]
+            .records()
+            .iter()
+            .all(|record| matches!(record.operation, ReplayOperation::Advance)));
+
+        // In the longer continuous run, original Target40 is genuinely
+        // observed and acquired; source26+2/3 minus origin20 is positive.
+        if stop_at == 4 {
+            continue;
+        }
+        assert_eq!(f.playback.generation(), 2);
+        // Native OutputPhasePoint floors source elapsed to6666666ns before the
+        // selected3/2 rate; preserve that existing integer phase contract.
+        assert_eq!(
+            f.runtime.judge().effective_song_time(),
+            Some(Timestamp::from_nanos(9_999_999))
+        );
+        assert_eq!(
+            f.host.reports.last().unwrap().song_time,
+            Timestamp::from_nanos(9_999_999)
+        );
+        assert_eq!(f.host.identities, [2]);
+        assert_eq!(f.host.commits, [2]);
+        assert_eq!(f.recording.captures.len(), 1);
+        assert_eq!(f.recording.captures[0].header(), &old_header);
+        let fresh = f.capture.take().unwrap();
+        let setup = crate::replay_playback::decode_section_setup(&fresh.header().options).unwrap();
+        assert_eq!(setup.start, Timestamp::ZERO);
+        assert_eq!(setup.source_speed.rate(), rate);
+        assert_eq!(
+            fresh.records().last().unwrap().song_time,
+            Timestamp::from_nanos(9_999_999)
+        );
+        f.assert_replay_matches_live_judge(fresh);
+    }
+}
+
+#[test]
 fn actual_target_solo_scrub_preserves_selected_speed_and_original_fractional_cut() {
     let rate = Rate::new(3, 2).unwrap();
     let mut f = Rig::new(rate, false);

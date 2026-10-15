@@ -363,6 +363,135 @@ fn source_counter_wide_frequency_maps_exact_query_without_rounded_elapsed() {
         0
     );
 }
+
+#[test]
+fn closure_correspondence_accepts_original_queries_before_a_fresh_origin_without_granting_phase() {
+    let source_time = TargetTime::from_frames(2, 3).unwrap();
+    let target_time = TargetTime::new(0, 1, 2).unwrap();
+    let source_query = exact(source_time);
+    let target_query = exact(target_time);
+    let fresh = OutputPhaseBasis::new(ClockDomainId(3), 11, 18, 3, 3).unwrap();
+    for (mapping, descriptor, time, origin) in [
+        (
+            NativePlaybackMapping::from_source(&source(source_query, running(), ())),
+            AudioAuthorityCoordinateBasis::SourceFrame(source_basis()),
+            source_time,
+            source_basis().origin(),
+        ),
+        (
+            NativePlaybackMapping::converted(
+                7,
+                target_basis(),
+                identity(),
+                target_query,
+                converted_facts(0, running()),
+            )
+            .unwrap(),
+            AudioAuthorityCoordinateBasis::TargetFrame(target_basis()),
+            target_time,
+            target_basis().origin(),
+        ),
+    ] {
+        let p = presentation(descriptor, 7);
+        let q = exact(time);
+        let correct = logical(&p, q, origin);
+        let unchanged = format!("{p:?}");
+        // Both actual mappings select playback Source frame2; a new attempt
+        // begins at Source frame3. Correspondence grants no negative phase.
+        assert_eq!(
+            mapping.validate_correspondence(&p, identity(), &q, fresh, correct),
+            Ok(())
+        );
+        assert_eq!(
+            mapping.phase(&p, identity(), &q, fresh, correct),
+            Err(NativePlaybackPhaseError::Arithmetic)
+        );
+        assert_eq!(
+            mapping.validate_correspondence(
+                &presentation(descriptor, 8),
+                identity(),
+                &q,
+                fresh,
+                correct
+            ),
+            Err(NativePlaybackPhaseError::Identity)
+        );
+        assert_eq!(
+            mapping.validate_correspondence(
+                &p,
+                SourcePlaybackIdentity::new(3, 1, 0).unwrap(),
+                &q,
+                fresh,
+                correct
+            ),
+            Err(NativePlaybackPhaseError::Identity)
+        );
+        assert_eq!(
+            mapping.validate_correspondence(
+                &p,
+                identity(),
+                &q,
+                OutputPhaseBasis::new(ClockDomainId(3), 11, 18, 3, 4).unwrap(),
+                correct
+            ),
+            Err(NativePlaybackPhaseError::Identity)
+        );
+        let extra = InterpolatedTargetTime::new(time, 0, 1, u64::MAX, 1, 1).unwrap();
+        assert_eq!(extra.point(origin).unwrap(), q.point(origin).unwrap());
+        assert_eq!(
+            mapping.validate_correspondence(&p, identity(), &extra, fresh, correct),
+            Err(NativePlaybackPhaseError::Query)
+        );
+        let (other_kind, other_origin) = match descriptor {
+            AudioAuthorityCoordinateBasis::SourceFrame(_) => (
+                AudioAuthorityCoordinateBasis::TargetFrame(target_basis()),
+                AudioAuthorityCoordinateBasis::SourceFrame(
+                    OutputFrameBasis::new(point(2, 101), 3, 1).unwrap(),
+                ),
+            ),
+            AudioAuthorityCoordinateBasis::TargetFrame(_) => (
+                AudioAuthorityCoordinateBasis::SourceFrame(source_basis()),
+                AudioAuthorityCoordinateBasis::TargetFrame(
+                    TargetFrameBasis::new(point(2, 101), TargetTime::from_frames(1, 3).unwrap(), 7)
+                        .unwrap(),
+                ),
+            ),
+            _ => unreachable!("only genuine Source/Target descriptors in this fixture"),
+        };
+        for bad in [other_kind, other_origin] {
+            assert_eq!(
+                mapping.validate_correspondence(
+                    &presentation(bad, 7),
+                    identity(),
+                    &q,
+                    fresh,
+                    correct
+                ),
+                Err(NativePlaybackPhaseError::Descriptor)
+            );
+        }
+        for bad in [
+            point(3, correct.timestamp.as_nanos() + 1),
+            point(4, correct.timestamp.as_nanos()),
+        ] {
+            assert_eq!(
+                mapping.validate_correspondence(&p, identity(), &q, fresh, bad),
+                Err(NativePlaybackPhaseError::LogicalPoint)
+            );
+        }
+        assert_eq!(
+            mapping.validate_correspondence(
+                &p,
+                identity(),
+                &q,
+                OutputPhaseBasis::new(ClockDomainId(4), 11, 18, 3, 3).unwrap(),
+                correct
+            ),
+            Err(NativePlaybackPhaseError::Phase)
+        );
+        assert_eq!(format!("{p:?}"), unchanged);
+    }
+}
 #[test]
 fn converted_active_held_and_source_frozen_use_distinct_actual_mapping_facts() {
     let q = exact(TargetTime::new(0, 1, 2).unwrap());

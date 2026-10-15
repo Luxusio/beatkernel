@@ -21,8 +21,12 @@ authority 회귀216/0·Node95/0과 새 두 release WASM·matching bindgen을 확
 geometry overlap을 재사용하는 공통 예산 adapter를 수정했다. 실제 solo/local 키음·BGM
 PCM·배속 전환과 cold 원자성 통합32/0, 새 두 release WASM·matching bindgen을
 확인했다. 실제 일곱/여덟 번째는 저장·불러오기·독립 replay를 포함한7개 검사를
-통과했다. 여덟 번째 loop region 경계의 NegativeElapsed 오류가 남았으며, 전체
-실제 browser 검증과 독립 review/QA는 남는다.
+통과했다. 여덟 번째 loop region의 NegativeElapsed는 정상적인 무진행 frontier를
+새 attempt로 먼저 투영한 순서 오류였다. Step 통합34/0과 native Source/Target
+solo/cohort·correspondence 회귀51/0 및 새 두 release WASM·matching bindgen을
+확인했다. 실제 아홉 번째는 loop·자율 기록 회수·disable-loop까지 진행했다. 이어
+짧은 구간의 정상 종료 뒤 runner가 scrub UI를 조작하려 해 멈췄으며, 남은 실제
+browser 경로와 독립 review/QA는 아직 남는다.
 오디오 WASM은 실제 EOF·matching compile을 확인했으나 strict ERR_ABORTED도 관측됐다.
 이 JS 수정의 cold→Started→Ended·capture·늦은 거절 회귀41개가 모두 통과했다
 (js-cold-readiness-first-14110.log). 실제 browser 재검증과 독립 review/QA는 남는다.

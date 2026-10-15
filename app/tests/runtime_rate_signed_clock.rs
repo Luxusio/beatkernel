@@ -8,7 +8,7 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
         GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
-    replay::{codec::decode_replay, ReplayOperation},
+    replay::{codec::decode_replay, ReplayHeader, ReplayOperation},
     time::{
         presentation::ObservationAdmission, ClockDomainId, ClockPair, ClockPoint, Duration,
         ExtrapolationPolicy, Timestamp,
@@ -25,7 +25,11 @@ use beatkernel_bms_runtime::{
     local_players::{PlayerId, ResolvedInputPlan},
     local_runtime::InputResult,
     native_output_coordinate::NativeOutputCoordinate,
-    practice_control::{PracticeTransactionCapability, PracticeTransactionRequest},
+    practice_control::{
+        PracticeAction, PracticeRequest, PracticeTransactionCapability, PracticeTransactionReply,
+        PracticeTransactionRequest,
+    },
+    replay_playback::decode_section_setup,
     replay_speed_policy::split_schedule,
     section_start::{prepare_retained_at, PreparedRetainedSection},
     step_gameplay::{
@@ -624,6 +628,437 @@ fn start_budget_solo(game: &mut StepGameplay, audio: &mut WorkletAudio, inputs: 
     audio.acknowledge_retained_event(started.serial).unwrap();
     game.acknowledge_retained_event(started.serial).unwrap();
 }
+
+fn assert_original_signed_capture(bytes: &[u8], header: &ReplayHeader, device: DeviceId) {
+    let file = decode_replay(bytes, fixture::limits()).unwrap();
+    assert_eq!(&file.header, header);
+    let schedule = split_schedule(&file.header.options).unwrap().1;
+    assert_eq!(schedule.initial_speed().rate(), half());
+    assert_eq!(schedule.cuts().len(), 1);
+    assert_eq!(schedule.cuts()[0].whole(), 1_000_000);
+    assert_eq!(schedule.current_speed().rate(), Rate::new(2, 1).unwrap());
+    let inputs: Vec<_> = file
+        .records
+        .iter()
+        .filter_map(|record| match &record.operation {
+            ReplayOperation::Input(saved) => Some((record.song_time, saved)),
+            ReplayOperation::Advance => None,
+        })
+        .collect();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].0, ts(0));
+    assert_eq!(inputs[0].1.physical.meta().source, device);
+    assert_eq!(
+        inputs[0].1.physical.meta().original_clock_point,
+        Some(host(FIRST))
+    );
+}
+
+fn assert_fresh_signed_header(header: &ReplayHeader) {
+    let setup = decode_section_setup(&header.options).unwrap();
+    assert_eq!(setup.start, ts(1_000_000));
+    assert_eq!(setup.end, Some(ts(20_000_000)));
+    assert_eq!(setup.chart_seed, SEED);
+    assert_eq!(setup.source_speed.rate(), Rate::new(2, 1).unwrap());
+    let schedule = split_schedule(&header.options).unwrap().1;
+    assert_eq!(schedule.initial_speed().rate(), Rate::new(2, 1).unwrap());
+    assert!(schedule.cuts().is_empty());
+    assert_eq!(header.normalized_clock, ClockDomainId(33));
+}
+
+#[test]
+fn solo_fresh_loop_ignores_the_old_prefix_frontier_until_the_genuine_right_anchor_is_acquired() {
+    for capture in [false, true] {
+        let (mut game, bank) = budget_solo(prepared());
+        if capture {
+            game.configure_capture(fixture::limits(), SEED).unwrap();
+        }
+        let mut audio = output(bank, game.retained_setup().unwrap());
+        let mut inputs = merger(vec![DeviceId(1)]);
+        start_budget_solo(&mut game, &mut audio, &mut inputs);
+        inputs.admit(input(1, FIRST), host(RIGHT)).unwrap();
+        let report = game
+            .process_next_audio_input(&mut inputs, host(RIGHT), raw(2_000_000), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.song_time, ts(0));
+        assert_eq!(game.score().hits, 1);
+        let batch = game.take_commands(32).unwrap().unwrap();
+        for &command in &batch.commands {
+            audio.enqueue(command).unwrap();
+        }
+        game.acknowledge(batch.sequence, batch.commands.len(), true)
+            .unwrap();
+
+        let cap = game.retained_capability().unwrap();
+        let transaction = game
+            .prepare_retained_transaction(request(cap), false)
+            .unwrap();
+        audio
+            .try_set_rate_next(
+                1,
+                cap.practice.generation,
+                cap.rate.revision,
+                transaction.preparation.unwrap(),
+            )
+            .unwrap();
+        game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 1, Ok(()))
+            .unwrap();
+        audio.render(CONTEXT + 2, 2).unwrap();
+        game.observe_retained_history(history(&audio)).unwrap();
+        game.observe_audio_source_timestamp(1, pair(3_000_000, LATER))
+            .unwrap();
+        game.record_audio_prefix(host(LATER)).unwrap();
+        let rate = audio.poll_retained_event().unwrap().unwrap();
+        assert_rate(rate);
+        game.retain_output_event(rate).unwrap();
+        assert_eq!(
+            game.service_retained_event(&mut inputs, host(LATER), raw(4_000_000))
+                .unwrap(),
+            Some(rate.serial)
+        );
+        audio.acknowledge_retained_event(rate.serial).unwrap();
+        game.acknowledge_retained_event(rate.serial).unwrap();
+        assert!(matches!(
+            game.take_retained_response(),
+            Some(PracticeTransactionReply::Rate {
+                id: 1,
+                result: Ok(_),
+                ..
+            })
+        ));
+        assert!(game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+        let old_header = game.effective_header(PlayerId(1)).unwrap().clone();
+        let before = game.retained_capability().unwrap();
+        game.prepare_retained_transaction(
+            PracticeTransactionRequest::Region(PracticeRequest {
+                id: 2,
+                generation: before.practice.generation,
+                action: PracticeAction::Loop {
+                    start: ts(1_000_000),
+                    end: ts(20_000_000),
+                },
+            }),
+            false,
+        )
+        .unwrap();
+        audio
+            .try_region_next(
+                2,
+                before.practice.generation,
+                before.rate.revision,
+                PracticeRegion::new(ts(1_000_000), ts(20_000_000), true).unwrap(),
+            )
+            .unwrap();
+        game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 2, Ok(()))
+            .unwrap();
+        audio.render(CONTEXT + 4, 1).unwrap();
+        game.observe_retained_history(history(&audio)).unwrap();
+        game.observe_audio_source_timestamp(1, pair(5_000_000, LATER + 2_000_000))
+            .unwrap();
+        // A=3ms and B=5ms are genuine observations. Only the exact 4ms cut
+        // HOST is acquired, so the ordinary frontier still selects A.
+        game.record_audio_prefix(host(LATER + 1_000_000)).unwrap();
+        let fresh = audio.poll_retained_event().unwrap().unwrap();
+        assert!(
+            matches!(fresh.event, WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+            event: PracticeEvent::Boundary(receipt), ..
+        }) if receipt.kind == PracticeBoundaryKind::Requested
+            && receipt.physical_frame == 4 && receipt.applied_song_time == ts(1_000_000)
+            && receipt.generation == before.practice.generation + 1)
+        );
+        game.retain_output_event(fresh).unwrap();
+        assert_eq!(
+            game.service_retained_event(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+                .unwrap(),
+            Some(fresh.serial)
+        );
+        let retired = game.take_retired_replay(PlayerId(1)).unwrap();
+        assert_eq!(retired.is_some(), capture);
+        if let Some(bytes) = &retired {
+            assert_original_signed_capture(bytes, &old_header, DeviceId(1));
+        }
+        assert!(game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+        audio.acknowledge_retained_event(fresh.serial).unwrap();
+        game.acknowledge_retained_event(fresh.serial).unwrap();
+        assert!(matches!(
+            game.take_retained_response(),
+            Some(PracticeTransactionReply::Region { reply, .. }) if reply.id == 2 && reply.result.is_ok()
+        ));
+        let fresh_header = game.effective_header(PlayerId(1)).unwrap().clone();
+        assert_fresh_signed_header(&fresh_header);
+        let fresh_cap = game.retained_capability();
+        let judge_hash = game.judge().stable_hash().unwrap();
+        let gauge = *game.gauge().snapshot();
+        assert_eq!(game.song_time(), ts(1_000_000));
+        assert_eq!((game.score().hits, game.score().misses), (0, 0));
+        assert!(game
+            .advance_audio_frontier(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+            .unwrap()
+            .is_none());
+        assert_eq!(game.song_time(), ts(1_000_000));
+        assert_eq!(game.judge().stable_hash().unwrap(), judge_hash);
+        assert_eq!(*game.gauge().snapshot(), gauge);
+        assert_eq!(game.retained_capability(), fresh_cap);
+        assert_eq!(game.effective_header(PlayerId(1)).unwrap(), &fresh_header);
+        assert!(audio.poll_retained_event().unwrap().is_none());
+
+        // Acquire the already observed B; no clock replacement or new pair.
+        game.record_audio_prefix(host(LATER + 2_000_000)).unwrap();
+        let report = game
+            .advance_audio_frontier(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.song_time, ts(3_000_000)); // 1ms + 2 * (5ms - 4ms)
+        assert_eq!(game.song_time(), ts(3_000_000));
+        assert_eq!((game.score().hits, game.score().misses), (0, 0));
+        assert_eq!(game.effective_header(PlayerId(1)).unwrap(), &fresh_header);
+        game.fail();
+        let current = game.take_replay().unwrap();
+        assert_eq!(current.is_some(), capture);
+        if let Some(bytes) = current {
+            let file = decode_replay(&bytes, fixture::limits()).unwrap();
+            assert_eq!(file.header, fresh_header);
+            assert!(file
+                .records
+                .iter()
+                .any(|r| r.song_time == ts(3_000_000)
+                    && matches!(r.operation, ReplayOperation::Advance)));
+        }
+        if let Some(bytes) = retired {
+            assert_original_signed_capture(&bytes, &old_header, DeviceId(1));
+        }
+    }
+}
+
+#[test]
+fn local_fresh_loop_keeps_every_attempt_and_capture_while_the_acquired_frontier_lags_the_cut() {
+    let members = [(PlayerId(3), DeviceId(1)), (PlayerId(7), DeviceId(2))];
+    for capture in [false, true] {
+        let (mut game, bank) = StepLocalGameplay::new_retained_audio_section(
+            prepared(),
+            config(),
+            ResolvedInputPlan::new(members.map(|(id, device)| (id, Some(device))).to_vec())
+                .unwrap(),
+            vec![
+                bindings(DeviceSelector::Exact(members[0].1)),
+                bindings(DeviceSelector::Exact(members[1].1)),
+            ],
+            Some(ts(20_000_000)),
+            BmsInputMode::ButtonOnly,
+            signed_authority(),
+            None,
+            options(),
+        )
+        .unwrap();
+        if capture {
+            for (id, _) in members {
+                game.configure_capture(id, fixture::limits(), SEED).unwrap();
+            }
+        }
+        let mut audio = output(bank, game.retained_setup().unwrap());
+        let mut inputs = merger(members.map(|(_, device)| device).to_vec());
+        game.activate_audio().unwrap();
+        game.observe_retained_history(history(&audio)).unwrap();
+        game.observe_audio_source_timestamp(1, pair(-5_303_245, LEFT))
+            .unwrap();
+        game.observe_audio_source_timestamp(1, pair(1_459_755, RIGHT))
+            .unwrap();
+        game.record_audio_prefix(host(RIGHT)).unwrap();
+        let started = audio.poll_retained_event().unwrap().unwrap();
+        game.retain_output_event(started).unwrap();
+        assert_eq!(
+            game.service_retained_event(&mut inputs, host(RIGHT), raw(2_000_000))
+                .unwrap(),
+            Some(started.serial)
+        );
+        audio.acknowledge_retained_event(started.serial).unwrap();
+        game.acknowledge_retained_event(started.serial).unwrap();
+        for (id, device) in members {
+            inputs.admit(input(device.0, FIRST), host(RIGHT)).unwrap();
+            let Some(InputResult::Processed(reports)) = game
+                .process_next_audio_input(&mut inputs, host(RIGHT), raw(2_000_000), None)
+                .unwrap()
+            else {
+                panic!("original local input missing");
+            };
+            assert_eq!(reports[0].player, id);
+            assert_eq!(reports[0].report.song_time, ts(0));
+            assert_eq!(game.score(id).unwrap().hits, 1);
+        }
+        let batch = game.take_commands(32).unwrap().unwrap();
+        for &command in &batch.commands {
+            audio.enqueue(command).unwrap();
+        }
+        game.acknowledge(batch.sequence, batch.commands.len(), true)
+            .unwrap();
+        let cap = game.retained_capability().unwrap();
+        let transaction = game
+            .prepare_retained_transaction(request(cap), false)
+            .unwrap();
+        audio
+            .try_set_rate_next(
+                1,
+                cap.practice.generation,
+                cap.rate.revision,
+                transaction.preparation.unwrap(),
+            )
+            .unwrap();
+        game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 1, Ok(()))
+            .unwrap();
+        audio.render(CONTEXT + 2, 2).unwrap();
+        game.observe_retained_history(history(&audio)).unwrap();
+        game.observe_audio_source_timestamp(1, pair(3_000_000, LATER))
+            .unwrap();
+        game.record_audio_prefix(host(LATER)).unwrap();
+        let rate = audio.poll_retained_event().unwrap().unwrap();
+        assert_rate(rate);
+        game.retain_output_event(rate).unwrap();
+        assert_eq!(
+            game.service_retained_event(&mut inputs, host(LATER), raw(4_000_000))
+                .unwrap(),
+            Some(rate.serial)
+        );
+        audio.acknowledge_retained_event(rate.serial).unwrap();
+        game.acknowledge_retained_event(rate.serial).unwrap();
+        assert!(matches!(
+            game.take_retained_response(),
+            Some(PracticeTransactionReply::Rate {
+                id: 1,
+                result: Ok(_),
+                ..
+            })
+        ));
+        let old_headers: Vec<_> = members
+            .iter()
+            .map(|&(id, _)| {
+                assert!(game.take_retired_replay(id).unwrap().is_none());
+                game.effective_header(id).unwrap().clone()
+            })
+            .collect();
+        let before = game.retained_capability().unwrap();
+        game.prepare_retained_transaction(
+            PracticeTransactionRequest::Region(PracticeRequest {
+                id: 2,
+                generation: before.practice.generation,
+                action: PracticeAction::Loop {
+                    start: ts(1_000_000),
+                    end: ts(20_000_000),
+                },
+            }),
+            false,
+        )
+        .unwrap();
+        audio
+            .try_region_next(
+                2,
+                before.practice.generation,
+                before.rate.revision,
+                PracticeRegion::new(ts(1_000_000), ts(20_000_000), true).unwrap(),
+            )
+            .unwrap();
+        game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 2, Ok(()))
+            .unwrap();
+        audio.render(CONTEXT + 4, 1).unwrap();
+        game.observe_retained_history(history(&audio)).unwrap();
+        game.observe_audio_source_timestamp(1, pair(5_000_000, LATER + 2_000_000))
+            .unwrap();
+        game.record_audio_prefix(host(LATER + 1_000_000)).unwrap();
+        let fresh = audio.poll_retained_event().unwrap().unwrap();
+        assert!(
+            matches!(fresh.event, WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+            event: PracticeEvent::Boundary(receipt), ..
+        }) if receipt.kind == PracticeBoundaryKind::Requested
+            && receipt.physical_frame == 4 && receipt.applied_song_time == ts(1_000_000)
+            && receipt.generation == before.practice.generation + 1)
+        );
+        game.retain_output_event(fresh).unwrap();
+        assert_eq!(
+            game.service_retained_event(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+                .unwrap(),
+            Some(fresh.serial)
+        );
+        // Hand off every retired member File before acknowledging the Worklet.
+        let retired: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(index, &(id, device))| {
+                let bytes = game.take_retired_replay(id).unwrap();
+                assert_eq!(bytes.is_some(), capture);
+                if let Some(bytes) = &bytes {
+                    assert_original_signed_capture(bytes, &old_headers[index], device);
+                }
+                assert!(game.take_retired_replay(id).unwrap().is_none());
+                bytes
+            })
+            .collect();
+        audio.acknowledge_retained_event(fresh.serial).unwrap();
+        game.acknowledge_retained_event(fresh.serial).unwrap();
+        assert!(matches!(
+            game.take_retained_response(),
+            Some(PracticeTransactionReply::Region { reply, .. }) if reply.id == 2 && reply.result.is_ok()
+        ));
+        let fresh_cap = game.retained_capability();
+        let snapshots: Vec<_> = members
+            .iter()
+            .map(|&(id, _)| {
+                let header = game.effective_header(id).unwrap().clone();
+                assert_fresh_signed_header(&header);
+                assert_eq!(
+                    (game.score(id).unwrap().hits, game.score(id).unwrap().misses),
+                    (0, 0)
+                );
+                (
+                    header,
+                    game.judge(id).unwrap().stable_hash().unwrap(),
+                    *game.gauge(id).unwrap().snapshot(),
+                )
+            })
+            .collect();
+        assert!(game
+            .advance_audio_frontier(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+            .unwrap()
+            .is_none());
+        assert_eq!(game.retained_capability(), fresh_cap);
+        for (index, &(id, _)) in members.iter().enumerate() {
+            assert_eq!(game.effective_header(id).unwrap(), &snapshots[index].0);
+            assert_eq!(
+                game.judge(id).unwrap().stable_hash().unwrap(),
+                snapshots[index].1
+            );
+            assert_eq!(*game.gauge(id).unwrap().snapshot(), snapshots[index].2);
+            assert_eq!(
+                (game.score(id).unwrap().hits, game.score(id).unwrap().misses),
+                (0, 0)
+            );
+        }
+        assert!(audio.poll_retained_event().unwrap().is_none());
+        game.record_audio_prefix(host(LATER + 2_000_000)).unwrap();
+        let reports = game
+            .advance_audio_frontier(&mut inputs, host(LATER + 2_000_000), raw(5_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reports.len(), members.len());
+        for report in &reports {
+            assert_eq!(report.report.song_time, ts(3_000_000));
+        }
+        game.fail();
+        for (index, &(id, device)) in members.iter().enumerate() {
+            let current = game.take_replay(id).unwrap();
+            assert_eq!(current.is_some(), capture);
+            if let Some(bytes) = current {
+                let file = decode_replay(&bytes, fixture::limits()).unwrap();
+                assert_eq!(file.header, snapshots[index].0);
+                assert!(file.records.iter().any(|r| r.song_time == ts(3_000_000)
+                    && matches!(r.operation, ReplayOperation::Advance)));
+            }
+            if let Some(bytes) = &retired[index] {
+                assert_original_signed_capture(bytes, &old_headers[index], device);
+            }
+        }
+    }
+}
+
 fn cold_fields(setup: &StepRetainedSetup) -> [usize; 6] {
     let limits = setup.config.limits;
     [
