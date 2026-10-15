@@ -8,7 +8,9 @@ core WASM typing0을 실제 root Verify했다. 원래66사례 debug/release14/0�
 관측된26개 literal만 좁힌 최종 양 profile도14/0·각66상한 PASS다.
 별도20개 capacity 관측은 이전 capacity 미측정이라 retained-memory 감소를 증명하지 않는다.
 새 native e9167621…는 과거 GUI 산출물과 다르고 browser4개는 미갱신이다.
-정식 독립 code→qa-cli 및 owning verification/close는 아직 남았다.
+정식 독립 DEEP code→qa-cli도 실제 PASS했고 동일840/11/36·양 meter14/0/66상한·WASM0을 확인했다.
+한 번 owning verify는 자동 완료 기록0으로 PENDING이며 태스크 종료만 보류했다.
+다음 후보는 실제 HTTP/3의3/4host·host별2인 cohort 검증이며 아직 구현/실행하지 않았다.
 13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
 [실측·capacity·산출물 한계](../changes/2026-10-16-runtime-first-judge-batch-reuse.md)를 따른다.
 

@@ -2,7 +2,7 @@
 
 Runtime이 Judge의 owned 판정 Vec를 빈 report에 다시 누적하던 지점에서 첫 묶음의 소유권을 넘긴다. 이미 판정이 있으면 기존 extend를 유지한다. 키음의 `&events` 조회, hazard 수집, bound 입력 추가, 첫 오류의 break와 최종 발행 순서는 바꾸지 않았다. public API·필드·port·native/UI adapter·의존성은 추가하지 않았다.
 
-TASK__runtime-first-judge-batch-reuse / run01a1413b-aeb8-728c-8465-9c9dfa90cc79, base647fd4b51c97b8343a5a903d1adfd3fb93ccd66e. 아래는 실제 root Verify 결과이며, 정식 독립 code review→qa-cli 및 owning 종료 검사는 아직 남았다. 전체 player Goal은 미완료다.
+TASK__runtime-first-judge-batch-reuse / run01a1413b-aeb8-728c-8465-9c9dfa90cc79, base647fd4b51c97b8343a5a903d1adfd3fb93ccd66e. 아래 root Verify 뒤 source7714d809에서 정식 독립 DEEP code→qa-cli도 실제 PASS했다. 한 번 owning verify는 자동 완료 기록0으로 PENDING이며 태스크 종료만 보류했다. 전체 player Goal은 활성·미완료다.
 
 ## 동작 회귀
 
@@ -100,4 +100,30 @@ cached rustc1.98.1(48a229cea)/LLVM22.1.8, Linux x86_64, pointer8/PhysicalInputEv
 
 Known ceiling: allocator 요청량 감소는 CPU/경과 지연·live memory·세계 최고 성능·Native clock/lock/IO·임의 callback·다른 thread·물리 장치·현재 GUI/browser 재생의 개선 증거가 아니다. Group64의 일정한 할당 요청 수는 CPU routing이 상수 시간임을 뜻하지 않는다.
 
-BK-WBS-13.06.01은 넓은 lock/IO 및 native/device 관측이 남아 W다. 전체136/489(27.81%), 오디오12/27, 원래91/193 및 전체 Goal 미완료를 유지한다. 새 public API/직렬화/아키텍처/라이선스 결정이나 요구 축소는 없다. 정식 독립 review→QA 및 owning verification/close는 후속 gate다.
+BK-WBS-13.06.01은 넓은 lock/IO 및 native/device 관측이 남아 W다. 전체136/489(27.81%), 오디오12/27, 원래91/193 및 전체 Goal 미완료를 유지한다. 새 public API/직렬화/아키텍처/라이선스 결정이나 요구 축소는 없다. 실제 review→QA PASS와 owning 종료 미완료는 아래 별도 기록을 따른다.
+
+## 독립 review → QA 및 종료 상태
+
+검토 source commit은 `7714d8090a05c5dff7c2b65fd7aa912dfd777dbb`다. 실제 `/root/code_review_runtime_batch_14126_c1`가 DEEP/both full sweep에서 PASS, FIX_NOW/INVESTIGATE/OPTIONAL0을 반환한 뒤 `/root/qa_cli_runtime_batch_14126`가 독립 실행했다. 그 QA의 session59595는 terminal exit0이며 위6개 Cargo 명령을 각각1회 순서대로 실행해 core840/0·release11/0·app36/0·debug/release meter14/0/66상한·WASM typing0을 재확인했다. scoped rustfmt/diff/WBS도 실제 argv/exit/log를 보존하고0이다.
+
+QA 원본은 `target/wf/runtime-first-batch-qa-cli-14126/`다. invocations.json에9개 실행·env/compiler·실행 전후7개 source/doc와5개 산출물 identity가 있고 모두 고정됐다. evidence-verification.json은 genuine before부터 현재 QA까지66개 이름·metadata·13scalar와 overflow·정적 예산·20capacity 행을 독립 재계산한다. 실제 감소26/동일40, WBS136/489·오디오12/27을 유지한다.
+
+| QA 원본 | SHA256 |
+|---|---|
+| core-debug.log | `b9a2321feed28660723527dbb34171736a0c5e700a9b860a35bfad2032932441` |
+| core-routes-release.log | `700dd9451844b871e006e51d99f2dc1091430f0ed53a6e6294e3c7bc8297e8bc` |
+| app-local-runtime.log | `88cb1297a2adabf25f75c6939e4612fe5c7e977908d40f57123972bf32374648` |
+| meter-debug.log | `22f27080b4a11726d31439ea7a1e380809b31bd42e426196cdd48a862eab7433` |
+| meter-release.log | `745afb764837549ef969b126e5e9bb2138d7c8d423b066e3255711668655801c` |
+| core-wasm.log | `a1a77cbcdff012f820c747a433e54b2281feb1457b8bf108341d918808ac73d4` |
+| invocations.json | `5ef64a1e0ff67adc0e44011b58bdbc17d59975282fae2f1748d269f1c94e9df3` |
+| evidence-verification.json | `ac7eb545b82dec46079e347465911d9862d0bcae7b3228890bc8d8fa753107b3` |
+| qa-audit.json | `69841e4f6b3ea85f188e112d19e841af9dc30a00db89a8afbcd79d1ef0a46921` |
+
+실제 substantive PASS 이후 owning task_verify를1회 호출했다. 해당 run의 RECEIPTS.jsonl은 absent/0행이며 required review-code/qa-cli 완료 기록이 없어 PENDING이다. 그 응답의 empty-stream 고정 pair를 그대로 owning task_blocked에 전달해 BLOCKED.md를 발행했다. 태스크는 종료하지 않았고 전체 Goal은 활성이다. 수동 receipt·우회 PASS·runtime 복구·기록만을 위한 review/QA/verify 반복은 하지 않았다.
+
+검증 준비 마찰도 원본과 구분해 보존한다. root의 write_checkpoint helper는 receipt storage integrity unavailable로 exit1이었고 checkpoint-attempt.json에 기록했다. 임의의 checkpoint/receipt 재작성이나 재시도 없이 PLAN/7키 PROGRESS·실제 source-commit/evidence를 유지했다. QA의 ignored validator는 capacity field를11개로 잘못 기대해 처음 실패했고 실제10개로 고쳐 통과했다. 두 원본 validator 로그와 qa-audit.json을 남겼으며 Cargo 재실행은 없다.
+
+QA 정적 helper가 추가 read-only descendant1개를 생성해 배정된 local2-slot을 초과했다. 이는 소급 승인 없는 실제 절차 편차로 남긴다. root도 두 reader terminal을 확인했고 양쪽 쓰기/기능/컴파일 명령은0, 기능 실행은 QA 단독이었다. global21/effective8 이내였다는 사실로 local 위반을 없애지 않는다. 추가 fanout 없이 종료했다. 향후 helper에 descendant 여유가 없음을 직접 전달하는 개선 후보는 이 제품 변경의 scope 밖으로 남긴다.
+
+최종 문서 수정은 실제 review/QA와 owning 결과·준비 마찰을 기록하는 metadata다. 검증된 Rust3개·performance REQ·5산출물은 그대로이며 이 문서 기록만을 위해 Cargo를 반복하지 않는다.
