@@ -1,5 +1,7 @@
 # 실행 중 배속 전환의 PCM·Transport·기록 기반
 
+아래는 구현·실행별 시점 기록이며 현재 상태는 마지막 checkpoint를 기준으로 한다.
+
 구현 중인 WBS05.13.06을 위해 PCM과 Transport가 공유할 `PositiveRatePhase`를
 추가했다. 실제 cut에서 분수 ns를 보존하며, signed preroll을 한 번만 truncate하고,
 정규화한 같은 배속 요청은 anchor를 바꾸지 않는다. cue 역산은 기존 음수 target
@@ -246,15 +248,6 @@ audio WASM은 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`
 WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.
 
 
-아홉 번째 실제 실행74875는 같은7개 검사를 통과하고 loop 적용·자율 retired
-capture 회수·disable-loop까지 진행했다. 원래 NegativeElapsed는 발생하지 않았다.
-이후 비반복1→2초 구간이2x에서 정상 종료됐는데 runner가 뒤늦게 scrub용 checkbox를
-누르려 해 hidden Node 클릭 오류가 났다. 실제 stopped.songNs=2000000000,
-console/network0·owned browser/Xvfb exit0이며 원본은
-`target/wf/runtime-rate-browser-ninth-14113/evidence.json`이다. 정상 finite-end와
-recording/custody 의미를 유지하며 남은 실제 scrub/F5·local·fixed-opponent 흐름의
-runner 구성을 수정한다. 전체12개 검사를 통과한 것으로 표시하지 않는다.
-
 다섯 번째 실제 browser49352는 fresh artifact·solo 배속·pause/pending/resume·잘못된
 값 거절·자연 완료 variable record의5개 검사를 통과했다. 이후 retained 기록은
 명시 선택해야 하는 정상 UI인데 runner가 자동 선택을 가정해 Save 활성 대기에서
@@ -324,6 +317,52 @@ UI SHA256은 `b558327a6407d2fdcb3fe783c65a031796e5203f774e7c4b02448c2077f4347f`,
 audio는 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`다.
 원본 빌드는 `target/wf/runtime-rate-14043/browser-fresh-frontier-release-wasm-14113.log`,
 `browser-audio-fresh-frontier-release-wasm-14113.log`,
-`browser-fresh-frontier-bindgen-sha256-14113.log`에 있다. 실제 아홉 번째 browser로
-전체12개 journey를 재확인한다. 독립 review/QA와 hardware acceptance는 별도이며
+`browser-fresh-frontier-bindgen-sha256-14113.log`에 있다. 독립 review/QA와
+hardware acceptance는 별도이며
 WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.
+
+아홉 번째 실제 실행74875는 같은7개 검사를 통과하고 loop 적용·자율 retired
+capture 회수·disable-loop까지 진행했다. 원래 NegativeElapsed는 발생하지 않았다.
+이후 비반복1→2초 구간이2x에서 정상 종료됐는데 runner가 뒤늦게 scrub용 checkbox를
+누르려 해 hidden Node 클릭 오류가 났다. 실제 stopped.songNs=2000000000,
+console/network0·owned browser/Xvfb exit0이며 원본은
+`target/wf/runtime-rate-browser-ninth-14113/evidence.json`이다. 정상 finite-end와
+recording/custody 의미를 유지하며 남은 실제 scrub/F5·local·fixed-opponent 흐름의
+runner 구성을 수정한다. 전체12개 검사를 통과한 것으로 표시하지 않는다.
+
+열 번째 실제 실행1698은 동일 fresh UI/audio WASM에서 같은7개 검사를 통과했다.
+활성 제어 중 전체 진단 로그를 CDP로 반복 복사하지 않고 대응하는 원본 행만
+가져오도록 runner를 수정해 loop·disable-loop·scrub·F5를 진행했다. 이후
+retired-custody 순서 검사에서 실패했다. 원본 program2/serial3은 cohort8637,
+Worklet ACK8641, 진단 Window 수신8642, local ACK8643이며 다른 세 cohort도
+진단 수신만 한 tick 늦었다. 제품의 실제 message listener가 먼저 등록돼 실제
+Window ACK로 custody promise를 해제하고 Worklet ACK를 보내고 나서 후등록된
+진단 listener가 실행된 문제였다. 제품의 custody 조건과 순서 검사는 유지하며
+진단 listener가 실제 수신 진입을 관찰하도록 수정한다. ACK 선택에는 동일
+programId도 요구한다. 원본은
+`target/wf/runtime-rate-browser-tenth-14113/evidence.json`이며 console/network0,
+owned browser/Xvfb exit0이다. 전체12개 검사·local·fixed-opponent와 독립 review/QA는
+남으며 WBS05.13.06 W·전체136/489·오디오 커널12/27을 유지한다.
+
+열한 번째 실제 실행71061에서도 capture 옵션만 추가한 진단 listener는 같은
+순서를 관찰해 custody 검사가 실패했다. program2/serial3은 cohort8717,
+Worklet ACK8722, 진단 수신8723이며 console/network0·owned cleanup exit0이다.
+원본은 `target/wf/runtime-rate-browser-eleventh-14114/evidence.json`이다.
+capture 옵션만으로 해결됐다는 가설은 폐기했다. observer와 실제 Worker는 static
+형제 module이며 observer의 bindings import를 기다리는 사이 실제 제품 listener가
+먼저 등록될 수 있었다. 동일 진단 listener를 첫 await import 앞으로 옮겨 수신
+진입을 먼저 기록하고 capture 옵션은 제거했다. 프로그램별 ACK 선택과 실제
+Window File custody·tick 순서 조건은 그대로 유지해 다음 실제 실행에서 확인한다.
+
+열두 번째 실제 실행72161은 첫 await 전 진단 listener를 등록한 runner로 수행했다.
+fresh-artifacts·invalid-drafts·solo-rate-continuation의3개 검사를 통과했으나 초기
+pause 대기 중 실제 `retained-history-retire (status 1): retained-admission` 오류로
+플레이가 종료됐다. 이는 앞선 진단 listener 순서 검사보다 먼저 발생한 제품의
+admission 거절이며, 이 실행으로 새 custody 수신 관찰의 성공을 주장하지 않는다.
+실제 song1573312611ns·hits1/misses1과 incomplete File4060B가 보존됐다.
+원본은 `target/wf/runtime-rate-browser-twelfth-14114/evidence.json` 및
+`target/wf/runtime-rate-14043/actual-browser-twelfth-14114.log`이며 console/network0,
+owned browser/Xvfb exit0이다. Worker 명령과 실제 Worklet/Rust admission 계약의
+경합을 읽기 전용 병렬 분석한다. product 수정 전 canonical PLAN에 원인·소유권·
+회귀를 반영하며 거절/ACK 조건을 약화하지 않는다. WBS05.13.06 W·전체136/489·
+오디오 커널12/27을 유지한다. AC010/011과 실제 독립 review/QA는 아직 미완료다.

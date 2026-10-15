@@ -10,7 +10,7 @@
 2026-10-15 실제 browser 첫 실행: fresh 두 WASM은 일치했으나 cold capability가
 정상적으로 빈 값인 시점에 JS가16words를 요구해 시작이 실패했다. network/console
 오류는 없었고 owned browser/Xvfb는 exit0으로 정리했다. 기존 Rust의 실제 Started
-이후 권한 조건은 유지하며 JS의 nullable capability·Ended/fresh 분리를 수정 중이다.
+이후 권한 조건은 유지하며 JS의 nullable capability·Ended/fresh 분리를 수정했고 관련 회귀41/0을 확인했다.
 두 번째 실제 실행은 cold 준비를 통과했으나 pre-arm 실제 관측을 버려 Started0을
 검증할 실제 bracket이 사라졌고 HistoryExpired로 종료했다. 원본 signed 시계 쌍을
 보존하는 공통 authority와 retained JS 연결을 구현했다. core7/0·앱 통합28/0·기존
@@ -25,11 +25,18 @@ PCM·배속 전환과 cold 원자성 통합32/0, 새 두 release WASM·matching 
 새 attempt로 먼저 투영한 순서 오류였다. Step 통합34/0과 native Source/Target
 solo/cohort·correspondence 회귀51/0 및 새 두 release WASM·matching bindgen을
 확인했다. 실제 아홉 번째는 loop·자율 기록 회수·disable-loop까지 진행했다. 이어
-짧은 구간의 정상 종료 뒤 runner가 scrub UI를 조작하려 해 멈췄으며, 남은 실제
-browser 경로와 독립 review/QA는 아직 남는다.
-오디오 WASM은 실제 EOF·matching compile을 확인했으나 strict ERR_ABORTED도 관측됐다.
-이 JS 수정의 cold→Started→Ended·capture·늦은 거절 회귀41개가 모두 통과했다
-(js-cold-readiness-first-14110.log). 실제 browser 재검증과 독립 review/QA는 남는다.
+짧은 구간의 정상 종료 뒤 runner가 숨겨진 scrub UI를 조작하려 해 멈췄다.
+진단 로그의 반복 CDP 복사를 줄인 열 번째 실행은 loop·disable-loop·scrub·F5까지
+진행했으나 retired File custody의 ACK 순서 검사에서 실패했다. 실제 제품은
+Window ACK 뒤 Worklet ACK를 보냈으며, 후등록된 진단 listener가 수신을 한 tick
+늦게 기록한 문제를 확인했다. 실제 수신 진입 관찰을 수정한 뒤 재검증한다.
+아홉/열 번째 console/network 오류는0, owned browser/Xvfb는 exit0이었다.
+열한 번째에도 capture 옵션만으로 관찰 순서는 해결되지 않아 listener를 첫 await
+앞으로 옮겼다. 열두 번째는 초기 배속 전환 뒤 pause와 history-retire 경합에서
+실제 retained-admission 거절로 플레이가 종료됐다. incomplete File4060B는 보존됐고
+console/network0·owned browser/Xvfb exit0이었다. 이 실제 경합의 수정과 전체 browser
+검사·독립 review/QA는 남는다. strict ERR_ABORTED는 두 번째 실행의 과거 관측이며
+별도 browser-audio acceptance의 미완료 범위를 해소한 근거는 아니다.
 
 2026-10-15 최신 runtime 연동 검사: 공통 native Source/Target pump·정확한 Source cut과
 미투영 경계 barrier·6곳 native cold 조립은 앱 lib3356/0(ignored9)·관련 integration99/0을
@@ -37,7 +44,7 @@ browser 경로와 독립 review/QA는 아직 남는다.
 통과했다. Worklet·포트 Node231개, Worker/Window 신규33개와 관련 기존504개도
 모두 통과했다. 실제 poll 중 요청의 wake와 잘못된 최종 File 응답의 보관 경계도
 회귀로 확인했다. 추가 PCM·기록·리플레이 end-to-end3개도 모두 통과했고 실제 브라우저
-runner는 작성 중이다. 실제 browser·desktop와 전체 독립 review/QA는 남으므로
+runner는 열두 차례 실제 실행했고 남은 흐름을 재검증 중이다. 실제 browser·desktop와 전체 독립 review/QA는 남으므로
 WBS 완료 수136/489, 오디오12/27을 유지한다.
 
 2026-10-15 실행 중 배속 전환05.13.06은 W다. 공유 phase·PCM·exact Transport
@@ -47,8 +54,9 @@ library24/0, typed mailbox30/0과 browser-audio WASM check가 통과했다. 이�
 owner10/0·capture12/0·SessionLaunch7/0·lineage5/0, browser retained 준비5/0·
 timing policy7/0, public native control11/0·retained RateView8/0·실제 desktop
 제어14/0·IME3/0을 확인했다. 겹치는 library 검사 수는 더하지 않는다. 현재 공통
-native pump·browser Step/WASM owner·실제 native6곳 runtime 시작 조립을 세 쌍으로
-병렬 진행하며, browser JS 수직 연결과 독립 전체 review/QA는 남는다.
+native pump·browser Step/WASM owner·실제 native6곳 runtime 시작 조립과 browser JS
+수직 연결을 구현해 위 범위의 개발 검사를 확인했다. 전체 strict browser acceptance와
+독립 review/QA는 남는다.
 [runtime 배속](REQ__runtime-playback-rate.md)과
 [실제 변경/검증 범위](../changes/2026-10-15-runtime-playback-rate.md)를 따른다.
 전체 runtime 지원 완료가 아니므로 완료 수/분모136/489는 유지한다.

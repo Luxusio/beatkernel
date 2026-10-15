@@ -106,6 +106,16 @@ async function observeBusiness() {
     : v instanceof File ? { actualFile: true, name: v.name, size: v.size }
       : v instanceof Blob ? { actualBlob: true, size: v.size } : v instanceof MessagePort ? { actualPort: true }
         : v instanceof WebAssembly.Module ? { actualModule: true } : ArrayBuffer.isView(v) ? Array.from(v) : v));
+  // Register receive entry before this observer's first await: sibling static
+  // module evaluation can install the product listener while bindings load.
+  globalThis.addEventListener("message", ({ data }) => {
+    if (data?.kind === "play-retired-recordings-ack") add(probe.messages, { direction: "received", ...safe(data) });
+    if (data?.kind === "play-start" && data.replayFile instanceof File) {
+      const row = { playId: data.playId, actualFile: true, bytes: null }; add(probe.loads, row, 128); probe.pending++;
+      data.replayFile.arrayBuffer().then(bytes => { if (bytes.byteLength > 1048576) throw Error("replay observation ceiling"); row.bytes = Array.from(new Uint8Array(bytes)); })
+        .catch(error => add(probe.errors, String(error), 128)).finally(() => probe.pending--);
+    }
+  });
   const bindings = await import("./pkg/beatkernel_bms_runtime.js"), owners = new WeakMap(); let nextOwner = 0;
   for (const name of ["BrowserGame", "BrowserLocalGame", "BrowserReplay"]) {
     const proto = bindings[name]?.prototype;
@@ -167,14 +177,6 @@ async function observeBusiness() {
     }
     return post.call(this, value, ...args);
   };
-  globalThis.addEventListener("message", ({ data }) => {
-    if (data?.kind === "play-retired-recordings-ack") add(probe.messages, { direction: "received", ...safe(data) });
-    if (data?.kind === "play-start" && data.replayFile instanceof File) {
-      const row = { playId: data.playId, actualFile: true, bytes: null }; add(probe.loads, row, 128); probe.pending++;
-      data.replayFile.arrayBuffer().then(bytes => { if (bytes.byteLength > 1048576) throw Error("replay observation ceiling"); row.bytes = Array.from(new Uint8Array(bytes)); })
-        .catch(error => add(probe.errors, String(error), 128)).finally(() => probe.pending--);
-    }
-  });
   const nativePortPost = MessagePort.prototype.postMessage;
   MessagePort.prototype.postMessage = function(value, ...args) {
     if (value?.kind?.startsWith("retained-")) add(probe.ports, { direction: "sent", data: safe(value) }, 20000);
@@ -429,8 +431,8 @@ async function terminal(session, complete = true) {
   return stopped;
 }
 async function requirePlaying(session, label) {
-  const terminal = (await messages()).slice(session.offset).find(row => row.direction === "received" && row.data.playId === session.request.playId
-    && ["play-error", "play-stopped"].includes(row.data.kind));
+  const terminal = await page.evaluate(({ offset, id }) => __runtimeWindow.messages.slice(offset).find(row => row.direction === "received" && row.data.playId === id
+    && ["play-error", "play-stopped"].includes(row.data.kind)), { offset: session.offset, id: session.request.playId });
   if (terminal) throw Error(`Actual play ${session.request.playId} ended while awaiting ${label}: ${JSON.stringify(terminal.data)}`);
 }
 async function pollPlaying(session, realm, predicate, value, label, timeout = 20000) {
@@ -447,16 +449,17 @@ async function progress(session, ns, offset = 0) {
   await pollPlaying(session, page, ({ id, ns, offset }) => __runtimeWindow.messages.slice(offset).some(row => row.direction === "received" && row.data.playId === id && row.data.kind === "play-render-done" && row.data.songNs != null && BigInt(row.data.songNs) >= BigInt(ns)), { id: session.request.playId, ns: String(ns), offset }, `song progress ${ns}ns`);
 }
 async function draft(session, action, values = {}, trigger) {
-  const offset = (await messages()).length;
+  const offset = await page.evaluate(() => __runtimeWindow.messages.length);
+  const selector = `#${{ rate: "runtime-rate-apply", pause: "runtime-pause", region: "runtime-region", "disable-loop": "runtime-disable-loop", "restart-original": "runtime-restart-original" }[action]}`;
+  await pollPlaying(session, page, selector => { const control = document.querySelector(selector); return !control.disabled && control.getClientRects().length > 0; }, selector, `${action} control visible and enabled`);
   if (action === "rate") await field("runtime-rate", values.fraction);
   if (action === "region") { await field("runtime-start", values.start); await field("runtime-end", values.end ?? ""); await toggle("runtime-loop", values.repeat ?? false); }
-  const selector = `#${{ rate: "runtime-rate-apply", pause: "runtime-pause", region: "runtime-region", "disable-loop": "runtime-disable-loop", "restart-original": "runtime-restart-original" }[action]}`;
   await pollPlaying(session, page, selector => !document.querySelector(selector).disabled, selector, `${action} control enabled`);
   if (trigger) await trigger(); else await page.click(selector);
   await pollPlaying(session, page, ({ offset, action }) => __runtimeWindow.messages.slice(offset).some(row => row.direction === "sent" && row.data.kind === "play-retained" && row.data.action === action), { offset, action }, `${action} actual request`);
-  const request = (await messages()).slice(offset).find(row => row.direction === "sent" && row.data.kind === "play-retained" && row.data.action === action).data;
+  const request = await page.evaluate(({ offset, action }) => __runtimeWindow.messages.slice(offset).find(row => row.direction === "sent" && row.data.kind === "play-retained" && row.data.action === action).data, { offset, action });
   await pollPlaying(session, page, request => __runtimeWindow.messages.some(row => row.direction === "received" && row.data.kind === "play-reply" && row.data.playId === request.playId && row.data.rpcId === request.rpcId), request, `${action} admission reply`);
-  const reply = (await messages()).find(row => row.direction === "received" && row.data.kind === "play-reply" && row.data.playId === request.playId && row.data.rpcId === request.rpcId).data;
+  const reply = await page.evaluate(request => __runtimeWindow.messages.find(row => row.direction === "received" && row.data.kind === "play-reply" && row.data.playId === request.playId && row.data.rpcId === request.rpcId).data, request);
   return { request, reply, offset };
 }
 async function committed(session, action, values = {}, trigger) {
@@ -470,19 +473,28 @@ async function settleAdmission(session, action, admission) {
   const pending = admission.reply.result; assert.equal(pending.kind, "retained-pending"); assert.equal(pending.action, action);
   const before = capability(pending.capability, session.prepared.programId);
   await pollPlaying(session, page, ({ id, playId }) => __runtimeWindow.messages.some(row => row.direction === "received" && row.data.kind === "play-retained-result" && row.data.playId === playId && row.data.id === id), { id: pending.id, playId: session.request.playId }, `${action} actual committed result`);
-  const result = (await messages()).find(row => row.direction === "received" && row.data.kind === "play-retained-result" && row.data.playId === session.request.playId && row.data.id === pending.id).data;
+  const result = await page.evaluate(({ playId, id }) => __runtimeWindow.messages.find(row => row.direction === "received" && row.data.kind === "play-retained-result" && row.data.playId === playId && row.data.id === id).data, { playId: session.request.playId, id: pending.id });
   const event = eventWords(result.event, session.prepared.programId), after = capability(result.capability, session.prepared.programId);
   assert.equal(event.id, BigInt(pending.id)); assert.equal(result.action, action);
   assert(["applied", "noop", "paused", "resumed"].includes(result.outcome), JSON.stringify(result));
   await waitBusiness(session, ({ serial, program }) => __runtimeBusiness.calls.some(row => row.method === "retained_event_ack" && row.args[0] === serial)
     && __runtimeBusiness.ports.some(row => row.direction === "sent" && row.data.kind === "retained-event-ack" && row.data.serial === serial && row.data.programId === program), { serial: String(event.serial), program: String(session.prepared.programId) }, "committed event ACK");
-  const observed = await businessState(), held = observed.calls.find(row => row.method === "retained_event" && row.args[0]?.length === 80 && word(row.args[0], 2) === BigInt(session.prepared.programId) && word(row.args[0], 3) === event.serial);
+  // Select the same original diagnostic rows in their owning Worker instead of
+  // copying all previous sessions while a short finite region is still live.
+  const observed = await business.evaluate(({ serial, program }) => {
+    const probe = __runtimeBusiness, word = (words, index) => BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;
+    const held = probe.calls.find(row => row.method === "retained_event" && row.args[0]?.length === 80 && word(row.args[0], 2) === BigInt(program) && word(row.args[0], 3) === BigInt(serial));
+    return {
+      held,
+      service: held && probe.calls.find(row => row.method === "retained_service" && row.result === serial && row.tick > held.tick),
+      localAck: held && probe.calls.find(row => row.method === "retained_event_ack" && row.args[0] === serial && row.tick > held.tick),
+      audioAck: held && probe.ports.find(row => row.direction === "sent" && row.data.kind === "retained-event-ack" && row.data.serial === serial && row.tick > held.tick),
+      wire: probe.ports.find(row => row.direction === "received" && row.data.retained?.event && word(row.data.retained.event, 3) === BigInt(serial) && word(row.data.retained.event, 2) === BigInt(program)),
+    };
+  }, { serial: String(event.serial), program: String(session.prepared.programId) });
+  const { held, service, localAck, audioAck, wire } = observed;
   assert(held, "original committed event must come from actual Rust ingestion"); assert.deepEqual(held.args[0], result.event);
-  const service = observed.calls.find(row => row.method === "retained_service" && row.result === String(event.serial) && row.tick > held.tick);
-  const localAck = observed.calls.find(row => row.method === "retained_event_ack" && row.args[0] === String(event.serial) && row.tick > held.tick);
-  const audioAck = observed.ports.find(row => row.direction === "sent" && row.data.kind === "retained-event-ack" && row.data.serial === String(event.serial) && row.tick > held.tick);
   assert(service && localAck && audioAck); assert(service.tick < audioAck.tick && audioAck.tick < localAck.tick, "service -> real Worklet ACK -> local latch ACK");
-  const wire = observed.ports.find(row => row.direction === "received" && row.data.retained?.event && word(row.data.retained.event, 3) === event.serial && word(row.data.retained.event, 2) === BigInt(session.prepared.programId));
   assert(wire, "actual Worklet poll event required"); assert.deepEqual(wire.data.retained.event, result.event);
   assert.equal(wire.data.report?.words?.length, 58); assert.equal(wire.data.retained.metadata.length, 12);
   const history = wire.data.retained.history; assert(history.length >= 20 && (history.length - 20) % 10 === 0); assert.equal(word(history, 0), 1n); assert.equal(word(history, 1), BigInt(session.prepared.programId)); assert.equal(history.length, 20 + Number(word(history, 9)) * 10);
@@ -491,12 +503,12 @@ async function settleAdmission(session, action, admission) {
 }
 
 async function invalidDraft(session, action, values, pattern) {
-  const before = (await businessState()).calls.length, request = await draft(session, action, values);
+  const before = await business.evaluate(() => __runtimeBusiness.calls.length), request = await draft(session, action, values);
   assert.equal(request.reply.result ?? null, null); assert.match(request.reply.error ?? "", pattern);
-  const rows = (await messages()).slice(request.offset);
+  const rows = await page.evaluate(offset => __runtimeWindow.messages.slice(offset), request.offset);
   assert(!rows.some(row => row.data.kind === "play-retained-result" && row.data.playId === session.request.playId), "invalid draft cannot manufacture Applied");
   assert(!rows.some(row => ["play-error", "play-stopped"].includes(row.data.kind) && row.data.playId === session.request.playId));
-  const calls = (await businessState()).calls.slice(before);
+  const calls = await business.evaluate(before => __runtimeBusiness.calls.slice(before), before);
   assert(!calls.some(row => row.method === "retained_event_ack"), "invalid draft cannot acknowledge a nonexistent event");
   await pollPlaying(session, page, () => !document.querySelector("#runtime-rate-apply").disabled, null, "control recovery after refused draft");
   return request;
@@ -549,7 +561,7 @@ function assertRetiredCustody(state, session, minimum, roster) {
     const accepted = state.business.messages.find(row => row.direction === "received" && row.kind === "play-retired-recordings-ack" && row.playId === cohort.playId
       && row.programId === cohort.programId && row.boundarySerial === cohort.boundarySerial && row.accepted === true);
     assert(accepted && accepted.tick > cohort.tick, "actual positive Window custody must follow the complete cohort");
-    const ack = state.business.ports.find(row => row.direction === "sent" && row.data.kind === "retained-event-ack" && row.data.serial === cohort.boundarySerial && row.tick > cohort.tick);
+    const ack = state.business.ports.find(row => row.direction === "sent" && row.data.kind === "retained-event-ack" && row.data.programId === cohort.programId && row.data.serial === cohort.boundarySerial && row.tick > cohort.tick);
     assert(ack && ack.tick > accepted.tick, "Worklet ACK must wait for real Window File custody");
     for (const row of cohort.replays) {
       assert.equal(row.replayComplete, false); assert(row.replay?.actualFile && row.replay.size > 0); assert.equal(row.replayError, null);
@@ -629,9 +641,9 @@ async function runJourneys() {
   const regions = await start(); await progress(regions, 650000000n);
   await committed(regions, "rate", { fraction: "2/1" });
   const loop = await committed(regions, "region", { start: "1", end: "2", repeat: true }); assert.deepEqual(loop.after.rate, [2n, 1n]);
-  const loopCaptureOffset = (await businessState()).messages.length;
+  const loopCaptureOffset = await business.evaluate(() => __runtimeBusiness.messages.length);
   await waitBusiness(regions, ({ offset, id }) => __runtimeBusiness.messages.slice(offset).some(row => row.kind === "play-retired-recordings" && row.playId === id), { offset: loopCaptureOffset, id: regions.request.playId }, "autonomous real loop capture");
-  const autonomous = (await businessState()).messages.slice(loopCaptureOffset).find(row => row.kind === "play-retired-recordings" && row.playId === regions.request.playId);
+  const autonomous = await business.evaluate(({ offset, id }) => __runtimeBusiness.messages.slice(offset).find(row => row.kind === "play-retired-recordings" && row.playId === id), { offset: loopCaptureOffset, id: regions.request.playId });
   await waitBusiness(regions, ({ serial, after }) => __runtimeBusiness.calls.some(row => row.method === "retained_event_ack" && row.args[0] === serial && row.tick > after), { serial: autonomous.boundarySerial, after: autonomous.tick }, "autonomous loop custody and ACK");
   const disabled = await committed(regions, "disable-loop"); assert.deepEqual(disabled.after.rate, [2n, 1n]);
   const scrub = await committed(regions, "region", { start: "0.25", end: "", repeat: false }); assert.deepEqual(scrub.after.rate, [2n, 1n]);
@@ -639,7 +651,7 @@ async function runJourneys() {
   const restarted = await committed(regions, "restart-original", {}, async () => { await page.click("#canvas"); await page.keyboard.press("F5"); });
   assert.equal(restarted.event.tag, 3n); assert.deepEqual(restarted.after.rate, [1n, 2n]); assert(restarted.after.generation > scrub.after.generation);
   assert.equal(BigInt.asIntN(64, word(restarted.result.event, 23)), 500000000n, "F5 restores the actual original section start");
-  await progress(regions, 600000000n, (await messages()).length);
+  await progress(regions, 600000000n, await page.evaluate(() => __runtimeWindow.messages.length));
   await pollPlaying(regions, renderer, count => {
         const rows = __runtimeRenderer.records, registration = rows.filter(row => row.packet?.kind === 1 && row.mode === "live")[count];
         return registration && rows.some(row => row.kind === "drawn" && row.generation === registration.packet.generation && row.content === registration.packet.content);
@@ -669,7 +681,7 @@ async function runJourneys() {
   await committed(local, "pause"); await committed(local, "pause");
   await committed(local, "region", { start: "0.25", end: "", repeat: false });
   const localRestart = await committed(local, "restart-original"); assert.deepEqual(localRestart.after.rate, [1n, 2n]);
-  await progress(local, 200000000n, (await messages()).length); await page.click("#stop"); await terminal(local, false);
+  await progress(local, 200000000n, await page.evaluate(() => __runtimeWindow.messages.length)); await page.click("#stop"); await terminal(local, false);
   const localState = await snapshot("local-runtime-controls"); assertRetiredCustody(localState, local, 2, [1, 2]);
   const localCaptures = localState.business.captures.filter(row => row.playId === local.request.playId && row.boundarySerial !== null);
   const twoMembers = localCaptures.filter(row => row.boundarySerial === localCaptures[0]?.boundarySerial); assert.equal(twoMembers.length, 2);
