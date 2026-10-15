@@ -113,8 +113,46 @@ group and closes/joins its own relay. A forced kill is not graceful success.
 
 ## Independent gates, artifacts and remaining scope
 
-Formal independent code review and subsequent independent CLI QA are pending at
-this checkpoint. No automatic review/QA PASS or Harness close is claimed.
+Frozen candidate: 5761e7911975da22cfea1e0f072bf11e2fb6291b. Both fresh read-only
+DEEP discovery lanes returned empty candidate arrays. Separate formal
+code_review_room_retirement_14128_c1 completed PASS with0findings, followed by
+independent qa_cli_room_retirement_14128 actual PASS. These actual finals are
+separate from automatic lifecycle attestation.
+
+Independent QA executed current-source relay build, public serve-multiplayer
+--help, both-target --no-run, a fresh strict owned relay with exact15+2cases,
+scoped rustfmt/diff and WBS validation. All eight verification commands exited0.
+Pending target2/0/ignored0 took0.08s; room target15/0/ignored0 took7.90s. All six
+candidate file hashes, HEAD/index/tracked state and native artifact stayed
+identical before/after every command. Root independently checked all eight
+command-log hashes against the retained files.
+
+QA relay PID1845131 on owned UDP50665 passed process/socket readiness, received
+SIGINT, exited0 and was joined without forced kill. Test PID1845159, supervisor
+PID1845064 and QA wrapper PID1841788 were terminal; postflight found no remaining
+owned processes or process groups. No descendants or source/docs/protected
+writes occurred. Initial owner-only evidence reads and sudo PATH lacking rg
+were handled with sudo/Python inspection, without permission or system changes;
+there was no product/check failure or product-command repeat.
+
+QA evidence: target/wf/webtransport-room-retirement-qa-cli-14128/commands.json,
+SHA256873e5a08213027df64eb566c2bccc5be638f263cfdcbec7a935b17d702c38f06.
+verify/invocations.json SHA256
+0d6940f6e704a65f358542f8b85c0c76e95f53015cdcff04b9ac5c61f3f74a52;
+verify/tests.log SHA256
+b9b0e05bf0308729853ca0ba40da34bf21e1b3f33b2fcb98bb0bce203e68a820.
+postflight.json records owned process cleanup, public certificate metadata and
+frozen artifact identities. The deepest QA tier was executed-command; operation,
+intent, CLI UX and runtime roles all passed within this child's scope.
+
+After the actual review PASS and then QA PASS, exactly one owning task_verify
+returned PENDING because the automatic completion stream was absent with zero
+rows of any kind. Owning task_blocked published the exact empty-stream park pair
+from that verify. No task_close, fabricated runtime PASS, manual receipt, lens
+rerun solely for attestation or whole-Goal completion occurred. Actual software
+verification passed; only task closure remains unfinished for missing attestation.
+The owning RPC results are retained as diagnostics, not receipts, in
+target/wf/webtransport-room-retirement-14128/owning-verification.json.
 
 Native headless relay SHA256 remains
 74e28d69631d77470d7d1f2c8f4f5f1c2912a9e0467949722f27cc54e91e8790
@@ -133,3 +171,9 @@ outside this child's proved scope.
 
 WBS stays136/489(27.81%), remaining353; original requirements91/193(47.15%);
 audio12/27. The full player Goal is active and incomplete.
+
+The source-backed inspection lesson is already handled: use owner-aware reads
+and explicit tool paths for retained owner-only evidence. No new product rule,
+policy or Harness repair is introduced. The next available software scope is
+the separately planned actual delayed Accept completion after a received Commit;
+that still does not force the private server Commit-write boundary.
