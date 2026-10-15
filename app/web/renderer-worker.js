@@ -9,6 +9,7 @@ let port = null;
 let loading = false;
 let disposed = false;
 let failed = false;
+let failure = null;
 let epoch = 0;
 let maxPacketBytes = 0;
 let maxDiagnosticBytes = 0;
@@ -43,12 +44,13 @@ function diagnostic(error) {
 function fail(error, operationId = null, identity = current) {
   if (failed || disposed) return;
   failed = true;
-  stopDraw();
-  movies?.retire();
-  const report = { kind: "render-error", generation: identity?.generation ?? 0n, content: identity?.content ?? 0n,
-    operationId, mode: identity?.mode ?? "initializing", message: diagnostic(error) };
-  try { send(report); } catch {}
-  try { self.postMessage(report); } catch {}
+  failure = Object.freeze({ kind: "render-error", generation: identity?.generation ?? 0n, content: identity?.content ?? 0n,
+    operationId, mode: identity?.mode ?? "initializing", message: diagnostic(error) });
+  // A secondary cleanup error must not hide the first terminal cause.
+  try { stopDraw(); } catch {}
+  try { movies?.retire(); } catch {}
+  try { send(failure); } catch {}
+  try { self.postMessage(failure); } catch {}
   // Gameplay decides capture-preserving failed stop. This owner has no game.
 }
 function wait(identity) {
@@ -266,8 +268,18 @@ function control(message) {
   scheduleDraw();
 }
 function receive(event) {
-  if (disposed || failed) return;
+  if (disposed) return;
   const input = event.data;
+  if (failed) {
+    // The surface has failed for this Worker's lifetime, including later visual
+    // owners. Reply in the requester's scope without importing or acknowledging.
+    try {
+      const { generation, content, operationId } = input ?? {};
+      if ([generation, content, operationId].every(unsignedIdentity))
+        send({ ...failure, generation, content, operationId });
+    } catch {}
+    return;
+  }
   if (!input || typeof input !== "object") { fail(new Error("Invalid render message.")); return; }
   // Snapshot accessor-bearing records once before invoking native/WASM work.
   let message;

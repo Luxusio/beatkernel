@@ -839,3 +839,45 @@ original-prefix-diagnostic/diagnostic-summary.json}이다. 모든 소유 프로�
 actual UX FAIL을 해결하지 않은 채 실제 장치 대기만으로 완료/close하지 않는다.
 AC010의 현재 browser 검증은 완료했지만 최종 AC011과 태스크·전체 Goal은 미완료다.
 WBS05.13.06 W·전체136/489·오디오12/27을 유지한다.
+
+
+## AC040 렌더러 종결 오류 전달·기록 보존14122 (진행 중)
+
+현재 소스에서 renderer-worker.failed 이후 새 RPC를 버리고 이전 화면 owner의
+첫 오류를 새 RenderClient가 정확한 identity 격리로 무시하는 경로를 확인했다.
+이 구체적인 오류 유실을 수정하되 한 번 관찰한 메뉴 흰 화면의 최초 원인이라고
+단정하지 않는다. 독립 source/test 작성자가 각각2개/3개 경로를 소유한다.
+최초 오류는 cleanup보다 먼저 보관하며, 후속 유효 RPC는 같은 원인을 해당 요청의
+tuple로 거절한다. 성공 ACK나 native presentation을 합성하지 않는다.
+
+Window는 현재 renderer 수명의 첫 실패를 보존하고 canvas/geometry/새 그래픽
+조작을 중단한다. 기존 stopPlay의 genuine capture/custody·오디오/입력 장벽을
+거쳐 플레이를 종료하며 CPU/library·선택한 File·상대·기록과 저장/다운로드는
+유지한다. 이는 렌더러 단독 실패의 보존 범위다. 별도 오디오/HID/입력 정리 실패는
+기존 전체 종료로 승격돼 선택을 초기화할 수 있다. 렌더러 오류만으로 선택을 지우는
+fatal→stop은 재사용하지 않는다. 자동 renderer 재생성을
+구현한 것이 아니며 기록 보존 뒤 새로고침 안내를 표시한다.
+
+이는 구현·회귀 작성 단계다. Root 기능 검증과 새 정식 code/security 리뷰 뒤
+영향받은 브라우저/CLI/UX 검사를 수행한다. 변경 없는 Rust/native/WASM 근거는
+실제 Git 객체/파일 hash 동일성을 확인해야 이월한다. 실제 장치 검증 한계와
+최초 메뉴 실패 원본을 유지하며 WBS136/489·오디오12/27을 올리지 않는다.
+
+
+### AC040 root 개발 검증14122
+
+두 독립 작성자가 source2/test3 경로를 QUIET로 반환한 뒤 root가 실제 Node22로
+renderer-worker.test.mjs·render-protocol.test.mjs·play-host.test.mjs를 한 번 실행했다.
+346pass/0fail/skip0, exit0,54.413s다. 실제 Node MessageChannel과 production
+RenderClient/renderer Worker VM의 이전 owner 오류→새 menu/resize/retire 요청,
+정리 예외 뒤 최초 원인 보존, 엄격한 owner 격리, Window의 원본 불변 File·상대·
+명시 저장/다운로드, late ready/drawn/geometry, 실제 새 Worker 수명의 재초기화,
+retained custody의 회수 대기/재시도를 확인했다. GPU/WASM 경계는 이 순수 검사에서
+모의이며 실제 GPU 원인·음향·자동 복구 증거로 쓰지 않는다.
+원본 로그는 target/wf/runtime-rate-ac040-14122/focused-first.log다.
+
+별도 unchanged-native-artifacts.json은99c86f60 대비 Rust/native/manifests의 Git diff가
+없고 실제 소비 UI/audio JS/WASM4개·native 주 실행 파일 SHA가 이전 실제 검증본과
+일치함을 확인했다. 이전 앱4859/typing/native BLOCKED_ENV의 동일 범위만 이월하며
+새 전체 Node·browser·UX 증거로 대체하지 않는다. 새 독립 full-scope DEEP 코드·
+security 리뷰 뒤 영향받은 QA를 수행한다. WBS 수와 전체 Goal은 그대로다.

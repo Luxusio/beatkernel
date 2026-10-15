@@ -323,3 +323,33 @@ test("renderer failure rejects pending work once and clears the dirty builder", 
     assert.deepEqual(adopted, []); assert.deepEqual(built, []); assert.equal(h.errors.length, 1);
   } finally { h.close(); }
 });
+
+test("a replacement client ignores a previous owner's failure until its own request receives the original cause", async () => {
+  const h = harness({ generation: 8n, content: 10n });
+  try {
+    const pending = h.client.menu(motionMenuPacket(), { geometryVersion: 1n });
+    await settle();
+    const request = h.sent.at(-1), cause = "original surface device loss";
+    h.reply({ kind: "render-error", generation: 7n, content: 9n,
+      operationId: request.operationId, message: cause });
+    h.reply({ kind: "menu-ack", generation: 7n, content: 9n,
+      operationId: request.operationId, menuGeneration: 77n, screen: 3n, revision: 5n });
+    await settle();
+    assert.equal(h.client.state, "ready"); assert.equal(h.client.pending, true);
+    assert.deepEqual(h.errors, []);
+    h.reply({ kind: "render-error", generation: 8n, content: 10n,
+      operationId: request.operationId, message: cause });
+    await assert.rejects(pending, error => error.message === cause);
+    const first = h.client.failure;
+    assert.equal(h.client.pending, false); assert.equal(h.errors.length, 1);
+    assert.equal(h.errors[0], first);
+    h.reply({ kind: "render-error", generation: 8n, content: 10n,
+      operationId: request.operationId, message: "later transport cleanup failure" });
+    h.reply({ kind: "menu-ack", generation: 8n, content: 10n,
+      operationId: request.operationId, menuGeneration: 77n, screen: 3n, revision: 5n });
+    await settle(); h.client.close();
+    assert.equal(h.client.failure, first); assert.equal(h.errors.length, 1);
+    await assert.rejects(h.client.retire(), error => error === first);
+    assert.equal(h.sent.length, 1, "failed cleanup cannot publish a new retirement or transfer");
+  } finally { h.close(); }
+});

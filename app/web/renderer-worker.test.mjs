@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { MessageChannel } from "node:worker_threads";
-import { preflightMenuPacket } from "./render-protocol.mjs";
+import { preflightMenuPacket, RenderClient } from "./render-protocol.mjs";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
@@ -126,7 +126,10 @@ async function rendererHarness(options = {}) {
   }
   if (options.animationFrame !== false) {
     self.requestAnimationFrame = callback => { const id = ++timerId; timers.set(id, callback); return id; };
-    self.cancelAnimationFrame = id => { timers.delete(id); };
+    self.cancelAnimationFrame = id => {
+      if (options.cancelDrawError) throw new Error(options.cancelDrawError);
+      timers.delete(id);
+    };
   }
   const context = createContext({ self, console, Uint8Array, Float32Array, ArrayBuffer, DataView, BigInt, TextEncoder, Error,
     performance: { now: () => now },
@@ -156,6 +159,10 @@ async function rendererHarness(options = {}) {
   const sendHost = async data => { (receive ?? self.onmessage)({ data }); await settle(); };
   const h = { host, messages, calls, views, options, timers,
     sendHost,
+    client(options = {}) {
+      return new RenderClient({ port: port1, generation: 7n, content: 9n,
+        maxPacketBytes: 4096, maxDiagnosticBytes: 1024, timeoutMs: 60000, ...options });
+    },
     async init() { await sendHost({ kind: "init", canvas: { width: 640, height: 480 }, port: port2,
       maxPacketBytes: 4096, maxDiagnosticBytes: 1024 }); },
     async send(data) { port1.postMessage(data); await settle(); },
@@ -173,6 +180,71 @@ const request = (operationId, kind = 1, sequence = 0n, mode = "live", generation
   packet: packet(kind, sequence, generation, content, body ?? (kind === 1 ? [mode === "preview" ? 0 : 1] : [0])), mode,
 });
 const ofKind = (h, kind) => h.messages.filter(message => message.kind === kind);
+
+for (const operation of ["menu", "resize", "retire"]) test(`terminal draw failure survives owner replacement before a new ${operation} RPC`, async () => {
+  const cause = "original GPU presentation failure", errors = [];
+  const h = await rendererHarness({ drawError: cause });
+  let previous, replacement;
+  try {
+    await h.init();
+    previous = h.client();
+    await previous.packet(packet(1, 0n, 7n, 9n, [0]), { mode: "preview" });
+    previous.close();
+    // The callback fails synchronously; MessagePort delivers the old-owner
+    // diagnostic only after the replacement client has attached its listener.
+    const drawing = h.draw(100);
+    replacement = h.client({ generation: 8n, content: 10n, onError: error => errors.push(error) });
+    await drawing;
+    assert.equal(replacement.state, "ready", "an unsolicited old-owner error stays isolated");
+    const original = h.host.find(message => message.kind === "render-error");
+    assert.equal(original.message, cause);
+    assert.deepEqual([original.generation, original.content], [7n, 9n]);
+    const nativeCalls = h.calls.length, replies = h.messages.length;
+    let outcome = null;
+    const pending = operation === "menu" ? replacement.menu(menuRequest().packet, { geometryVersion: 1n })
+      : operation === "resize" ? replacement.control("resize", { width: 800, height: 600, geometryVersion: 1n })
+        : replacement.retire();
+    pending.then(value => { outcome = { value }; }, error => { outcome = { error }; });
+    await settle();
+    assert.equal(outcome?.error?.message, cause, "the real failed renderer answers without advancing a deadline");
+    assert.equal(replacement.state, "failed");
+    assert.equal(errors.length, 1);
+    assert.equal(replacement.failure, outcome.error);
+    const response = h.messages.slice(replies).find(message => message.kind === "render-error");
+    assert.ok(response, "a genuine MessagePort failure response settles the new request");
+    assert.deepEqual([response.generation, response.content, response.operationId], [8n, 10n, 1n]);
+    assert.equal(response.message, cause);
+    assert.equal(h.messages.slice(replies).some(message => ["state-ack", "menu-ack", "control-ack", "geometry-ack", "drawn"].includes(message.kind)), false);
+    assert.equal(h.calls.length, nativeCalls, "terminal RPC handling never resumes native presentation");
+    replacement.close();
+    assert.equal(replacement.failure, outcome.error);
+    await assert.rejects(replacement.control("resize", { width: 1, height: 1, geometryVersion: 2n }), error => error === outcome.error);
+  } finally {
+    previous?.close(); replacement?.close(); await h.close();
+  }
+});
+
+test("terminal importer cause survives a secondary animation cleanup failure", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(request(1n, 1, 0n, "preview"));
+    assert.ok(h.timers.size > 0, "a real scheduled preview draw is awaiting presentation");
+    h.options.cancelDrawError = "secondary animation cleanup failure";
+    await h.send(request(2n, 3, 1n, "preview", 7n, 9n, [255]));
+    const first = h.host.find(message => message.kind === "render-error");
+    assert.equal(first?.message, "malformed final member/page");
+    const nativeCalls = h.calls.length;
+    await h.send({ kind: "resize", operationId: 1n, generation: 8n, content: 10n,
+      width: 800, height: 600, geometryVersion: 1n });
+    const replay = ofKind(h, "render-error").find(message => message.generation === 8n);
+    assert.equal(replay?.message, first.message);
+    assert.equal(h.calls.length, nativeCalls);
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+  } finally {
+    delete h.options.cancelDrawError;
+    await h.close();
+  }
+});
 
 function menuRequest(operationId = 1n, fields = {}) {
   const bytes = new Uint8Array(48); bytes.set([66,75,77,78]); const view = new DataView(bytes.buffer);

@@ -1885,9 +1885,9 @@ test("requested resize and invalid geometry never reinterpret touch before an ac
   h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
 });
 
-test("renderer transport failure joins capture receipt and audio cleanup before terminating gameplay", async () => {
+test("renderer transport failure joins capture receipt and audio cleanup while retaining the CPU owner", async () => {
   const stopping = deferred(), h = await harness({ stopGate: stopping });
-  await h.preview(); const session = await h.launch();
+  await h.preview(); h.get("record").checked = true; const session = await h.launch();
   const game = h.workers[0], renderer = h.renderers[0];
   renderer.emit("error", { message: "renderer transport lost", preventDefault() {} }); await flush();
   assert.equal(game.last("play-stop").playId, session.id);
@@ -1896,9 +1896,150 @@ test("renderer transport failure joins capture receipt and audio cleanup before 
     replay: captureFile(Uint8Array.from([9, 8, 7])), replayComplete: false, replayError: null }));
   assert.equal(game.terminations, 0, "capture receipt alone cannot release pending audio cleanup");
   stopping.resolve(); await flush();
-  assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
+  assert.equal(game.terminations, 0); assert.equal(renderer.terminations, 0);
+  assert.equal(h.get("records-save").disabled, false, "joined original capture remains available through the CPU owner");
   assert.match(h.get("status").textContent, /renderer transport lost/);
   await h.close();
+  assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
+});
+
+test("terminal renderer messages preserve first cause, original Files and opponents while graphical entry stays fenced", async () => {
+  const stopping = deferred(), h = await harness({ stopGate: stopping, noWindowRecordBinary: true });
+  let session;
+  const file = captureFile(Uint8Array.of(66, 75, 82, 91));
+  file.arrayBuffer = () => assert.fail("Window must keep the original immutable capture handle");
+  try {
+    await h.preview();
+    const selected = selectedRecording();
+    selectOpponent(h, selected, { own: false, label: "original opponent" });
+    const replayName = h.get("replay-name").textContent;
+    const opponentRows = content(h.get("opponents-list"));
+    const canvas = h.get("canvas");
+    h.get("record").checked = true;
+    session = await h.launch();
+    const game = h.workers[0], renderer = h.renderers[0], audio = h.audio;
+    assert.equal(session.start.opponents[0].file, selected.file);
+    const cause = "first GPU device failure";
+    await h.receive({ kind: "render-error", generation: 99n, content: 100n,
+      operationId: null, mode: "preview", message: cause }, renderer);
+    assert.equal(game.last("play-stop")?.playId, session.id, "a lifetime error survives a previous visual generation");
+    assert.equal(game.messages("play-stop").length, 1); assert.equal(audio.stopStarts, 1);
+    assert.equal(game.terminations, 0); assert.equal(game.messages("dispose").length, 0);
+    assert.equal(h.get("canvas"), canvas); assert.equal(canvas.hidden, true);
+    assert.equal(h.get("records-save").disabled, true, "audio and original File custody have not joined");
+    const inputCount = game.messages("play-step").length;
+    h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.125 });
+    h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
+    await flush(); assert.equal(game.messages("play-step").length, inputCount, "stopped input never acquires a new event");
+    await h.receive({ kind: "ready" }, renderer);
+    await h.receive({ kind: "render-error", generation: 101n, content: 102n, message: "secondary GPU cleanup failure" }, renderer);
+    renderer.emit("error", { message: "later renderer ErrorEvent", preventDefault() {} });
+    await flush();
+    assert.equal(game.messages("play-stop").length, 1); assert.equal(audio.stopStarts, 1);
+    assert.equal(h.get("status").textContent.split(cause).length - 1, 1, "first-cause feedback does not recursively grow");
+    assert.doesNotMatch(h.get("status").textContent, /secondary GPU|later renderer ErrorEvent/);
+    await h.receive(finalScore(session.id, { replay: file, replayComplete: false, replayError: null }));
+    assert.equal(h.get("records-save").disabled, true, "the File receipt cannot bypass audio cleanup");
+    stopping.resolve(); await flush();
+    assert.equal(game.terminations, 0); assert.equal(game.messages("dispose").length, 0);
+    assert.equal(h.get("replay-name").textContent, replayName);
+    assert.equal(content(h.get("opponents-list")), opponentRows); assert.equal(selected.reads, 0);
+    assert.equal(h.get("files").disabled, false, "the CPU library remains available");
+    for (const id of ["play", "replay-play", "menu-open"]) assert.equal(h.get(id).disabled, true, id);
+    const starts = game.messages("play-start").length, menus = game.messages("menu-open").length;
+    for (const id of ["play", "replay-play", "menu-open"]) h.get(id).emit("click");
+    await flush();
+    assert.equal(game.messages("play-start").length, starts); assert.equal(game.messages("menu-open").length, menus);
+    assert.equal(h.opens.length, 1, "programmatic entry cannot open another audio owner");
+    await h.receive(presentationPacket(h, "drawn"));
+    await h.receive(presentationPacket(h, "render-wait"));
+    await h.geometry({ geometryVersion: game.geometryVersion + 1n });
+    await h.receive({ kind: "selection-error", id: game.last("select").id, message: "later selection refusal" });
+    assert.equal(canvas.hidden, true);
+    assert.match(h.get("status").textContent, /first GPU device failure/);
+    assert.match(h.get("status").textContent, /graphics.*stopp|renderer.*stopp/i);
+    assert.match(h.get("status").textContent, /sav|download/i);
+    assert.match(h.get("status").textContent, /reload/i);
+    assert.doesNotMatch(h.get("status").textContent, /preview (?:is )?retained/i);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.equal(h.get("records-save").disabled, false); assert.equal(h.get("export").disabled, false);
+    h.click("export"); await flush(); assert.equal(h.urls.at(-1).blob, file);
+    h.click("records-save"); await flush();
+    const save = game.messages("records-request").find(request => request.action === "save");
+    assert.equal(save.value.replayFile, file);
+    assert.deepEqual(h.recordCalls.find(call => call.method === "save").value.bytes, Uint8Array.of(66, 75, 82, 91));
+    assert.match(h.get("status").textContent, /first GPU device failure/);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.equal(h.get("replay-name").textContent, replayName);
+    assert.equal(content(h.get("opponents-list")), opponentRows); assert.equal(selected.reads, 0);
+
+    // This is an explicit existing page-lifetime restart, not a fabricated GPU
+    // recovery ACK. The old immutable capture remains available after it.
+    h.window.emit("pageshow", { persisted: true }); await flush();
+    assert.equal(h.workers.length, 2); assert.equal(h.renderers.length, 2); assert.equal(h.channels.length, 2);
+    assert.notEqual(h.get("canvas"), canvas);
+    assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
+    await h.preview();
+    const fresh = statusSnapshot(h);
+    assert.doesNotMatch(fresh.text, /first GPU device failure/); assert.equal(h.get("play").disabled, false);
+    await h.receive({ kind: "render-error", generation: 1n, content: 1n, message: cause }, renderer);
+    renderer.emit("error", { message: "retired renderer error", preventDefault() {} });
+    await h.receive({ kind: "ready" }, renderer);
+    await h.receive(presentationPacket(h, "render-wait"), game);
+    assert.deepEqual(statusSnapshot(h), fresh, "a retired renderer cannot poison a fresh canvas/owner/channel lifetime");
+    h.click("export"); await flush(); assert.equal(h.urls.at(-1).blob, file);
+    h.get("record").checked = false;
+    const next = await h.launch();
+    assert.ok(next.id > session.id); assert.equal(h.opens.length, 2);
+    h.click("stop"); await flush(); await h.receive(finalScore(next.id));
+  } finally {
+    stopping.resolve();
+    if (session) await h.receive(finalScore(session.id, { replay: file, replayComplete: false, replayError: null }), h.workers[0]);
+    await h.close();
+  }
+});
+
+test("terminal graphics failure preserves accepted retired Files until actual current capture custody is released", async () => {
+  const h = await harness({ noWindowRecordBinary: true });
+  const prefix = captureFile(Uint8Array.of(66, 75, 82, 92)), current = captureFile(Uint8Array.of(66, 75, 82, 93));
+  for (const file of [prefix, current]) file.arrayBuffer = () => assert.fail("Window cannot consume retained File bodies");
+  let start;
+  try {
+    await h.preview(); h.get("runtime-retained").checked = true; h.get("record").checked = true; h.get("live-end").value = "2";
+    start = await h.begin(); const game = h.workers[0], renderer = h.renderers[0], programId = 81n;
+    await h.reply(start, { kind: "prepared", mode: "live", title: "Retained capture", artist: "Fixture", notes: 1, samples: 0,
+      lanes: [0x11], opponentCount: 0, startNs: 0n, endNs: 2000000000n, retained: true, programId,
+      capability: null, liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n });
+    const upload = game.last("play-samples-upload"); assert.ok(upload); await h.admitSamples(upload, 0);
+    await h.reply(upload, { kind: "samples-uploaded", count: 0, bytes: 0 });
+    await h.reply(game.last("play-audio"), null); await h.reply(game.last("play-activate"), null);
+    await h.receive({ kind: "play-retired-recordings", version: 1, playId: start.playId, programId, boundarySerial: 51n,
+      players: [1], replays: [{ player: 1, replay: prefix, replayComplete: false, replayError: null }], bytes: prefix.size });
+    assert.equal(game.last("play-retired-recordings-ack").accepted, true, "the original File is accepted before the renderer fails");
+    const choices = () => h.get("captured-replay").children.filter(option => option.value !== "");
+    await h.receive({ kind: "render-error", generation: 9n, content: 10n, message: "first retained renderer failure" }, renderer);
+    assert.equal(game.messages("play-stop").length, 1); assert.equal(h.audio.stopStarts, 1);
+    await h.receive(finalScore(start.playId, { kind: "play-error", message: "current File encoding remains on owner",
+      released: false, replay: null, replayComplete: false, replayError: "current File encoding remains on owner" }));
+    assert.equal(game.terminations, 0); assert.equal(choices().length, 1);
+    assert.equal(h.get("records-save").disabled, true, "partial failure cannot bypass the genuine current File release");
+    assert.equal(h.get("stop").disabled, false, "actual retained custody can still be retried");
+    h.click("stop"); await flush(); assert.equal(game.messages("play-stop").length, 2);
+    await h.receive(finalScore(start.playId, { replay: current, replayComplete: false, replayError: null }));
+    assert.equal(h.audio.stopStarts, 1, "custody retry does not restart audio cleanup");
+    assert.equal(game.terminations, 0); assert.equal(choices().length, 2);
+    assert.deepEqual(choices().map(option => option.value), [`${start.playId}:${programId}:51:1`, `${start.playId}:${programId}:current:1`]);
+    for (const [index, file] of [prefix, current].entries()) {
+      h.get("captured-replay").value = choices()[index].value; h.get("captured-replay").emit("change");
+      assert.equal(h.get("export").disabled, false); assert.equal(h.get("records-save").disabled, false);
+      h.click("export"); await flush(); assert.equal(h.urls.at(-1).blob, file);
+    }
+    assert.equal(choices().length, 2, "downloads never release accepted unsaved captures");
+    assert.equal(h.get("play").disabled, true); assert.match(h.get("status").textContent, /first retained renderer failure/);
+  } finally {
+    if (start) await h.receive(finalScore(start.playId, { replay: current, replayComplete: false, replayError: null }));
+    await h.close();
+  }
 });
 
 test("local coalesced movement and lost capture retain the acquired page through an unsubmitted choice", async () => {

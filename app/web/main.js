@@ -31,6 +31,7 @@ ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalT
 let worker = null;
 let renderer = null;
 let rendererReady = false;
+let rendererFailure = null;
 let submittedGeometry = null;
 let menuState = null;
 let appliedDisplayFields = Object.freeze(["auto", "fifo", "960", "720"]);
@@ -127,7 +128,7 @@ const timingPolicyFields = Object.freeze([
 ].map(row => Object.freeze(row)));
 
 function menuToken() {
-  return !menuRetired && menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
+  return rendererFailure === null && !menuRetired && menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
     ? { menuGeneration: menuState.menuGeneration, screen: menuState.screen, revision: menuState.revision } : null;
 }
 function settingsDraftOwned() {
@@ -208,7 +209,7 @@ function menuFieldsFor(route) {
   return fields;
 }
 function receiveMenu(data) {
-  if (activePlay || shuttingDown || !worker || menuRetired) return;
+  if (rendererFailure !== null || activePlay || shuttingDown || !worker || menuRetired) return;
   if (menuIdentity(data.menuGeneration) && data.menuGeneration <= retiredMenuGeneration) return;
   if (data.kind === "menu-error") {
     if (menuEditPending && data.menuGeneration === menuEditPending.menuGeneration
@@ -960,8 +961,9 @@ function pointerSetupFor(session) {
 }
 
 const presentationStatus = new PresentationStatus((text, error) => {
-  ui.status.textContent = text;
-  ui.status.dataset.error = String(error);
+  ui.status.textContent = rendererFailure === null ? text
+    : `Graphics stopped: ${rendererFailure} Save or download recordings, then reload this page for new graphics. ${text}`;
+  ui.status.dataset.error = String(error || rendererFailure !== null);
 }, ui.status.textContent, ui.status.dataset.error === "true");
 const presentationIdentity = { owner: 0, worker: null, selectedId: 0, playId: undefined, generation: 0n, content: 0n };
 
@@ -1195,14 +1197,16 @@ function controls() {
   const playing = activePlay !== null;
   ui["prepare-cancel"].hidden = !preparing;
   ui["prepare-cancel"].disabled = !preparing || preparationTicket === null;
-  byId("menu-editor").disabled = settingsOperation !== null;
+  byId("menu-editor").disabled = settingsOperation !== null || rendererFailure !== null;
+  byId("menu-open").disabled = rendererFailure !== null;
+  byId("menu-back").disabled = rendererFailure !== null;
   const busy = settingsOperation !== null || recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
   ui["settings-save"].disabled = ui["settings-load"].disabled = settingsOperation !== null || !settingsIdle();
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
   ui.files.disabled = !initialized || preparing || playing || busy;
   for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing || busy;
   ui.position.disabled = ui.seek.disabled = !initialized || !hasPreview || importing || preparing || playing || busy;
-  ui.play.disabled = !initialized || !hasPreview || importing || preparing || playing || busy || !audioModule;
+  ui.play.disabled = rendererFailure !== null || !initialized || !hasPreview || importing || preparing || playing || busy || !audioModule;
   ui.stop.disabled = !playing || activePlay.phase === "closing";
   ui.record.disabled = ui.play.disabled;
   ui.multiplayer.disabled = ui.play.disabled;
@@ -1358,6 +1362,23 @@ function fatal(error) {
   status(message, true);
   void stopped.then(cleanupError => { if (request === startRequest) status(message + (cleanupError ? ` ${cleanupError}` : ""), true); });
 }
+function failRenderer(error) {
+  if (rendererFailure !== null) return;
+  rendererFailure = String(error?.message ?? error).slice(0, 4096) || "Renderer unavailable.";
+  rendererReady = false;
+  submittedGeometry = menuGeometry = menuPress = null;
+  menuRetired = true;
+  cancelMenuMotions("Graphics stopped.");
+  cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
+  byId("menu-editor").hidden = true;
+  presentationStatus.invalidate();
+  canvas.hidden = true;
+  // Keep the CPU owner, selected Files and opponents available for storage.
+  // Normal playback shutdown joins recording custody and audio/input release.
+  void stopPlay("Playback stopped because graphics are unavailable.", true);
+  controls();
+  status("Selected files and captured recordings remain available.", true);
+}
 
 function resize() {
   if (!worker || shuttingDown) return;
@@ -1391,7 +1412,7 @@ function prepare() {
     preparing = true;
     preparationTicket = { id: selectId, libraryId, worker, owner };
     showPreparation({ stage: "file-read", completedAssets: 0, totalAssets: 0 });
-    canvas.hidden = !hasPreview;
+    canvas.hidden = rendererFailure !== null || !hasPreview;
     controls();
     status("Preparing chart, sounds and backgrounds…");
     worker.postMessage({ kind: "select", id: selectId, libraryId, path: ui.chart.value, rate, seed });
@@ -1425,8 +1446,8 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
       || data.libraryId !== ticket.libraryId) return;
     if (data.kind === "selection-progress") showPreparation(data);
     else {
-      preparing = false; clearPreparation(); canvas.hidden = !hasPreview; controls();
-      status(`Preparation cancelled. ${hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`);
+      preparing = false; clearPreparation(); canvas.hidden = rendererFailure !== null || !hasPreview; controls();
+      status(`Preparation cancelled. ${rendererFailure !== null ? "Chart data is retained." : hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`);
     }
     return;
   }
@@ -1465,7 +1486,7 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
   } else if (data.kind === "import-error" && data.id === importId) {
     importing = false;
     controls();
-    status(`${data.message} Previous library and preview are retained.`, true);
+    status(`${data.message} ${rendererFailure === null ? "Previous library and preview are retained." : "Previous library data is retained."}`, true);
   } else if (data.kind === "selected" && data.id === selectId && data.libraryId === libraryId) {
     clearPreparation();
     preparing = false;
@@ -1482,9 +1503,9 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
   } else if (data.kind === "selection-error" && data.id === selectId) {
     clearPreparation();
     preparing = false;
-    canvas.hidden = !hasPreview;
+    canvas.hidden = rendererFailure !== null || !hasPreview;
     controls();
-    status(`${data.message} ${hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`, true);
+    status(`${data.message} ${rendererFailure !== null ? "Chart data is retained." : hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`, true);
   } else if (data.kind === "position" && data.id === seekId && data.selectedId === selectedId) {
     seeking = false;
     controls();
@@ -1498,7 +1519,7 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
 }
 
 function receivePresentation(data, sourceWorker, sourceOwner) {
-  if (!worker || sourceWorker !== worker || sourceOwner !== owner || shuttingDown || closingOwner !== null
+  if (rendererFailure !== null || !worker || sourceWorker !== worker || sourceOwner !== owner || shuttingDown || closingOwner !== null
     || preparing || !Number.isSafeInteger(data.selectedId) || data.selectedId < 0
     || data.selectedId !== selectedId
     || !menuIdentity(data.generation) || !menuIdentity(data.content)) return;
@@ -1530,6 +1551,7 @@ function receivePresentation(data, sourceWorker, sourceOwner) {
 }
 
 function receiveGeometry(data) {
+  if (rendererFailure !== null) return;
   if (data.mode === "menu") {
     const token = menuToken();
     if (!token || data.menuGeneration !== token.menuGeneration || data.screen !== token.screen || data.revision !== token.revision
@@ -1675,18 +1697,22 @@ async function start() {
         return;
       }
       if (generation !== owner || renderer !== graphics || shuttingDown) return;
-      if (data?.kind === "ready") rendererReady = true;
-      // Correlated content errors reach gameplay over its direct port first.
-      else if (data?.kind === "render-error" && data.generation === 0n) fatal(new Error(data.message || "Could not initialize the renderer."));
+      if (data?.kind === "ready" && rendererFailure === null) rendererReady = true;
+      // A terminal surface failure outlives any one visual content owner.
+      else if (data?.kind === "render-error") failRenderer(new Error(
+        typeof data.message === "string" && data.message ? data.message : "Could not initialize the renderer."));
     });
     renderer.addEventListener("error", event => {
       if (generation !== owner || renderer !== graphics) return;
       event.preventDefault();
-      fatal(new Error(event.message || "Could not load the renderer Worker."));
+      failRenderer(new Error(event.message || "Could not load the renderer Worker."));
     });
-    renderer.addEventListener("messageerror", () => { if (generation === owner && renderer === graphics) fatal(new Error("Could not receive a renderer response.")); });
+    renderer.addEventListener("messageerror", () => { if (generation === owner && renderer === graphics) failRenderer(new Error("Could not receive a renderer response.")); });
     const channel = new MessageChannel();
     const surface = canvas.transferControlToOffscreen();
+    // Only a real new surface and Worker/channel lifetime can clear this fact.
+    rendererFailure = null;
+    status("Initializing graphics…");
     renderer.postMessage({ kind: "init", canvas: surface, port: channel.port2,
       maxPacketBytes: renderLimits.maxPacketBytes, maxDiagnosticBytes: renderLimits.maxDiagnosticBytes,
       timeoutMs: renderLimits.timeoutMs }, [surface, channel.port2]);
@@ -1740,7 +1766,7 @@ ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
 ui["settings-save"].addEventListener("click", () => requestSettings("settings-profile-save"));
 byId("menu-open").addEventListener("click", () => {
-  if (settingsOperation || !initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
+  if (rendererFailure !== null || settingsOperation || !initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
   menuRetired = false;
   worker.postMessage({ kind: "menu-open", fields: menuFieldsFor(1), roster: localRoster.exportState(), opponents: opponents.snapshot() });
@@ -2238,7 +2264,7 @@ async function changeLocalPage() {
 }
 
 async function play(mode = "live") {
-  if (settingsOperation || !initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
+  if (rendererFailure !== null || settingsOperation || !initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
   let replaySpeed;
   let liveSpeed;
@@ -4058,7 +4084,7 @@ function receiveHistoricalRecord(data) {
     if (historicalPageOperation) clearTimeout(historicalPageOperation.timer);
     historicalPageOperation = null;
     historicalSelection = { id: pending.id, owner };
-    canvas.hidden = false;
+    canvas.hidden = rendererFailure !== null;
   } else if (pending.clear) {
     historicalSelection = null;
     cancelHistoricalGradePage();
