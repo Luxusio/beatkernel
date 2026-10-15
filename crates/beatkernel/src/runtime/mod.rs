@@ -774,7 +774,11 @@ impl Runtime {
                                 input_commands.push(command);
                             }
                             report.bound_inputs.push(bound);
-                            report.judge_events.extend(events);
+                            if report.judge_events.is_empty() {
+                                report.judge_events = events;
+                            } else {
+                                report.judge_events.extend(events);
+                            }
                         }
                         Err(error) => {
                             mode.refused(&bound, error);

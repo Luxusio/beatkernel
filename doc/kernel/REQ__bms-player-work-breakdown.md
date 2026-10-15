@@ -1,5 +1,15 @@
 # BMS 플레이어 전체 작업 분해 구조(WBS)
 
+현재 구현 단위(2026-10-16): TASK__runtime-first-judge-batch-reuse는
+BK-WBS-13.06.01 아래 Runtime 첫 owned 판정 묶음 재사용을 구현했다.
+root Verify는 core840/0·fixture release11/0·app36/0·WASM typing0이다.
+동일66사례 양 profile14/0에서26개는 alloc/dealloc 각각1회·544B 감소,
+40개는 동일했고26개 상한을 좁힌 최종 양 profile도14/0·각66상한 PASS다.
+20개 반환 capacity 관측은 이전 capacity 미측정으로 전후 retained-memory
+비교가 아니다. 정식 code→독립 QA와 owning gate는 아직 남았고
+13.06.01W·전체136/489·오디오12/27을 유지한다.
+[동작·요청량·산출물 범위](../changes/2026-10-16-runtime-first-judge-batch-reuse.md)를 따른다.
+
 기준일: 2026-10-16. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
 사용자가 요청한 전체 TODO/진행률의 기준 문서다. 현재 병렬 개발 묶음만으로
 전체 목표를 대체하지 않는다. [원래 명세](../../plan.md),

@@ -1,5 +1,17 @@
 # BMS player 구현/검증 현황 — 2026-10-16
 
+현재 작업: TASK__runtime-first-judge-batch-reuse에서 Runtime 첫 owned 판정 묶음을
+재사용하고 이후 append·키음 borrower·오류 prefix를 보존했다. 독립 full-report·FIFO
+회귀3개를 포함한 core840/0·fixture release11/0·app local_runtime36/0과
+core WASM typing0을 실제 root Verify했다. 원래66사례 debug/release14/0에서
+26개는 alloc/dealloc 각각1회·544B 감소했고40개는 동일, 증가한 필드는 없다.
+관측된26개 literal만 좁힌 최종 양 profile도14/0·각66상한 PASS다.
+별도20개 capacity 관측은 이전 capacity 미측정이라 retained-memory 감소를 증명하지 않는다.
+새 native e9167621…는 과거 GUI 산출물과 다르고 browser4개는 미갱신이다.
+정식 독립 code→qa-cli 및 owning verification/close는 아직 남았다.
+13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
+[실측·capacity·산출물 한계](../changes/2026-10-16-runtime-first-judge-batch-reuse.md)를 따른다.
+
 현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
 `python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기와
 원래 상위 요구사항 집계를 함께 보여 준다. `--in-progress`는 실제 진행 단위 W/V/N을
@@ -18,7 +30,7 @@ app local_runtime36/0와 core WASM typing0을 실제 root Verify했다.
 현재 GUI/browser 성능 PASS로 확대하지 않는다. 이후 정식 DEEP code→독립 qa-cli도
 실제 PASS했고 core837/0·release4/0·local_runtime36/0·양 meter14/0/66상한·WASM0을 확인했다.
 한 번 owning verify는 자동 완료 기록 부재로 PENDING이며 태스크 종료만 미완료다.
-후속 후보는 Runtime 첫 owned 판정 묶음 재사용이며 아직 감소 수치를 주장하지 않는다.
+당시 후속 후보였던 Runtime 첫 owned 판정 묶음 재사용의 현재 결과는 위 절을 따른다.
 13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
 [실측·행동 회귀·산출물 한계](../changes/2026-10-16-judge-empty-route-allocation.md)를 따른다.
 
@@ -40,7 +52,7 @@ W를 유지하고 전체136/489·오디오12/27은 변하지 않는다.
 직전 배속 전환 child는 실제 장치 검증 BLOCKED_ENV로 보존했고 전체 Goal은 활성이다.
 
 아래 배속 전환 checkpoint와 QA 기록은 각 당시 revision의 과거 증거다.
-그 절의 source·artifact 동일성은 현재 Judge 소스와 native675d5cbd… 검증으로
+그 절의 source·artifact 동일성은 현재 입력 최적화 source/artifact 검증으로
 이월하지 않는다. 현재 입력 최적화의 실행 범위와 산출물은 위 절이 우선한다.
 
 과거 checkpoint(2026-10-16): AC042 오류 폭주 수정0cba6616의 관련152개와

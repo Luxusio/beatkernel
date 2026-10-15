@@ -1,9 +1,12 @@
 //! Public Runtime admission evidence and legacy owner/output parity.
 use beatkernel::{
-    audio::{command_queue, AudioCommand, CommandConsumer, QueuePushError, SampleId, VoiceId},
+    audio::{
+        command_queue, AudioCommand, CommandConsumer, QueuePopError, QueuePushError, SampleId,
+        VoiceId,
+    },
     chart::*,
     input::*,
-    interaction::PressInstantEvaluator,
+    interaction::{InteractionState, PressInstantEvaluator},
     judge::*,
     runtime::{
         input_sound::{InputSoundMarker, InputSoundTimeline},
@@ -293,6 +296,22 @@ fn fanout_reports_only_successful_prefix_and_original_normalized_refusal() {
             .unwrap();
         assert_report_eq(&result.report, &old);
         let accepted = usize::from(controls[0] == 1);
+        let expected_events = if accepted == 1 {
+            vec![JudgeEvent {
+                object: ObjectId(1),
+                stage: JudgeStage::Instant,
+                at: ts(100),
+                input: Some(*normalized.meta()),
+                outcome: JudgeOutcome::Hit {
+                    grade: JudgeGrade(7),
+                    delta: Duration::ZERO,
+                },
+            }]
+        } else {
+            vec![]
+        };
+        assert_eq!(result.report.judge_events, expected_events);
+        assert_eq!(old.judge_events, expected_events);
         assert_eq!(result.dispositions.len(), accepted);
         assert_eq!(
             result.report.bound_inputs,
@@ -749,5 +768,404 @@ fn offset_audio_queue_failure_and_press_freshness_preserve_legacy_results() {
             observed.telemetry().counters(),
             legacy.telemetry().counters()
         );
+    }
+}
+
+fn mixed_fanout_runtime(
+    controls: &[u32],
+    resolver: Box<dyn CandidateResolver>,
+) -> (Runtime, CommandConsumer) {
+    let (mut owner, queue) = runtime(
+        engine(&[(1, 100, 1), (2, 100, 2)], 0, resolver, vec![]),
+        controls,
+        8,
+        vec![
+            SoundBinding {
+                object: ObjectId(1),
+                stage: JudgeStage::Instant,
+                sample: SampleId(11),
+                voice: VoiceId(21),
+                gain: -0.5,
+            },
+            SoundBinding {
+                object: ObjectId(2),
+                stage: JudgeStage::Instant,
+                sample: SampleId(12),
+                voice: VoiceId(22),
+                gain: 0.75,
+            },
+        ],
+    );
+    // Give hit controls distinct fallbacks too: only the borrowed hit results,
+    // not marker availability, may suppress those two press commands.
+    owner
+        .configure_input_sounds(
+            InputSoundTimeline::new(
+                (1..=5)
+                    .map(|control| InputSoundMarker {
+                        control: GameControlId(control),
+                        at: ts(100),
+                        sample: SampleId(100 + u64::from(control)),
+                        voice: VoiceId(200 + u64::from(control)),
+                        gain: 0.25,
+                    })
+                    .collect(),
+                5,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    (owner, queue)
+}
+
+#[test]
+fn mixed_empty_and_hit_batches_preserve_literal_reports_and_sound_fifo() {
+    for api in ["legacy", "observed"] {
+        let (mut owner, mut queue) =
+            mixed_fanout_runtime(&[3, 2, 4, 1, 5], Box::new(ClosestCandidate));
+        let mut original = button(100, 1, ButtonState::Down);
+        original.meta_mut().clock_domain = ClockDomainId(9);
+        original.meta_mut().timestamp = ts(100);
+        let mut normalized = original.clone();
+        normalized.meta_mut().clock_domain = ClockDomainId(1);
+        normalized.meta_mut().timestamp = ts(1100);
+        normalized.meta_mut().original_clock_point = Some(point(9, 100));
+
+        let report = if api == "observed" {
+            let result = owner
+                .process_input_report(original, &mapper(), point(2, -99))
+                .unwrap();
+            assert!(result.refused.is_none());
+            assert_eq!(result.dispositions.len(), 5);
+            for (facts, selected) in result.dispositions.iter().zip([
+                None,
+                Some(ObjectId(2)),
+                None,
+                Some(ObjectId(1)),
+                None,
+            ]) {
+                let hits = usize::from(selected.is_some());
+                assert_eq!(facts.freshness(), InputFreshness::FreshPress);
+                assert_eq!(facts.candidate_count(), hits);
+                assert_eq!(facts.selected(), selected);
+                assert_eq!(facts.dispatched_count(), hits);
+                assert_eq!(facts.input_result_count(), hits);
+                assert_eq!(facts.passive_result_count(), 0);
+                assert_eq!(facts.input_hazard_count(), 0);
+                assert_eq!(facts.unmatched_fresh_press(), selected.is_none());
+            }
+            result.report
+        } else {
+            owner
+                .process_input(original, &mapper(), point(2, -99))
+                .unwrap()
+        };
+        // Both APIs independently match this complete fixture-derived value.
+        // In particular, the later empty batches cannot replace earlier hits.
+        let expected = RuntimeReport {
+            input: Some(normalized.clone()),
+            bound_inputs: vec![
+                bound(normalized.clone(), 3),
+                bound(normalized.clone(), 2),
+                bound(normalized.clone(), 4),
+                bound(normalized.clone(), 1),
+                bound(normalized.clone(), 5),
+            ],
+            song_time: ts(100),
+            song_end_reached: false,
+            audio_at: point(2, -99),
+            input_mapping_quality: ClockMappingQuality::Exact,
+            audio_mapping_quality: ClockMappingQuality::Exact,
+            judge_events: vec![
+                JudgeEvent {
+                    object: ObjectId(2),
+                    stage: JudgeStage::Instant,
+                    at: ts(100),
+                    input: Some(*normalized.meta()),
+                    outcome: JudgeOutcome::Hit {
+                        grade: JudgeGrade(7),
+                        delta: Duration::ZERO,
+                    },
+                },
+                JudgeEvent {
+                    object: ObjectId(1),
+                    stage: JudgeStage::Instant,
+                    at: ts(100),
+                    input: Some(*normalized.meta()),
+                    outcome: JudgeOutcome::Hit {
+                        grade: JudgeGrade(7),
+                        delta: Duration::ZERO,
+                    },
+                },
+            ],
+            hazard_events: vec![],
+            judge_error: None,
+            // Runtime publishes all judged sounds first, then accepted press
+            // sounds in bound-input order, rather than interleaving the groups.
+            audio_commands: vec![
+                AudioCommand::Play {
+                    sample: SampleId(12),
+                    voice: VoiceId(22),
+                    at: ts(-99),
+                    gain: 0.75,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(11),
+                    voice: VoiceId(21),
+                    at: ts(-99),
+                    gain: -0.5,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(103),
+                    voice: VoiceId(203),
+                    at: ts(-99),
+                    gain: 0.25,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(104),
+                    voice: VoiceId(204),
+                    at: ts(-99),
+                    gain: 0.25,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(105),
+                    voice: VoiceId(205),
+                    at: ts(-99),
+                    gain: 0.25,
+                },
+            ],
+            audio_failures: vec![],
+        };
+        assert_report_eq(&report, &expected);
+        for command in &expected.audio_commands {
+            assert_eq!(queue.try_pop(), Ok(*command), "{api}");
+        }
+        assert_eq!(queue.try_pop(), Err(QueuePopError::Empty), "{api}");
+        for id in [1, 2] {
+            assert_eq!(
+                owner.judge().state(ObjectId(id)),
+                Some(InteractionState::Completed),
+                "{api} object {id}"
+            );
+        }
+        for control in [3, 2, 4, 1, 5] {
+            assert!(!owner
+                .judge()
+                .is_fresh_press(&bound(normalized.clone(), control)));
+        }
+    }
+}
+
+#[test]
+fn mixed_partial_error_preserves_complete_literal_prefix_and_stops_fanout() {
+    for api in ["legacy", "observed"] {
+        let (mut owner, mut queue) = mixed_fanout_runtime(&[3, 1, 4, 2, 5], Box::new(RejectSecond));
+        let mut original = button(100, 1, ButtonState::Down);
+        original.meta_mut().clock_domain = ClockDomainId(9);
+        original.meta_mut().timestamp = ts(100);
+        let mut normalized = original.clone();
+        normalized.meta_mut().clock_domain = ClockDomainId(1);
+        normalized.meta_mut().timestamp = ts(1100);
+        normalized.meta_mut().original_clock_point = Some(point(9, 100));
+
+        let report = if api == "observed" {
+            let result = owner
+                .process_input_report(original, &mapper(), point(2, -99))
+                .unwrap();
+            let refused = result.refused.unwrap();
+            assert_eq!(refused.game_control, GameControlId(2));
+            assert_eq!(refused.input, *normalized.meta());
+            assert_eq!(
+                refused.error,
+                JudgeError::InvalidCandidate {
+                    object: ObjectId(999),
+                }
+            );
+            assert_eq!(result.dispositions.len(), 3);
+            for (facts, selected) in result
+                .dispositions
+                .iter()
+                .zip([None, Some(ObjectId(1)), None])
+            {
+                let hits = usize::from(selected.is_some());
+                assert_eq!(facts.freshness(), InputFreshness::FreshPress);
+                assert_eq!(facts.candidate_count(), hits);
+                assert_eq!(facts.selected(), selected);
+                assert_eq!(facts.dispatched_count(), hits);
+                assert_eq!(facts.input_result_count(), hits);
+                assert_eq!(facts.passive_result_count(), 0);
+                assert_eq!(facts.input_hazard_count(), 0);
+                assert_eq!(facts.unmatched_fresh_press(), selected.is_none());
+            }
+            result.report
+        } else {
+            owner
+                .process_input(original, &mapper(), point(2, -99))
+                .unwrap()
+        };
+        let expected = RuntimeReport {
+            input: Some(normalized.clone()),
+            bound_inputs: vec![
+                bound(normalized.clone(), 3),
+                bound(normalized.clone(), 1),
+                bound(normalized.clone(), 4),
+            ],
+            song_time: ts(100),
+            song_end_reached: false,
+            audio_at: point(2, -99),
+            input_mapping_quality: ClockMappingQuality::Exact,
+            audio_mapping_quality: ClockMappingQuality::Exact,
+            judge_events: vec![JudgeEvent {
+                object: ObjectId(1),
+                stage: JudgeStage::Instant,
+                at: ts(100),
+                input: Some(*normalized.meta()),
+                outcome: JudgeOutcome::Hit {
+                    grade: JudgeGrade(7),
+                    delta: Duration::ZERO,
+                },
+            }],
+            hazard_events: vec![],
+            judge_error: Some(JudgeError::InvalidCandidate {
+                object: ObjectId(999),
+            }),
+            audio_commands: vec![
+                AudioCommand::Play {
+                    sample: SampleId(11),
+                    voice: VoiceId(21),
+                    at: ts(-99),
+                    gain: -0.5,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(103),
+                    voice: VoiceId(203),
+                    at: ts(-99),
+                    gain: 0.25,
+                },
+                AudioCommand::Play {
+                    sample: SampleId(104),
+                    voice: VoiceId(204),
+                    at: ts(-99),
+                    gain: 0.25,
+                },
+            ],
+            audio_failures: vec![],
+        };
+        assert_report_eq(&report, &expected);
+        for command in &expected.audio_commands {
+            assert_eq!(queue.try_pop(), Ok(*command), "{api}");
+        }
+        assert_eq!(queue.try_pop(), Err(QueuePopError::Empty), "{api}");
+        assert_eq!(
+            owner.judge().state(ObjectId(1)),
+            Some(InteractionState::Completed),
+            "{api} accepted object"
+        );
+        assert_eq!(
+            owner.judge().state(ObjectId(2)),
+            Some(InteractionState::Pending),
+            "{api} refused object"
+        );
+        for control in [3, 1, 4] {
+            assert!(!owner
+                .judge()
+                .is_fresh_press(&bound(normalized.clone(), control)));
+        }
+        for control in [2, 5] {
+            assert!(owner
+                .judge()
+                .is_fresh_press(&bound(normalized.clone(), control)));
+        }
+    }
+}
+
+#[test]
+fn dense_passive_first_batches_preserve_results_and_report_observed_capacity() {
+    for api in ["legacy", "observed"] {
+        for count in [1_usize, 4, 5, 17, 257] {
+            let notes: Vec<_> = (1..=count as u64).map(|id| (id, 0, 1)).collect();
+            let (mut owner, mut queue) = runtime(
+                engine(&notes, 0, Box::new(ClosestCandidate), vec![]),
+                &[3],
+                4,
+                vec![],
+            );
+            let input = button(100, 1, ButtonState::Down);
+            let report = if api == "observed" {
+                let result = owner
+                    .process_input_report(input.clone(), &NoMapping, point(2, -99))
+                    .unwrap();
+                assert!(result.refused.is_none());
+                assert_eq!(result.dispositions.len(), 1);
+                let facts = result.dispositions[0];
+                assert_eq!(facts.freshness(), InputFreshness::FreshPress);
+                assert_eq!(facts.candidate_count(), 0);
+                assert_eq!(facts.selected(), None);
+                assert_eq!(facts.dispatched_count(), 0);
+                assert_eq!(facts.input_result_count(), 0);
+                assert_eq!(facts.passive_result_count(), count);
+                assert_eq!(facts.input_hazard_count(), 0);
+                assert!(facts.unmatched_fresh_press());
+                result.report
+            } else {
+                owner
+                    .process_input(input.clone(), &NoMapping, point(2, -99))
+                    .unwrap()
+            };
+            // The zero-width window for every time0 instant note has expired
+            // by time100, in chart/object order, without input provenance.
+            let expected = RuntimeReport {
+                input: Some(input.clone()),
+                bound_inputs: vec![bound(input.clone(), 3)],
+                song_time: ts(100),
+                song_end_reached: false,
+                audio_at: point(2, -99),
+                input_mapping_quality: ClockMappingQuality::Exact,
+                audio_mapping_quality: ClockMappingQuality::Exact,
+                judge_events: (1..=count as u64)
+                    .map(|id| JudgeEvent {
+                        object: ObjectId(id),
+                        stage: JudgeStage::Instant,
+                        at: ts(100),
+                        input: None,
+                        outcome: JudgeOutcome::Miss {
+                            reason: MissReason::HeadTimeout,
+                        },
+                    })
+                    .collect(),
+                hazard_events: vec![],
+                judge_error: None,
+                audio_commands: vec![],
+                audio_failures: vec![],
+            };
+            assert_report_eq(&report, &expected);
+            assert_eq!(queue.try_pop(), Err(QueuePopError::Empty), "{api} {count}");
+            assert!(!owner.judge().is_fresh_press(&bound(input, 3)));
+            for id in 1..=count as u64 {
+                assert_eq!(
+                    owner.judge().state(ObjectId(id)),
+                    Some(InteractionState::Completed),
+                    "{api} count {count} object {id}"
+                );
+            }
+
+            // Observations of returned logical element storage only. There is
+            // no old capacity measurement or public numeric capacity promise,
+            // and these bytes are neither allocator requests nor live/RSS data.
+            let len = report.judge_events.len();
+            let capacity = report.judge_events.capacity();
+            let judge_event_bytes = std::mem::size_of::<JudgeEvent>();
+            let profile = if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            };
+            println!(
+                "RUNTIME_BATCH_CAPACITY api={api} profile={profile} scenario=dense-passive count={count} len={len} capacity={capacity} judge_event_bytes={judge_event_bytes} len_bytes={} capacity_bytes={} spare_bytes={}",
+                len * judge_event_bytes,
+                capacity * judge_event_bytes,
+                (capacity - len) * judge_event_bytes,
+            );
+        }
     }
 }

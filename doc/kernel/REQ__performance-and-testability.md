@@ -212,6 +212,22 @@ Bound queues and work, and make overflow, refusal and cancellation explicit.
 
 ## Actual input allocation observation
 
+Runtime shall reuse the first owned Judge result batch when its report is empty
+and append later batches without losing earlier results. Preserve original
+judgment order, normalized provenance, accepted/refused prefixes, hazards and
+keysound selection before ownership transfer. Both public input modes require
+independent literal full-report and queue oracles for mixed empty/hit fanout
+and partial failure; agreement between the modes alone is insufficient.
+
+Measure allocator requests separately from returned Vec element storage.
+For dense batches of 1/4/5/17/257 judgments, observe both modes in debug/release
+with length, capacity, element size, length/capacity/spare bytes and complete
+unique scenario coverage. These are logical element-storage observations,
+not cumulative allocation requests, live memory or RSS. Capacity is not a
+public invariant. Without an actual prior capacity measurement, establish no
+before/after retained-memory reduction; measure genuine same-workload request
+changes before narrowing static regression limits.
+
 For an interaction with no additional controls, Judge refresh shall borrow the local primary control without temporary route heap storage. Preserve primary-first unique routing and the existing nonempty Vec algorithm, callback behavior and inclusive/strict-successor deadline semantics. Validate the actual same-workload before/after request deltas in debug and release before narrowing static limits; a smaller request count is not a latency or whole-player ranking claim. Constructor canonicalization and test-owned state/snapshot observations remain outside focused callback logs, which are separate from allocation workloads.
 
 Measure the existing public JudgeEngine input, Runtime legacy/observed input,
