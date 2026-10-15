@@ -409,6 +409,20 @@ qa-browser/CLI/desktop 또는 최종 owning gate를 대신하지 않는다.
 WBS05.13.06은 W·전체136/489·오디오 커널12/27을 유지한다. 별도 browser-audio
 fixed-engine acceptance의 미완료 범위는 이 runtime 실행으로 완료 처리하지 않는다.
 
+
+## 독립 리뷰 수정 진행14117
+
+268bb73d 전체121개 변경 파일의 독립 DEEP code review는 FIX_NOW5로 FAIL했다.
+Window editor focus에서 기존 held-key release가 빠지는 문제, Worker 교체·일반
+반복 플레이의 capture key 충돌, 일반 기록의 보관 예산 누락으로 종료가 멈추는 문제,
+실제 browser/native Records에 가변 배속 역사 조회가 연결되지 않은 문제, native
+RateView가 focus 없음·Apply 상태를 분자 focus로 표시하는 문제가 확인됐다.
+별도 security review의 FIX_NOW2는 위 capture identity/예산 문제와 중복된다.
+AC027–031은 이 다섯 문제의 수정과 실제 경로 회귀 테스트다. 열세 번째 browser
+결과는 리뷰 전 버전의 개발 증거로 보존하며 새 source의 독립 QA PASS로 사용하지 않는다.
+수정 뒤 새 정식 code/security review PASS 다음에 browser/CLI/desktop QA가 필요하다.
+WBS05.13.06 W·전체136/489·오디오12/27과 전체 player Goal을 유지한다.
+
 ## Known ceiling
 
 Known ceiling: 실제 Chromium/SwiftShader/AudioWorklet 실행은 물리 장치·음향 지연·production 성능의 증거가 아니다.
@@ -429,12 +443,48 @@ Known ceiling: 원본 진단 observer의 할당·실행 비용을 production 경
 stdin의 rustfmt --check는 Diff를 출력하면서 exit0일 수 있어, 기준 비교는 실제 Diff
 출력과 exit를 함께 확인했다. 실제 파일 검사로 이번 수정의 통과를 확인했다.
 
-서식 정리 뒤 source에서 UI/audio release WASM을 순서대로 새로 빌드하고 각 build
+리뷰 수정 전 서식 정리 시점에 source에서 UI/audio release WASM을 순서대로 새로 빌드하고 각 build
 직후 matching bindgen을 생성했다(실제30902 exit0). 두 WASM과 두 generated JS의
 SHA256이 열세 번째 브라우저 실행의 네 파일과 전부 byte-identical했다. 따라서
-열세 번째의 현재 Worker·실제 runtime 증거가 유지되며 동일 동작의 개발 browser를
+그 시점의 열세 번째 Worker·실제 runtime 증거가 유지되어 동일 동작의 개발 browser를
 중복 실행하지 않았다. 최종 build/sha 원본은
 `browser-format-release-wasm-14115.log`,
 `browser-audio-format-release-wasm-14115.log`,
 `browser-format-bindgen-sha256-14115.log`다. 이는 정식 독립 리뷰와 그 뒤 필수 QA를
 생략한 근거가 아니며 WBS 상태·물리 acceptance도 그대로 남는다.
+
+### 리뷰 수정의 현재 개발 검증14117
+
+다섯 수정은 c32d1287·caaaba03·f9243be5에 커밋했다.
+Window capture 키는 기존 play session ID를 포함하고, 일반 기록도 bounded custody에
+들어오면 모든 File의 명시 Save가 끝날 때까지 같은 보관 정책을 유지한다. 실제 roster
+전체와 기존64MiB 최종 export 공간을 시작 전에 확보해 용량 부족을 admission에서
+거절한다. native Blob 크기 검사·불변 File·동시 append 금지를 확인했으므로, File
+크기가 뒤늦게 바뀐다는 가정의 복구 상태나 persistence 예외는 추가하지 않았다.
+editor에서는 새 gameplay down/up을 무시하면서 기존 held key의 실제 up은 원래
+timestamp·sequence로 전달한다. RateView는 실제 optional focus만 그린다.
+
+Records의 원래 조건 조회는 별도 history/archive 경로를 사용하고, native Own/Other는
+metadata Worker가 확인한 고정 조건 호환성 없이는 설정을 바꾸지 않는다. WATCH의
+기존 validate_args는 실제로 순수 인자 검사였으므로 원래 호출을 유지했다. 기록
+읽기·복원은 bms-profile, 실제 게임 준비는 기존 bms-game에 남는다.
+
+현재 root 개발 검사:
+- Node 전체 관련 두 파일368/0·skip0: node-key-release-first-14117.log.
+- 공개 기록 identity10/0: rust-record-history-first-14117.log. 이 실행 뒤 native
+  fixture의 private constructor 컴파일 오류를 수정했고, 생산 API의 공개 범위는
+  바꾸지 않았다.
+- 수정한 native fixture와 주변 회귀34 library+23 Desktop=57/0:
+  rust-record-history-fixture-second-14117.log. 공개10개와 합쳐 기록 조회67개다.
+- focus 별도9+15=24/0: rust-optional-rate-focus-first-14117.log. 위 검사와 일부
+  겹치므로 전체67개에 단순 가산하지 않는다.
+- 두 실제 offline release WASM과 각 build 직후 matching bindgen31647 exit0.
+  browser-review-fixes-bindgen-sha256-14117.log의 UI SHA256은
+  101c39b1d1300dc9350fa4086242b08fe8867f6fa666c001795058d24b2b1781,
+  audio는 c83755b0f5145dfc4b671f0e304e43fceaf2a3af3d34334b65e50609be6d4c01이다.
+
+위 로그는 모두 target/wf/runtime-rate-14043/ 아래다. Node File 용량 경계는 기존
+VM의 고정 metadata endpoint를 사용하며 실제 대용량 저장·장치 성능 증거가 아니다.
+새 browser runner는 기존12 required와 추가 fixed-opponent 검사를 유지하면서
+실제 editor release와 game-menu Records preview를 추가한다. 이 새 실행과 정식
+독립 재리뷰·필수 QA는 아직 완료되지 않았다. WBS136/489·오디오12/27은 유지한다.

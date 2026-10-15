@@ -7,13 +7,24 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-현재 runtime05.13.06은 구현·연동 중(W)이며 실제 브라우저 필수12개 흐름이
+현재 runtime05.13.06은 구현·연동 중(W)이다. 268bb73d의 독립 DEEP code review
+FIX_NOW5와 별도 security의 중복2건을 수정했다. c32d1287은 native optional focus,
+caaaba03은 Window session 키·기록 보관 예약/Save·편집 중 key-up,
+f9243be5는 browser/native Records의 가변 조건 역사 조회와 별도 고정 상대 검사를
+반영한다. 현재 관련 Node368/0·Rust 기록 조회10+34+23=67/0이 통과했고,
+focus 전용9+15=24/0도 통과했다. 서로 겹치는 검사는 합산하지 않는다.
+실제 release UI/audio WASM과 즉시 matching bindgen 빌드도 통과했다.
+새 게임 메뉴 Records·editor release 흐름을 포함한 실제 browser 재검증과
+새 독립 code/security review, browser/CLI/desktop QA는 남아 있다.
+전체136/489·오디오 커널12/27을 유지하며 개발 증거를 독립 QA PASS로 표시하지 않는다.
+
+리뷰 전 개발 통합 checkpoint: 실제 브라우저 필수12개 흐름이
 모두 통과했다. 열세 번째 실행80375는 추가 저장 검사까지13개 check PASS,
 unmet0·console/network0·owned browser/Xvfb exit0이다. ACK 뒤 새 poll을 기다리는
 Worker 수정과 정확한 retirement 거절 처리의 Node324/0·실제 Rust Worklet24/0을
 확인했다. 브라우저는 현재 JS와 일치하는 기존 fresh UI/audio WASM을 사용했다.
-이 증거는 개발 검증이며 필수 독립 code/security review와 browser/CLI/desktop QA가
-남아 전체136/489·오디오 커널12/27은 유지한다.
+이 증거는 해당 버전의 개발 검증이다. 위 리뷰 수정 뒤 새로운 독립 code/security
+review와 browser/CLI/desktop QA가 필요하며 현재 source 전체의 QA PASS로 해석하지 않는다.
 [현재 변경/증거](../changes/2026-10-15-runtime-playback-rate.md)를 따른다.
 
 아래 날짜별 문단은 당시의 실행 기록이다. runtime의 현재 상태는 위 checkpoint가 우선한다.

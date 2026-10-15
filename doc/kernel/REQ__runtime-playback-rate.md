@@ -215,8 +215,12 @@ retired cohort는 하나만 보유한다. 기존 cohort당64MiB와 실제 roster
 download는 하지 않는다. 명시 Save의 실제 저장 성공 ACK 뒤에만 해당 임시 보관을
 해제할 수 있다. Capture-off는 File 보관 공간을 사용하지 않는다.
 
-보관 키는 실제 Program·fresh boundary serial·player다. 종료 시 current capture는
-별도 null 키로 구분한다. Window는 전체 roster·File 크기·예산을 검사하고 전원을
+보관 키는 Window에서 증가하는 play session ID와 실제 Program·fresh boundary
+serial·player를 함께 사용한다. 종료 시 current capture는 별도 null 키로 구분한다.
+일반 solo/local 기록도 session ID로 구분해 반복 플레이나 Worker 교체 후 같은
+player·Program 번호를 재사용해도 기존 File의 선택·저장이 다른 기록을 가리키지 않는다.
+같은 session의 같은 tuple은 계속 중복으로 거절한다.
+Window는 전체 roster·File 크기·예산을 검사하고 전원을
 보관한 뒤에만 retired acceptance ACK를 보낸다. Worker는 그 ACK까지 File을 보유하고
 이후 Worklet ACK→Rust ACK를 진행한다. 미완료 prefix의 score는 null이고 현재
 attempt의 score나 completed archive를 붙이지 않는다. 종료·실패에서도 보관을 마친
@@ -224,6 +228,20 @@ attempt의 score나 completed archive를 붙이지 않는다. 종료·실패에�
 current 종료 응답의 File·metadata 검증에 실패하면 원본 immutable File 응답을
 보존하고 보관 승인과 Worker 해제를 보류한다. 실패한 응답을 빈 기록 목록의
 성공으로 바꾸거나, 기존 retired 기록과 current 기록의 보관 키를 합치지 않는다.
+
+기존 retained File이 있어 일반 solo/local 기록도 같은 목록에 추가하는 경우에는
+시작 전에 실제 roster 수와 기존 cohort당64MiB 한도에 맞는 최종 보관 공간을
+확보한다. 공간 부족이면 재생 admission 전에 거절하며 기존 File의 선택·Save·
+download는 가능해야 한다. 실제 roster 전체와 native getter로 검증한 불변 File의
+최대 크기를 예약해 최종 보관 시 한도 초과로 종료가 실패하지 않도록 한다.
+부족하면 시작 전에 거절하고 기존 File과 복구 가능한 UI를 유지한다.
+Capture-off와 replay는 이 공간을 예약하지 않는다.
+일반 기록을 포함해 bounded 보관에 들어온 File은 선택한 기록의 실제 Save 성공
+뒤에만 해제한다. 마지막 Program 기록을 저장해도 나머지 일반 기록을 다음 플레이가
+덮어쓰면 안 된다. 이 목록이 모두 해제되기 전까지 같은 보관 정책을 유지한다.
+일반 세션 중에는 다른 기록을 추가하거나 보관 File의 불변 크기를 바꾸지 않는다.
+따라서 예약한 roster와 최종64MiB 한도를 만족하는 원본 File은 그대로 보관할 수
+있어야 한다. 아직 Worker가 소유한 retained capture의 기존 승인·해제 조건은 유지한다.
 
 실제 non-noop 전환만 원본 곡의 정확한 phase와 rate를 포함한 canonical 이력에
 추가한다. 원래 배속으로 돌아와도 가변 배속 기록이다. 원본 replay operation과
@@ -255,6 +273,10 @@ Cold 준비 token의 복제본은 하나의 예약을 공유하고 첫 commit �
 profile·구간·입력 방식·고정 배속 일치를 계속 검사한다. 유효한 가변 조건의 역사
 조회는 명시적인 `from_file_for_history`를 사용하며, 조회 성공이 고정 상대의
 호환성 승인이 되지 않는다.
+Browser와 native Records의 실제 preview·DETAILS·WATCH 흐름에 이 역사 조회를
+연결한다. Archive의 원래 player 연결과 오류를 유지하고, native Own/Other 추가는
+현재 설정에 대한 별도 고정 조건 검사를 통과한 경우에만 허용한다. 파일 읽기와
+복원은 기존 metadata Worker에서 수행한다.
 
 ## UI와 검증 기준
 
@@ -269,6 +291,11 @@ Native Play의 배속 편집 focus는 처음에 없다. Tab은 분자·분모·A
 draft를 제출하며, 편집기 클릭은 해당 입력을 선택한다. 커서·삭제·IME·clipboard는
 편집기에 focus가 있을 때만 전달한다. Escape/F5/F9의 기존 Play 제어는 유지한다.
 pending 중에도 draft와 실제 적용값을 보존하며 Apply를 중복 실행하지 않는다.
+실제 optional focus를 그대로 렌더러에 전달한다. focus가 없거나 Apply에 있으면
+분자·분모 어디에도 편집 caret이나 편집 focus 배경을 표시하지 않는다.
+Browser runtime 편집기에서 누른 새 gameplay 키는 편집 입력으로 처리하되,
+편집기로 focus를 옮기기 전에 누르고 있던 gameplay 키의 실제 key-up은 원래
+timestamp·sequence와 함께 전달해 held 상태를 해제한다.
 
 Browser의 admission 성공은 pending 응답으로 Window의 기존 RPC 슬롯만 해제한다.
 실제 business pending은 유지하고 적용 결과는 원래 요청 ID로 따로 전달한다.
