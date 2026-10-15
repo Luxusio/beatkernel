@@ -202,6 +202,9 @@ impl NativePrepareOps for FaultOps {
 }
 
 fn owner() -> (CommandProducer, NativeOutputState) {
+    owner_with_history(true)
+}
+fn owner_with_history(with_history: bool) -> (CommandProducer, NativeOutputState) {
     let format = AudioFormat::new(1000, 2).unwrap();
     let limits = PcmLimits::new(128, 256, 1).unwrap();
     let mut bank = SampleBank::new(format, limits).unwrap();
@@ -236,7 +239,9 @@ fn owner() -> (CommandProducer, NativeOutputState) {
         consumer,
     )
     .unwrap();
-    mixer.enable_source_playback_history(16).unwrap();
+    if with_history {
+        mixer.enable_source_playback_history(16).unwrap();
+    }
     let mut state = NativeOutputState::from_mixer(mixer);
     let layout = AsioPlanarLayout::new(
         format,
@@ -1002,4 +1007,207 @@ fn authorized_cleanup_failure_retains_original_arc_ahead_of_native_and_recovery_
             )))
         ));
     }
+}
+
+#[test]
+fn missing_history_with_retained_source_refuses_before_native_buffers_and_survives_retry() {
+    for requested_headroom in [Some(4), None] {
+        let (mut producer, mut original) = owner_with_history(false);
+        let report = original.render_pending(8).unwrap();
+        original.admit(2).unwrap();
+        let pcm = original.pending_samples().to_vec();
+        let pcm_storage = original.pending_samples().as_ptr();
+        let basis = original.output_frame_basis();
+        let layout = original.layout().copied();
+        let matrix = original.channel_matrix().cloned();
+        let maximum = original.max_frames();
+        let configuration = original.mixer().configuration();
+        let counters = original.mixer().counters();
+        let physical = original.mixer().frame_cursor();
+        let playback = original.mixer().playback_frame_cursor();
+        assert!(original.mixer().source_playback_history().is_none());
+        // A real command queued after the retained render must survive both
+        // failed cold attempts; metadata probes do not own command admission.
+        producer
+            .try_push(AudioCommand::Stop {
+                voice: VoiceId(1),
+                at: Timestamp::from_nanos(8_123_000),
+            })
+            .unwrap();
+        for _ in 0..2 {
+            let mut ops = FaultOps::new();
+            let failure = AsioStream::prepare_state_with(
+                None,
+                original,
+                &[0, 1],
+                AsioBufferRequest::Frames(2),
+                None,
+                None,
+                requested_headroom,
+                &mut ops,
+            )
+            .err()
+            .expect("history cannot be created after the unsent block's Source pull");
+            let (error, recovered, pending, cleanup) = failure.into_parts();
+            assert!(matches!(
+                error,
+                AsioStreamError::Render(AsioRenderError::Core(
+                    beatkernel::audio::AudioError::InvalidFormat
+                ))
+            ));
+            assert!(pending.is_none() && cleanup.is_none());
+            assert!(!ops.events.contains(&"prepare"));
+            assert!(!ops.events.contains(&"start"));
+            assert!(ops.start_b.is_none());
+            assert_eq!(ops.close_calls, 1);
+            original = recovered.expect("successful native close returns the exact owner");
+            assert!(original.mixer().source_playback_history().is_none());
+            assert_eq!(original.pending_report(), Some(report));
+            assert_eq!(original.admitted_frames(), 2);
+            assert_eq!(original.pending_frames(), 6);
+            assert_eq!(original.pending_samples(), pcm);
+            assert_eq!(original.pending_samples().as_ptr(), pcm_storage);
+            assert_eq!(original.output_frame_basis(), basis);
+            assert_eq!(original.layout().copied(), layout);
+            assert_eq!(original.channel_matrix(), matrix.as_ref());
+            assert_eq!(original.max_frames(), maximum);
+            assert_eq!(original.mixer().configuration(), configuration);
+            assert_eq!(original.mixer().counters(), counters);
+            assert_eq!(original.mixer().frame_cursor(), physical);
+            assert_eq!(original.mixer().playback_frame_cursor(), playback);
+            assert!(!original.admission_is_uncertain());
+        }
+        original.admit(6).unwrap();
+        let after_retry = original.render_pending(2).unwrap();
+        assert_eq!(after_retry.start_frame, 8);
+        assert_eq!(
+            after_retry.counters.commands_consumed,
+            counters.commands_consumed + 1
+        );
+        assert_eq!(
+            after_retry.counters.commands_applied,
+            counters.commands_applied + 1
+        );
+        assert_eq!(after_retry.counters.unknown_stops, counters.unknown_stops);
+        assert!(original
+            .pending_samples()
+            .iter()
+            .all(|&sample| sample == 0.));
+    }
+}
+
+#[test]
+fn empty_owner_enables_missing_history_at_its_actual_frontier_then_starts() {
+    let (_, mut original) = owner_with_history(false);
+    original.render_pending(8).unwrap();
+    original.admit(8).unwrap();
+    assert_eq!(original.pending_frames(), 0);
+    assert!(original.mixer().source_playback_history().is_none());
+    let basis = original.output_frame_basis();
+    assert_eq!(basis.start_physical_frame(), 8);
+    let counters = original.mixer().counters();
+    let mut ops = FaultOps::new();
+    let mut stream = AsioStream::prepare_state_with(
+        None,
+        original,
+        &[0, 1],
+        AsioBufferRequest::Frames(2),
+        None,
+        None,
+        Some(4),
+        &mut ops,
+    )
+    .unwrap();
+    let history = state(&stream).mixer().source_playback_history().unwrap();
+    assert_eq!(history.initial_physical_frame(), 8);
+    assert_eq!(history.initial_playback_frame(), 8);
+    assert_eq!(history.pulled_end_frame(), 8);
+    assert_eq!(history.len(), 0);
+    assert_eq!(stream.frame_basis(), basis);
+    assert_eq!(state(&stream).mixer().counters(), counters);
+    assert!(ops.events.contains(&"prepare"));
+    assert!(!ops.events.contains(&"start"));
+    stream.start_with(&mut ops).unwrap();
+    let history = state(&stream).mixer().source_playback_history().unwrap();
+    assert_eq!(history.initial_physical_frame(), 8);
+    assert_eq!(history.initial_playback_frame(), 8);
+    assert_eq!(history.pulled_end_frame(), 10);
+    assert_eq!(
+        state(&stream).mixer().counters().rendered_frames,
+        counters.rendered_frames + 2
+    );
+    let view = stream
+        .source_playback_view_at(&query(9), 1000, 8, 8)
+        .expect("newly generated Source is covered by the actual enabled history");
+    assert_eq!(view.pulled_source_end, 10);
+    assert!(
+        view.snapshot.buffer_observation.is_none(),
+        "B priming is not a native callback"
+    );
+    assert_eq!(&*ops.planes[1], &[0, 8, 0, 0x10]);
+    stream.stop_with(&mut ops).unwrap();
+}
+
+#[test]
+fn existing_history_keeps_original_pending_source_covered_with_requested_headroom() {
+    let (_, mut original) = owner();
+    let report = original.render_pending(8).unwrap();
+    original.admit(2).unwrap();
+    let pcm = original.pending_samples().to_vec();
+    let counters = original.mixer().counters();
+    let history = original.mixer().source_playback_history().unwrap();
+    let original_header = (
+        history.source_rate(),
+        history.initial_physical_frame(),
+        history.initial_playback_frame(),
+        history.pulled_end_frame(),
+        history.retirement_revision(),
+    );
+    let original_spans: Vec<_> = (0..history.len())
+        .map(|index| history.span(index).unwrap())
+        .collect();
+    let mut ops = FaultOps::new();
+    let mut stream = AsioStream::prepare_state_with(
+        None,
+        original,
+        &[0, 1],
+        AsioBufferRequest::Frames(2),
+        None,
+        None,
+        Some(4),
+        &mut ops,
+    )
+    .unwrap();
+    let history = state(&stream).mixer().source_playback_history().unwrap();
+    assert_eq!(
+        (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+            history.pulled_end_frame(),
+            history.retirement_revision()
+        ),
+        original_header
+    );
+    assert_eq!(
+        (0..history.len())
+            .map(|index| history.span(index).unwrap())
+            .collect::<Vec<_>>(),
+        original_spans
+    );
+    assert_eq!(state(&stream).pending_report(), Some(report));
+    assert_eq!(state(&stream).pending_samples(), pcm);
+    assert_eq!(state(&stream).admitted_frames(), 2);
+    stream.start_with(&mut ops).unwrap();
+    assert_eq!(state(&stream).pending_report(), Some(report));
+    assert_eq!(state(&stream).admitted_frames(), 4);
+    assert_eq!(
+        state(&stream).mixer().counters(),
+        counters,
+        "retained prefix delivery must not render the original Source again"
+    );
+    assert!(stream
+        .source_playback_view_at(&query(3), 1000, 0, 0)
+        .is_some());
+    stream.stop_with(&mut ops).unwrap();
 }

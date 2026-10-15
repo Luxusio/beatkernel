@@ -1235,6 +1235,14 @@ impl AsioStream {
             owner
                 .validate_reconfigure_asio(&layout, matrix.as_ref(), frames as usize)
                 .map_err(AsioRenderError::Core)?;
+            // New history begins at the Mixer's generated frontier. It cannot
+            // describe an older retained suffix whose original Source history
+            // was never captured; refuse before changing the complete owner.
+            if owner.pending_frames() != 0 && owner.mixer().source_playback_history().is_none() {
+                return Err(
+                    AsioRenderError::Core(beatkernel::audio::AudioError::InvalidFormat).into(),
+                );
+            }
             if let Some(headroom) = history_headroom {
                 owner
                     .prepare_growing_native_source_history(frames, headroom)
