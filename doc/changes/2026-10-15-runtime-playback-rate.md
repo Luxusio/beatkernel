@@ -167,3 +167,19 @@ odd cut·preroll·지연 입력, 양방향 실제 ConvertedMixer의 분수·최�
 검사한다. 초기 converter fixture의 legacy scope0과 reverse prefill 부족을 실제
 생산 generation/선형 lookahead에 맞췄으며 모든 PCM·분수·cut 기대값을 유지했다.
 Converter generated facts와 실제 native/물리 presentation 증거는 구분한다.
+
+실제 browser 첫 실행9470은 FAIL이었다. 원본은
+`target/wf/runtime-rate-browser-first-14109/evidence.json`이며 fresh-artifacts만
+통과했다. cold BrowserGame.retained_capability_words가 올바르게 빈 값인데 JS가
+준비 단계에서16words를 요구해 시작을 중단했다. network/console 오류는 없었고
+owned browser/Xvfb 정리는 exit0이었다. 아직 audio body를 읽기 전 실패이므로
+기존 Chromium loader 이슈가 해결됐다는 증거는 아니다.
+
+JS만 수정해 준비 응답의 capability:null과 실제 Started 이후16word view를 구분한다.
+기존 render-done으로 현재 view를 전달하고 Ended에서 제어를 철회한다. 실제 commit한
+원본 event에서만 generation을 읽으며 Ended의 generation 증가를 fresh로 오인하지
+않는다. 새 Rust getter·WASM ABI·가짜 Started·추가 큐를 만들지 않는다. 해당 current
+소스는 구문 검사와 독립 작성 회귀41개를 모두 통과했다
+(js-cold-readiness-first-14110.log, 실패0·skip0). 기존33개 흐름도 포함하며 cold 거절,
+실제 Started 후 활성화, Ended의 current capture/점수/입력 보존 및 늦은 Rate 거절을
+검사했다. 실제 browser 재검증과 정식 독립 review/QA는 아직 남는다.

@@ -7,6 +7,13 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-15 실제 browser 첫 실행: fresh 두 WASM은 일치했으나 cold capability가
+정상적으로 빈 값인 시점에 JS가16words를 요구해 시작이 실패했다. network/console
+오류는 없었고 owned browser/Xvfb는 exit0으로 정리했다. 기존 Rust의 실제 Started
+이후 권한 조건은 유지하며 JS의 nullable capability·Ended/fresh 분리를 수정 중이다.
+이 JS 수정의 cold→Started→Ended·capture·늦은 거절 회귀41개가 모두 통과했다
+(js-cold-readiness-first-14110.log). 실제 browser 재검증과 독립 review/QA는 남는다.
+
 2026-10-15 최신 runtime 연동 검사: 공통 native Source/Target pump·정확한 Source cut과
 미투영 경계 barrier·6곳 native cold 조립은 앱 lib3356/0(ignored9)·관련 integration99/0을
 통과했다. Windows/macOS C-stub 타입 검사와 실제 두 release WASM·matching bindgen도

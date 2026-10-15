@@ -232,6 +232,18 @@ Browser의 admission 성공은 pending 응답으로 Window의 기존 RPC 슬롯�
 따라서 pause 중 배속 요청이 있어도 resume 요청을 보낼 수 있다. 실제 owner의
 commit 전에는 적용값·노트 상태·완료 결과를 낙관적으로 바꾸지 않는다.
 
+시작 전 실제 capability는 없으며 준비 응답의 capability는 null이다. 기존
+render-done의 retainedCapability는 실제 owner의16word view 또는 null을 전달한다.
+실제 Started 이후에만 제어를 활성화하고 Ended 이후에는 권한을 철회한다.
+이는 원래 설정이나 generation 메타데이터와 다르며, 시작 증거를 만들어 내지 않는다.
+Ended 뒤 도착한 pending Rate 거절의 실제 결과도 capability:null을 허용한다.
+
+fresh attempt는 실제 Requested·Looped·성공한 compound restart만 뜻한다.
+Started·Ended·Rate·Pause·거절은 generation 변화만으로 새 attempt가 되지 않는다.
+특히 Ended의 generation 증가 때문에 최종 current capture를 이전 cohort로 옮기거나
+노트·점수·held 상태를 초기화하지 않는다. generation이 필요하면 실제 business가
+matching serial을 commit한 원래 event에서 읽는다.
+
 공통 phase의 양/음수 preroll, 분수 cut/no-op, 큰 정수·denominator·역산을 독립
 literal/oracle로 검증한다. 실제 Mixer PCM, 여러 voice 중 마지막 실패의 전체
 무변경, pause/resume, cue/end/loop 경계, converted suffix, calibrated callback
