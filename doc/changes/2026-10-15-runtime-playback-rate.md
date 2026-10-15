@@ -567,3 +567,67 @@ networkOverflow=false, owned browser/Xvfb exit0이다. 원래 입력·시계·Fi
 새 독립 DEEP code/security 리뷰는 전체 변경 범위를 확인 중이다. 필수 qa-browser,
 qa-cli, qa-desktop는 아직 실행하지 않았고, 이번 root 실행을 독립 QA로 표시하지
 않는다. 실제 장치·음향·지연·성능 및 WBS05.13.07 E의 범위는 그대로 남는다.
+
+
+## 세 번째 정식 리뷰와 최소 프레임 작업 한도
+
+4fb16971의 독립 security 리뷰는 PASS0이며 관련 Node62/0도 확인했다. 독립
+DEEP code 리뷰는 이전 기록 회수 수정이 유효함을 확인한 뒤 별도 FIX_NOW1을
+보고했다. max_events_per_render=1인 유효한 재생에서 Started0 다음 frame1의
+cue와 배속 제어가 함께 필요하면 작업2개가 한도를 넘는다. 기존 public fixture는
+길이2 실패만 반복하며, 실제로는 길이1로 줄여도 pending 제어 때문에 진행하지
+못한다. root도 해당 preflight·FIFO·runtime_pending 경로를 읽어 확인했다.
+
+AC034는 한도를 올리거나 작업을 누락하지 않고, 수행 불가능한 제어를 자원
+admission에서 거절해 원래 재생을 보존하는 정책을 구현·독립 테스트 팀으로
+검토한다. 유효한 작은 한도의 일반 재생과 실제로 작은 블록으로 회복 가능한
+큰 callback의 무변경 재시도 계약은 유지한다. 제품 수정 전 REQ와 canonical
+PLAN에 범위를 기록했다. 열다섯 번째 browser PASS는 그 버전의 실제 증거이며,
+새 제품 변경 뒤 다시 검증한다. 두 정식 리뷰가 모두 PASS하지 않아 필수 QA는
+아직 시작하지 않았다. WBS05.13.06 W·전체136/489·오디오12/27을 유지한다.
+
+
+## 최소 프레임 예산 수정과 현재 소프트웨어 검증
+
+`ee56e1de`는 기존 coherent metadata에 private 작업 상한 하나를 발행해 제어
+이벤트 여유를 admission에서 검사한다. 기존 경계에서만 발행하며, callback마다
+새 원본 시각을 공유하거나 공개 metadata/메시지를 추가하지 않는다. 상한은 현재
+pass의 보수적 값이라 지난 cue를 다음 경계까지 포함할 수 있다. 일반 작업이 없는
+open pass·실제 종료 뒤의 수행 가능한 한도1 제어와 정확한 한도2/3 제어는 허용한다.
+목표 anchor의 재발성도 검사하며, 원래 배속의 PCM과 요청 ID를 거절 시 보존한다.
+
+일반 구간 제어는 기존 metadata·receipt를 발행한 뒤 queue slot을 해제하도록
+순서만 옮겼다. 따라서 새 배속 admission이 이전 metadata와 빈 queue/receipt를
+동시에 보고 새 구간의 더 큰 작업을 놓치는 틈을 막는다. 기존 FIFO/receipt 순서와
+일반 region/disable admission 정책은 유지한다. 추가 geometry 계산은 runtime
+세션의 기존 경계 발행에만 적용한다.
+
+Root2202는 core library13·allocation12·retention6·fixed practice20·runtime rate29의
+80/0이고, 이어60726의 기존 practice_program27/0까지 현재 core107/0이다.
+앱의 실제 PCM end-to-end3·Step23·Worklet24도50/0이다. 모두 ignored0이며 관련
+원본은 `core-control-frame-budget-first-14118.log`,
+`core-control-publication-program-14118.log`, `app-control-frame-budget-first-14118.log`
+(`target/wf/runtime-rate-14043/`)에 있다. 앞선 실행의 subset을 누적 합산하지 않는다.
+기존 큰 callback의 무변경·재시도 검사를 실제로 작은 블록은 수행 가능한 fixture로
+유지하고, 한도 부족 거절 뒤 정상 PCM/요청 재사용과 할당0을 새로 검사했다.
+
+새 release WASM·matching bindgen을 빌드 중이다. 이후 새 정식 code/security 리뷰가
+모두 실제 PASS하면 필수 qa-browser가 현재 아티팩트로 원래14필수 흐름/15checks를
+실행한다. 검사를 두 번 하기 위한 별도 root 브라우저 실행은 추가하지 않는다.
+최신 실제 browser15 PASS는 이전 버전의 증거로 유지한다. 필수 CLI/desktop QA와
+최종 문서 감사/owning gate도 남으며 WBS05.13.06 W·136/489·오디오12/27은 그대로다.
+
+
+현재 ee56e1de의 실제 WASM 빌드80608은 terminal0이다. UI는 실제 재빌드 뒤
+`a09f96fa9340dc6695fa4226db4b224f9535ab2c5eb8e9bd4a82eaba7e855325`로 동일하고,
+audio는 `d7ca72a92c108a8fa563459ae158d62f7f6723a7b08a1ab0b4bfc59187b863d3`다.
+두 패키지는 각각 빌드 직후 matching bindgen을 생성했다.
+`browser-frame-budget-bindgen-sha256-14118.log`와 각
+`browser-*-frame-budget*14118.log`가 원본 증거다. 이 현재 아티팩트의 실제 browser
+증거는 다음 필수 qa-browser에서 얻으며, 이전 audio c83755b0의15차 실행을 현재
+아티팩트 PASS로 인용하지 않는다. 새 정식 code/security와 필수 QA는 아직 남아 있다.
+
+현재 desktop,webtransport의 실제 main player binary 빌드69802도 exit0이다
+(`native-final-player-build-14118.log`, binary hash는 같은 이름의 sha256 로그).
+이는 이후 독립 desktop QA가 사용할 current 실행 파일의 빌드 증거이며, 실제
+GUI/input/audio 장치 검증은 다음 QA에서 별도로 판단한다.

@@ -23,7 +23,14 @@ owned browser/Xvfb exit0이다. 실행한 runner는 fc14ca44로 커밋했다.
 solo/local 할당 실패 뒤 동일 기록 회수와 다음 fresh 경계 backpressure도 확인했다.
 새 실제 UI/audio WASM·matching bindgen과 열다섯 번째 browser79718도 통과했다
 (필수14흐름/전체15checks, console/network0·owned browser/Xvfb exit0).
-새 정식 code/security 리뷰는 진행 중이며, 필수 browser/CLI/desktop QA는 남아 있다.
+세 번째 정식 security 리뷰는 PASS다. code 리뷰는 최소 event budget에서
+배속 제어와 cue가 겹쳐 한 프레임 재시도도 진행하지 못하는 별도1건을 확인했다.
+해당 지적은 ee56e1de에서 수정했고 현재 core107/0·실제 Worklet/Step/PCM 연동
+50/0이 통과했다. 작은 한도 재생과 수행 가능한 제어는 유지하며, 현재 pass의
+보수적 작업 상한을 넘는 요청만 admission에서 거절한다. 새 실제 UI/audio WASM과
+즉시 matching bindgen 빌드도 통과했다. 새 정식 리뷰 뒤 필수 qa-browser가 현재
+아티팩트의14필수 흐름을 실행한다.
+CLI/desktop QA도 남아 있으며 이전 browser15를 현재 QA로 바꾸지 않는다.
 전체136/489·오디오 커널12/27을 유지하며 개발 증거를 독립 QA PASS로 표시하지 않는다.
 
 리뷰 전 개발 통합 checkpoint: 실제 브라우저 필수12개 흐름이
