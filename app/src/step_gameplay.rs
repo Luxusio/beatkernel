@@ -924,6 +924,7 @@ fn prepare_retained_setup(
         || !(1..=65_536).contains(&worklet.source_history_capacity)
         || !matches!(authority.coordinate_basis(), Some(AudioAuthorityCoordinateBasis::SourceFrame(actual)) if actual == basis)
             && !matches!(authority.coordinate_basis(), Some(AudioAuthorityCoordinateBasis::SourceCounter { basis: actual, frequency }) if actual == basis && frequency > 0)
+            && !matches!(authority.coordinate_basis(), Some(AudioAuthorityCoordinateBasis::SourceTimestamp(actual)) if actual == basis)
         || selected.chart.objects() != prepared.prepared.compiled.chart.objects()
     {
         return Err(StepGameplayError::InvalidConfiguration(
@@ -1993,6 +1994,18 @@ impl StepGameplay {
             .as_mut()
             .expect("audio mode checked")
             .observe_coordinate(epoch, pair, coordinate)
+            .map_err(Into::into)
+    }
+    pub fn observe_audio_source_timestamp(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepGameplayError> {
+        self.ensure_audio()?;
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .observe_source_timestamp(epoch, pair)
             .map_err(Into::into)
     }
     fn retained_input(
@@ -5000,6 +5013,15 @@ impl StepLocalGameplay {
     ) -> Result<ObservationAdmission, StepLocalGameplayError> {
         self.control
             .observe_audio_coordinate(epoch, pair, coordinate)
+            .map_err(Into::into)
+    }
+    pub fn observe_audio_source_timestamp(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepLocalGameplayError> {
+        self.control
+            .observe_audio_source_timestamp(epoch, pair)
             .map_err(Into::into)
     }
     fn process_next_retained_input(

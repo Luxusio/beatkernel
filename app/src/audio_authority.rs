@@ -62,6 +62,9 @@ pub enum AudioAuthorityCoordinateBasis {
         basis: OutputFrameBasis,
         frequency: u64,
     },
+    /// Original signed source-clock nanoseconds around the creation origin.
+    /// ClockPair retains these units directly; no native frame is synthesized.
+    SourceTimestamp(OutputFrameBasis),
     TargetFrame(TargetFrameBasis),
 }
 impl AudioAuthorityCoordinateBasis {
@@ -79,6 +82,12 @@ impl AudioAuthorityCoordinateBasis {
                 frequency,
                 basis.origin(),
             )),
+            Self::SourceTimestamp(basis) => Ok((
+                TargetTime::from_frames(basis.start_physical_frame(), basis.sample_rate())
+                    .map_err(|_| AudioAuthorityError::Overflow)?,
+                1_000_000_000,
+                basis.origin(),
+            )),
             Self::TargetFrame(basis) => Ok((
                 basis.start_time(),
                 u64::from(basis.sample_rate()),
@@ -91,6 +100,11 @@ impl AudioAuthorityCoordinateBasis {
         observation: AudioAuthorityObservation,
     ) -> Result<InterpolatedTargetTime, AudioAuthorityError> {
         let (base, frequency, _) = self.descriptor()?;
+        if matches!(self, Self::SourceTimestamp(_)) {
+            let units = self.source_timestamp_units(observation)?;
+            return InterpolatedTargetTime::from_signed_native(base, units, units, frequency, 0, 1)
+                .map_err(|_| AudioAuthorityError::Overflow);
+        }
         let units = CoordinateInputMapper::units(observation)?;
         InterpolatedTargetTime::new(base, units, units, frequency, 0, 1)
             .map_err(|_| AudioAuthorityError::Overflow)
@@ -103,6 +117,30 @@ impl AudioAuthorityCoordinateBasis {
     ) -> Result<InterpolatedTargetTime, AudioAuthorityError> {
         if host.domain != left.pair.target.domain || host.domain != right.pair.target.domain {
             return Err(AudioAuthorityError::DomainMismatch);
+        }
+        if matches!(self, Self::SourceTimestamp(_)) {
+            let left_units = self.source_timestamp_units(left)?;
+            let right_units = self.source_timestamp_units(right)?;
+            if right_units <= left_units
+                || right.pair.target.timestamp <= left.pair.target.timestamp
+            {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            let (base, frequency, _) = self.descriptor()?;
+            let host_span = u64::try_from(delta(
+                right.pair.target.timestamp,
+                left.pair.target.timestamp,
+            ))
+            .map_err(|_| AudioAuthorityError::Overflow)?;
+            return InterpolatedTargetTime::from_signed_native(
+                base,
+                left_units,
+                right_units,
+                frequency,
+                delta(host.timestamp, left.pair.target.timestamp),
+                host_span,
+            )
+            .map_err(|_| AudioAuthorityError::Overflow);
         }
         let left_units = CoordinateInputMapper::units(left)?;
         let right_units = CoordinateInputMapper::units(right)?;
@@ -125,6 +163,30 @@ impl AudioAuthorityCoordinateBasis {
         )
         .map_err(|_| AudioAuthorityError::Overflow)
     }
+    fn source_timestamp_units(
+        self,
+        observation: AudioAuthorityObservation,
+    ) -> Result<i64, AudioAuthorityError> {
+        let Self::SourceTimestamp(basis) = self else {
+            return Err(AudioAuthorityError::CoordinateModeMismatch);
+        };
+        if observation.coordinate.is_some() {
+            return Err(AudioAuthorityError::CoordinateModeMismatch);
+        }
+        let origin = basis
+            .point_at_stream_frame(0)
+            .map_err(|_| AudioAuthorityError::Overflow)?;
+        if observation.pair.source.domain != origin.domain {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        observation
+            .pair
+            .source
+            .timestamp
+            .as_nanos()
+            .checked_sub(origin.timestamp.as_nanos())
+            .ok_or(AudioAuthorityError::Overflow)
+    }
     fn point(self, coordinate: NativeOutputCoordinate) -> Result<ClockPoint, AudioAuthorityError> {
         match (self, coordinate) {
             (Self::SourceFrame(basis), NativeOutputCoordinate::StreamFrame { frame }) => basis
@@ -146,6 +208,11 @@ impl AudioAuthorityCoordinateBasis {
         }
     }
     pub(crate) fn origin(self) -> Result<ClockPoint, AudioAuthorityError> {
+        if let Self::SourceTimestamp(basis) = self {
+            return basis
+                .point_at_stream_frame(0)
+                .map_err(|_| AudioAuthorityError::Overflow);
+        }
         self.point(match self {
             Self::SourceCounter { frequency, .. } => NativeOutputCoordinate::Counter {
                 position: 0,
@@ -303,18 +370,36 @@ impl CoordinateInputMapper {
         }
         let (base, frequency, _) = self.descriptor()?;
         let query = self.basis.interpolate(self.left, self.right, original)?;
-        if original.timestamp > self.latest.pair.target.timestamp
-            && query
-                .compare_native_time_with_offset(
+        if original.timestamp > self.latest.pair.target.timestamp {
+            let exceeds = if matches!(
+                self.basis,
+                AudioAuthorityCoordinateBasis::SourceTimestamp(_)
+            ) {
+                let units = self.basis.source_timestamp_units(self.latest)?;
+                let bound = InterpolatedTargetTime::new(
                     base,
-                    Self::units(self.latest)?,
+                    0,
+                    1,
                     frequency,
-                    self.max_input_ahead.as_nanos(),
+                    i128::from(units) + i128::from(self.max_input_ahead.as_nanos()),
+                    1,
                 )
-                .map_err(|_| AudioAuthorityError::Overflow)?
-                == std::cmp::Ordering::Greater
-        {
-            return Ok(None);
+                .map_err(|_| AudioAuthorityError::Overflow)?;
+                query.compare_interpolated_time(bound).is_gt()
+            } else {
+                query
+                    .compare_native_time_with_offset(
+                        base,
+                        Self::units(self.latest)?,
+                        frequency,
+                        self.max_input_ahead.as_nanos(),
+                    )
+                    .map_err(|_| AudioAuthorityError::Overflow)?
+                    .is_gt()
+            };
+            if exceeds {
+                return Ok(None);
+            }
         }
         Ok(Some(query))
     }
@@ -664,10 +749,13 @@ impl AudioAuthority {
         self.coordinate_basis
     }
     pub fn latest_coordinate_observation(&self) -> Option<AudioAuthorityObservation> {
-        self.history
-            .back()
-            .copied()
-            .filter(|entry| entry.coordinate.is_some())
+        self.history.back().copied().filter(|entry| {
+            entry.coordinate.is_some()
+                || matches!(
+                    self.coordinate_basis,
+                    Some(AudioAuthorityCoordinateBasis::SourceTimestamp(_))
+                )
+        })
     }
     /// Conservative exact lower bound for future legal input correspondence.
     /// This grants no retirement or native permission: outstanding controls,
@@ -800,6 +888,25 @@ impl AudioAuthority {
         pair: ClockPair,
         coordinate: NativeOutputCoordinate,
     ) -> Result<ObservationAdmission, AudioAuthorityError> {
+        self.observe_original_coordinate(epoch, pair, Some(coordinate))
+    }
+
+    /// Retains an actual signed source-clock association around the creation
+    /// origin. Negative output remains pre-origin evidence, not playable audio.
+    pub fn observe_source_timestamp(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, AudioAuthorityError> {
+        self.observe_original_coordinate(epoch, pair, None)
+    }
+
+    fn observe_original_coordinate(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+        coordinate: Option<NativeOutputCoordinate>,
+    ) -> Result<ObservationAdmission, AudioAuthorityError> {
         let basis = self
             .coordinate_basis
             .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
@@ -811,14 +918,16 @@ impl AudioAuthority {
         {
             return Err(AudioAuthorityError::DomainMismatch);
         }
-        if basis.point(coordinate)? != pair.source {
-            return Err(AudioAuthorityError::CoordinateMismatch);
+        let observation = AudioAuthorityObservation { pair, coordinate };
+        if let Some(coordinate) = coordinate {
+            if basis.point(coordinate)? != pair.source {
+                return Err(AudioAuthorityError::CoordinateMismatch);
+            }
+        } else {
+            basis.source_timestamp_units(observation)?;
         }
         self.logical(pair.source)?;
-        let query = basis.query(AudioAuthorityObservation {
-            pair,
-            coordinate: Some(coordinate),
-        })?;
+        let query = basis.query(observation)?;
         if self
             .coordinate_presentation
             .is_some_and(|last| query.compare_interpolated_time(last) == std::cmp::Ordering::Less)
@@ -826,23 +935,28 @@ impl AudioAuthority {
             return Err(AudioAuthorityError::ObservationRegression);
         }
         if let Some(previous) = self.history.back() {
-            // Kind and frequency were checked against the immutable descriptor.
-            let position = |coordinate| match coordinate {
-                NativeOutputCoordinate::Counter { position, .. } => position,
-                NativeOutputCoordinate::StreamFrame { frame } => frame,
+            // The immutable basis checked the original units before comparison.
+            // Timestamp mode retains ClockPair itself, never invented frames.
+            let order = if matches!(basis, AudioAuthorityCoordinateBasis::SourceTimestamp(_)) {
+                pair.source.timestamp.cmp(&previous.pair.source.timestamp)
+            } else {
+                let position = |coordinate| match coordinate {
+                    NativeOutputCoordinate::Counter { position, .. } => position,
+                    NativeOutputCoordinate::StreamFrame { frame } => frame,
+                };
+                let current = coordinate.ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+                let previous = previous
+                    .coordinate
+                    .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+                position(current).cmp(&position(previous))
             };
-            let previous_coordinate = previous
-                .coordinate
-                .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
-            let current = position(coordinate);
-            let old = position(previous_coordinate);
-            if current < old
+            if order.is_lt()
                 || pair.source.timestamp < previous.pair.source.timestamp
                 || pair.target.timestamp < previous.pair.target.timestamp
             {
                 return Err(AudioAuthorityError::ObservationRegression);
             }
-            if current == old {
+            if order.is_eq() {
                 return Ok(ObservationAdmission::Unchanged);
             }
             if pair.target.timestamp == previous.pair.target.timestamp {
@@ -862,10 +976,7 @@ impl AudioAuthority {
         if retire {
             self.history.pop_front();
         }
-        self.history.push_back(AudioAuthorityObservation {
-            pair,
-            coordinate: Some(coordinate),
-        });
+        self.history.push_back(observation);
         self.revision = revision;
         Ok(ObservationAdmission::Retained)
     }

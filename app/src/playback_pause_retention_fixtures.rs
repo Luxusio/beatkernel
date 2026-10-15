@@ -45,6 +45,9 @@ fn authority(basis: Basis) -> AudioAuthority {
 fn observe(a: &mut AudioAuthority, units: u64, at: i64) {
     let basis = a.coordinate_basis().unwrap();
     let coordinate = match basis {
+        Basis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         Basis::SourceCounter { frequency, .. } => NativeOutputCoordinate::Counter {
             position: units,
             frequency,
@@ -52,6 +55,9 @@ fn observe(a: &mut AudioAuthority, units: u64, at: i64) {
         _ => NativeOutputCoordinate::StreamFrame { frame: units },
     };
     let source = match basis {
+        Basis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         Basis::SourceFrame(basis) => basis.point_at_stream_frame(units).unwrap(),
         Basis::SourceCounter { basis, frequency } => {
             basis.point_at_native_counter(units, frequency).unwrap()

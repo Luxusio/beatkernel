@@ -227,6 +227,11 @@ impl NativePause {
                 }
                 self.min_physical_frame = source_identity.initial_physical();
             }
+            Basis::SourceTimestamp(_) => {
+                return Err(PauseError(
+                    "native pause requires original native coordinate units",
+                ));
+            }
         }
         self.epoch = epoch;
         self.coordinate_binding = Some(CoordinatePauseBinding {

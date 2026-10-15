@@ -65,6 +65,20 @@ Browser의 이전 attempt는 기존 File 보관 흐름에서 Program/boundary/pl
 이 공간을 넘으면 명시적인 capacity 종료로 기존 데이터를 보존한다. 영구 저장은
 기존 명시 Save의 성공 ACK를 따르며, 새 자동 저장 권한이나 무한 보관 큐는 추가하지 않는다.
 
+## 브라우저 시작 관측의 signed 원점
+
+실제 browser에서 arm 직전 관측을 버리면 Started source0보다 첫 관측이 뒤에
+놓여 무외삽 경계 검증이 불가능했다. 공통 AudioAuthority에 SourceTimestamp
+basis를 명시하고 원본 signed ClockPair를 보존한다. 기존 signed rational 표현의
+anchor 보간만 확장하며 native u64 Counter/StreamFrame 증거 규칙은 유지한다.
+브라우저 namespace의 signed timestamp를 native driver proof로 승인하지 않는다.
+
+음수 관측을0으로 자르거나 새로운0 관측을 추정하는 대안, Started만 경계 검사에서
+제외하는 대안은 원본 관측과 권한을 보존하지 않아 제외했다. 기존 두 실제 관측
+사이의 정확한 보간·freshness·입력 prefix·control cutoff 검사를 그대로 재사용한다.
+JS의 retained opt-in은 scalar boolean으로 전달하며 hot-path 옵션 객체를 추가하지 않는다.
+일반/replay helper의 비음수 의미와 실제 시작 후 capability 조건은 유지한다.
+
 ## 대안과 결과
 
 정수 anchor 또는 새 attempt는 작지만 PCM·score·fraction 연속성을 충족하지 않아

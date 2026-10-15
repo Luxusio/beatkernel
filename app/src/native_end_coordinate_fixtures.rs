@@ -60,6 +60,9 @@ fn owner(basis: AudioAuthorityCoordinateBasis) -> AudioAuthority {
 fn pair(basis: AudioAuthorityCoordinateBasis, units: u64, at: i64) -> ClockPair {
     ClockPair {
         source: match basis {
+            AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+                panic!("SourceTimestamp is not a native coordinate in this fixture")
+            }
             AudioAuthorityCoordinateBasis::SourceCounter { basis, frequency } => {
                 basis.point_at_native_counter(units, frequency).unwrap()
             }
@@ -80,6 +83,9 @@ fn observe(
     at: i64,
 ) {
     let coordinate = match basis {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceCounter { frequency, .. } => {
             NativeOutputCoordinate::Counter {
                 position: units,

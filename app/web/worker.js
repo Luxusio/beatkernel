@@ -3670,13 +3670,13 @@ function observeOutput(state, observation, output, service = true) {
     const now = currentWindowHost(state);
     let pair = Object.hasOwn(observation, "timestamp")
       ? observation.timestamp === null ? null
-        : presentationPair(observation.timestamp, state.startFrame, state.rate, Number(now) / 1000000)
+        : presentationPair(observation.timestamp, state.startFrame, state.rate, Number(now) / 1000000, 1000, state.retained)
       : observation.presentedNs === null ? null
         : { outputNs: observation.presentedNs, hostNs: observation.presentedHostNs };
     if (pair !== null && (pair.hostNs > now || now - pair.hostNs > 1000000000n)) pair = null;
-    const availability = presentationAvailability(state.lastPresentation, pair);
+    const availability = presentationAvailability(state.lastPresentation, pair, state.retained);
     pair = availability.pair;
-    state.game.admit_output(output.words, pair?.outputNs ?? null);
+    state.game.admit_output(output.words, pair !== null && pair.outputNs >= 0n ? pair.outputNs : null);
     if (pair !== null) {
       if (state.retained) state.game.retained_observe_presentation(pair.outputNs, pair.hostNs);
       else state.game.observe_presentation(pair.outputNs, pair.hostNs);
@@ -3725,7 +3725,7 @@ function snapshotPresentation(state, request, direct) {
       contextTime: input.contextTime, performanceTime: input.performanceTime,
     });
     const nowMs = Number(currentWindowHost(state)) / 1000000;
-    const pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, nowMs);
+    const pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, nowMs, 1000, state.retained);
     return Object.freeze({ renderId: request.renderId,
       timestamp, presentedNs: pair?.outputNs ?? null, presentedHostNs: pair?.hostNs ?? null });
   }

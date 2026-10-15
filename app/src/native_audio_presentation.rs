@@ -178,6 +178,9 @@ impl PreparedPracticeBoundary {
                     .boundary
                     .target_time
             }
+            Some(AudioAuthorityCoordinateBasis::SourceTimestamp(_)) => {
+                return Err("native presentation requires original native coordinate units".into());
+            }
             None => return Ok(None),
         };
         Ok(Some(InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)?))
@@ -277,6 +280,9 @@ fn practice_coordinate_query(
         }
         Some(AudioAuthorityCoordinateBasis::TargetFrame(_)) => {
             target_time.ok_or("coordinate practice lacks original Target projection")?
+        }
+        Some(AudioAuthorityCoordinateBasis::SourceTimestamp(_)) => {
+            return Err("native presentation requires original native coordinate units".into());
         }
         None => return Ok(None),
     };
@@ -880,6 +886,9 @@ impl NativeAudioPresentation {
                 };
                 (host, self.authority.epoch().logical_output(raw)?)
             }
+            Some(AudioAuthorityCoordinateBasis::SourceTimestamp(_)) => {
+                return Err("native presentation requires original native coordinate units".into());
+            }
             None => {
                 let Some(host) = self.authority.presented_boundary_host(raw, now)? else {
                     return Ok(None);
@@ -1310,6 +1319,9 @@ impl NativeAudioPresentation {
                         "coordinate seed target descriptor differs from its native pin".into(),
                     );
                 }
+            }
+            Some(AudioAuthorityCoordinateBasis::SourceTimestamp(_)) => {
+                return Err("native presentation requires original native coordinate units".into());
             }
             None => {
                 return Err("coordinate startup requires an original coordinate descriptor".into())

@@ -87,6 +87,9 @@ pub(crate) struct Output<O = Mixer> {
 impl<O> Output<O> {
     pub(crate) fn basis(&self) -> OutputFrameBasis {
         match self.descriptor {
+            AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+                panic!("SourceTimestamp is not a native coordinate in this fixture")
+            }
             AudioAuthorityCoordinateBasis::SourceFrame(basis)
             | AudioAuthorityCoordinateBasis::SourceCounter { basis, .. } => basis,
             AudioAuthorityCoordinateBasis::TargetFrame(_) => unreachable!(),
@@ -382,6 +385,9 @@ pub(crate) fn native(output: &Output, position: u64) -> CoordinateNativeAudioSna
     let basis = output.basis();
     let host = source::point(1, 100);
     let (evidence, coordinate) = match output.descriptor {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(_) => (
             OriginalNativePresentationEvidence::SuppliedPair(ClockPair {
                 source: basis.point_at_stream_frame(position).unwrap(),

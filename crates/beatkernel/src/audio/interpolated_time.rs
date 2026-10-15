@@ -86,6 +86,56 @@ impl InterpolatedTargetTime {
         })
     }
 
+    /// Interpolates original signed native counters without rounding either
+    /// anchor. Negative anchors grant no permission to extrapolate or admit a
+    /// presentation clock. The caller retains the actual observed interval.
+    pub fn from_signed_native(
+        base: TargetTime,
+        left: i64,
+        right: i64,
+        frequency: u64,
+        host_offset: i128,
+        host_span: u64,
+    ) -> Result<Self, AudioError> {
+        if frequency == 0 || host_span == 0 || right < left {
+            return Err(AudioError::InvalidFormat);
+        }
+        let offset = host_offset.unsigned_abs();
+        if offset > u128::from(u64::MAX) {
+            return Err(AudioError::Overflow);
+        }
+        // The distance between two ordered i64 counters fits u64, including
+        // MIN..MAX. Its product with the bounded offset fits u128.
+        let distance = (i128::from(right) - i128::from(left)) as u128;
+        let denominator = u128::from(frequency) * u128::from(host_span);
+        let drift = distance * offset;
+        let frequency = i128::from(frequency);
+        let anchor = i128::from(base.seconds()) + i128::from(left).div_euclid(frequency);
+        let quotient = drift / denominator;
+        let whole = if host_offset < 0 {
+            anchor.checked_sub_unsigned(quotient)
+        } else {
+            anchor.checked_add_unsigned(quotient)
+        }
+        .ok_or(AudioError::Overflow)?;
+        Ok(Self {
+            whole,
+            fractions: [
+                Fraction::target(base, false),
+                Fraction {
+                    numerator: i128::from(left).rem_euclid(frequency) as u128,
+                    denominator: frequency as u128,
+                    negative: false,
+                },
+                Fraction {
+                    numerator: drift % denominator,
+                    denominator,
+                    negative: host_offset < 0,
+                },
+            ],
+        })
+    }
+
     /// Exact ordering without narrowing the fractional denominator.
     pub fn compare_target_time(self, other: TargetTime) -> Ordering {
         let other_whole = i128::from(other.seconds());

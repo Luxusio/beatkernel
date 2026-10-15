@@ -738,6 +738,84 @@ test("presentation pairs preserve original fractional Window time separately fro
     0n, 48000, 9223372036855), "original host time must fit signed nanoseconds");
 });
 
+test("retained opt-in preserves the genuine signed pre-arm pair and its positive successor without changing ordinary or replay meaning", () => {
+  // Original browser observations, 44100Hz, armed frame16785. The arm origin
+  // is ceil(16785e9/44100)=380612245ns, not a rounded sample or control clock.
+  const left = { contextTime: 0.375309, performanceTime: 1530.9200000017881 };
+  const right = { contextTime: 0.382072, performanceTime: 1537.6850000023842 };
+  const negative = { outputNs: -5303245n, hostNs: 1530920000n };
+  const positive = { outputNs: 1459755n, hostNs: 1537685000n };
+  assert.deepEqual(presentationPair(left, 16785n, 44100, 1532.12, 1000, true), negative);
+  assert.deepEqual(presentationPair(right, 16785n, 44100, 1540.08, 1000, true), positive);
+  assert.deepEqual(presentationPair(left, 16785n, 44100, 1600, 1000, true), negative,
+    "receipt time cannot advance either original coordinate");
+  assert.equal(presentationPair(left, 16785n, 44100, 1532.12), null);
+  assert.equal(presentationPair(left, 16785n, 44100, 1532.12, 1000, false), null);
+  assert.equal(presentationPoint(left, 16785n, 44100, 1532.12), null);
+  assert.deepEqual(presentationPair(right, 16785n, 44100, 1540.08), positive);
+  assert.throws(() => presentationAvailability(null, negative));
+  assert.throws(() => presentationOutputAvailability(null, negative.outputNs));
+});
+
+test("signed retained association progress crosses zero while repeated and regressing estimates preserve accepted history", () => {
+  const negative = Object.freeze({ outputNs: -5303245n, hostNs: 1530920000n });
+  const positive = Object.freeze({ outputNs: 1459755n, hostNs: 1537685000n });
+  assert.deepEqual(presentationAvailability(null, negative, true), { pair: negative, reason: null, progressed: true });
+  for (const pair of [negative, { outputNs: -5303245n, hostNs: 1530920001n }]) {
+    assert.deepEqual(presentationAvailability(negative, pair, true), { pair: null, reason: null, progressed: false });
+  }
+  for (const pair of [{ outputNs: -5303246n, hostNs: 1530920001n },
+    { outputNs: -5303244n, hostNs: 1530919999n }, { outputNs: -5303244n, hostNs: 1530920000n }]) {
+    assert.deepEqual(presentationAvailability(negative, pair, true), { pair: null, reason: "regressing-estimate", progressed: false });
+  }
+  assert.deepEqual(presentationAvailability(negative, positive, true), { pair: positive, reason: null, progressed: true });
+  const zero = { outputNs: 0n, hostNs: 200n };
+  assert.deepEqual(presentationAvailability({ outputNs: -1n, hostNs: 199n }, zero, true),
+    { pair: zero, reason: null, progressed: true });
+  const afterZero = { outputNs: 1n, hostNs: 201n };
+  assert.deepEqual(presentationAvailability(zero, afterZero, true), { pair: afterZero, reason: null, progressed: true });
+  assert.deepEqual(presentationAvailability(positive, null, true), { pair: null, reason: null, progressed: false });
+  assert.deepEqual(negative, { outputNs: -5303245n, hostNs: 1530920000n });
+  assert.deepEqual(presentationPair({ contextTime: 1, performanceTime: 1000 }, 48000n, 48000, 1000, 1000, true),
+    { outputNs: 0n, hostNs: 1000000000n }, "a genuinely observed zero is distinct from an unavailable estimate");
+});
+
+test("retained signed opt-in keeps zero-sentinel, stale, future and malformed raw clock filtering", () => {
+  for (const timestamp of [{ contextTime: 0, performanceTime: 1530.92 },
+    { contextTime: 0.375309, performanceTime: 0 }, { contextTime: 0.375309, performanceTime: 499.999 },
+    { contextTime: 0.375309, performanceTime: 1500.001 }]) {
+    assert.equal(presentationPair(timestamp, 16785n, 44100, 1500, 1000, true), null);
+  }
+  for (const timestamp of [null, {}, { contextTime: -1, performanceTime: 1500 },
+    { contextTime: NaN, performanceTime: 1500 }, { contextTime: Infinity, performanceTime: 1500 },
+    { contextTime: 0.375309, performanceTime: -1 }, { contextTime: 0.375309, performanceTime: NaN }]) {
+    assert.throws(() => presentationPair(timestamp, 16785n, 44100, 1500, 1000, true));
+  }
+  assert.throws(() => presentationPair({ contextTime: 9223372037, performanceTime: 1500 }, 16785n, 44100, 1500, 1000, true));
+  assert.throws(() => presentationPair({ contextTime: 0.375309, performanceTime: 9223372036855 },
+    16785n, 44100, 9223372036855, 1000, true));
+  assert.throws(() => presentationPair({ contextTime: 1, performanceTime: 1500 }, I64_MAX, 1, 1500, 1000, true));
+});
+
+test("retained signed association bounds and scalar opt-in reject malformed inputs without widening replay admission", () => {
+  const min = -9223372036854775808n;
+  for (const outputNs of [min, -1n, 0n, I64_MAX]) {
+    const pair = { outputNs, hostNs: 0n };
+    assert.deepEqual(presentationAvailability(null, pair, true), { pair, reason: null, progressed: true });
+  }
+  for (const pair of [{ outputNs: min - 1n, hostNs: 0n }, { outputNs: I64_MAX + 1n, hostNs: 0n },
+    { outputNs: -1n, hostNs: -1n }, { outputNs: -1n, hostNs: I64_MAX + 1n },
+    { outputNs: -1, hostNs: 1n }, { outputNs: -1n, hostNs: 1 }]) {
+    assert.throws(() => presentationAvailability(null, pair, true));
+    assert.throws(() => presentationAvailability(pair, null, true));
+  }
+  for (const retained of [null, {}, [], 1, "true"]) {
+    assert.throws(() => presentationPair({ contextTime: 0.375309, performanceTime: 1500 }, 16785n, 44100, 1500, 1000, retained));
+    assert.throws(() => presentationAvailability(null, null, retained));
+  }
+  assert.throws(() => presentationOutputAvailability(null, min));
+});
+
 test("committed starts round upward onto the exact shared frame without retiming the accepted target", () => {
   const clock = { beforeMs: 1000, afterMs: 1002, contextTime: 2, sampleRate: 48000 };
   assert.deepEqual(committedStartProjection(clock, 1501000000n, 1002), {

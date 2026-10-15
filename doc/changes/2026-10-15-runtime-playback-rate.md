@@ -183,3 +183,39 @@ JS만 수정해 준비 응답의 capability:null과 실제 Started 이후16word 
 (js-cold-readiness-first-14110.log, 실패0·skip0). 기존33개 흐름도 포함하며 cold 거절,
 실제 Started 후 활성화, Ended의 current capture/점수/입력 보존 및 늦은 Rate 거절을
 검사했다. 실제 browser 재검증과 정식 독립 review/QA는 아직 남는다.
+
+실제 browser 두 번째 실행70346도 FAIL이며
+`target/wf/runtime-rate-browser-second-14110/evidence.json`에 원본을 보관했다.
+cold 준비 오류는 해소됐으나 원점 직전 실제 -5303245ns 관측을 JS에서 버려,
+첫 actual 관측1459755ns보다 앞선 Started source0을 검증할 수 없었다.
+HistoryExpired는 이때 올바른 거절이었다. 오디오 body EOF·matching compile은
+완료됐으나 strict ERR_ABORTED도 관측돼 로딩 acceptance는 해결되지 않았다.
+owned browser/Xvfb는 exit0으로 정리했다. 실행 대기의 correlated 오류를 Node에서
+직접 보고하도록 runner를 수정했고, 제품은 공통 SourceTimestamp·signed 보간과
+retained-only JS opt-in을 두 source/test 쌍으로 구현한다. 기존 native 증거·경계
+무외삽·실제 Started 권한을 완화하지 않는다. 이 새 수정의 검증은 아직 남는다.
+
+SourceTimestamp와 signed 원본 관측 연결 후 개발 검사에서 core 보간7/0,
+Node helper/Worker95/0, 앱 실제 signed 시작·기존 retained Step·PCM/replay28/0을
+확인했다. 원본 로그는 rust-signed-clock-core-first-14110.log,
+js-signed-prearm-vm-enabled-14110.log,
+rust-signed-clock-app-descriptor-error-14110.log다. Node 실행에는 기존 VM module
+fixture를 위한 --experimental-vm-modules가 필요하다. 신규 descriptor-kind fixture는
+기존 CoordinateMismatch와 API mode의 CoordinateModeMismatch를 구분하며 구체
+오류 검증을 유지했다. 기존 authority library 회귀도216/0을 통과했다
+(rust-signed-clock-authority-fixture-guards-14110.log). 새 basis를 native driver 증거로
+쓰지 않도록 production7곳과 기존 native fixture의 exhaustive match에 명시 거절을
+유지했다. 실제 새 WASM·browser 검증은 진행 중이며 formal review/QA 및 WBS D
+승격을 뜻하지 않는다.
+
+두 release WASM과 각각 직후 matching bindgen도 통과했다. UI SHA는
+`d16644279378f5c17da81eb32050ee18ebbf3a9e829b781062224da2f22f7cc7`,
+audio SHA는 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`이며
+원본 browser-signed-bindgen-sha256-14110.log를 따른다. 실제 세 번째 실행27883은
+Started/capability·실제 노트 판정을 통과했고 song465186831ns/hits1을 확인했다.
+이후 runner가10초 sample을 약50Hz로 반복 입력해 실제 voice_full을 유발했으며,
+제품은 기존 capacity 오류로 종료했다. 원본은
+`target/wf/runtime-rate-browser-third-14110/evidence.json`이다. 이 실행의 console/network
+오류는0이고 owned browser/Xvfb는 exit0이나 전체 strict journey PASS는 아니다.
+fixture의 sample 길이·voice 한도·PCM/기록 oracle을 유지하면서 필요한 유한 trusted
+입력만 보내도록 runner를 수정한다. 기존처럼 네트워크 오류를 제외하지 않는다.

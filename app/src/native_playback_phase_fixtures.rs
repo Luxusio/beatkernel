@@ -42,6 +42,9 @@ fn at(frame: u64) -> InterpolatedTargetTime {
 }
 fn presentation(descriptor: AudioAuthorityCoordinateBasis, epoch: u64) -> NativeAudioPresentation {
     let origin = match descriptor {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(b)
         | AudioAuthorityCoordinateBasis::SourceCounter { basis: b, .. } => {
             b.point_at_stream_frame(0).unwrap()

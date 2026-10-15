@@ -411,9 +411,9 @@ impl BrowserLocalGame {
         output_ns: i64,
         host_ns: i64,
     ) -> Result<(), JsValue> {
-        if output_ns < 0 || host_ns < 0 || self.game.retained_setup().is_none() {
+        if host_ns < 0 || self.game.retained_setup().is_none() {
             return Err(error(
-                "retained presentation requires nonnegative actual output and HOST points",
+                "retained presentation requires an actual signed output and nonnegative HOST pair",
             ));
         }
         let epoch = self
@@ -423,15 +423,11 @@ impl BrowserLocalGame {
             .epoch()
             .id;
         self.game
-            .observe_audio_coordinate(
+            .observe_audio_source_timestamp(
                 epoch,
                 ClockPair {
                     source: point(OUTPUT, output_ns),
                     target: point(HOST, host_ns),
-                },
-                crate::native_output_coordinate::NativeOutputCoordinate::Counter {
-                    position: output_ns as u64,
-                    frequency: 1_000_000_000,
                 },
             )
             .map(|_| ())

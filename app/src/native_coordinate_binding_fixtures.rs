@@ -47,6 +47,9 @@ fn basis(kind: u8) -> AudioAuthorityCoordinateBasis {
 }
 fn accept(p: &mut NativeAudioPresentation, b: AudioAuthorityCoordinateBasis, n: u64) {
     let evidence = match b {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(basis) => {
             let c = CoordinateNativeAudioSnapshot::new(
                 NativeAudioSnapshot {

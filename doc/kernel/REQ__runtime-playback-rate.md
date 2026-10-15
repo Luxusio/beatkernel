@@ -5,6 +5,22 @@
 [retained](REQ__retained-playback-speed.md)를 따른다. 이 문서는 명시적으로
 runtime 전환에 참여한 세션에만 추가 적용된다.
 
+## 실제 시작 원점을 감싸는 브라우저 관측
+
+Retained browser는 getOutputTimestamp의 실제 context/HOST 쌍에서 arm 원점만
+뺀 signed output ns를 보존한다. 원점 직전의 음수 관측도 같은 실제 시계 이력에
+남겨 Started의 source frame0을 실제 두 관측 사이에서 검증한다. 음수를0으로
+자르거나 가짜0 관측을 삽입하지 않으며 boundary의 외삽을 허용하지 않는다.
+음수 관측 자체는 playable output·Started 승인·입력 소비를 뜻하지 않는다.
+
+공통 AudioAuthority의 명시 SourceTimestamp basis가 원본 signed ClockPair를
+받고 기존 native SourceFrame/u64 SourceCounter 계약은 유지한다. 같은 정확한
+분수 보간과 freshness·epoch·입력 prefix·제어 cutoff 검사를 사용한다. JS의
+음수 허용은 retained 모드만 명시적으로 선택하며 일반/replay 의미는 유지한다.
+예를 들어 원본 -5303245ns@1530920000ns와1459755ns@1537685000ns 사이의
+source0에 처음 도달하는 정수 HOST는1536224814ns다. 그 전에는 제어 권한이나
+Started ACK를 만들 수 없다.
+
 ## 하나의 실제 적용 경계
 
 배속은 정규화한 양수 i64/u64 유리수이며 pitch가 함께 바뀐다. 출력 장치 Hz,
@@ -126,8 +142,8 @@ Native runtime owner는 첫 PCM 렌더 전에 원래 header·capture 예약을 �
 시계 원점이나 normalized LOGICAL 원점과 동일시하지 않는다. 상대 target frame/time과
 실제 source Hz를 검증한 뒤 기존 authority로 각 원점을 연결한다.
 
-Browser retained 관측은 기존 getOutputTimestamp에서 얻은 audio-ns/host-ns 쌍을
-1GHz SourceCounter 좌표로 그대로 보존한다. ns를 물리 sample frame으로 역산해
+Browser retained 관측은 기존 getOutputTimestamp에서 얻은 signed audio-ns/host-ns
+쌍을 명시 SourceTimestamp basis로 그대로 보존한다. 원점 전 실제 관측도 유지한다. ns를 물리 sample frame으로 역산해
 관측한 값처럼 표시하지 않는다. AudioContext.currentTime은 미래 arm 선택용이며
 presentation을 대신하지 않는다. 입력 authority의 실제 future-input 하한과 대기
 event의 최소 physical cut을 별도 history pin으로 전달하고 Worklet의 queued/latch

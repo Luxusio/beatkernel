@@ -28,6 +28,9 @@ fn basis(hz: u32, start: u64) -> OutputFrameBasis {
 }
 fn owner(descriptor: AudioAuthorityCoordinateBasis, capacity: usize) -> NativeAudioPresentation {
     let origin = match descriptor {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(basis)
         | AudioAuthorityCoordinateBasis::SourceCounter { basis, .. } => {
             basis.point_at_stream_frame(0).unwrap()

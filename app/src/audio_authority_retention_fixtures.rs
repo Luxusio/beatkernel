@@ -30,6 +30,9 @@ fn bases() -> [AudioAuthorityCoordinateBasis; 3] {
 }
 fn descriptor(basis: AudioAuthorityCoordinateBasis) -> (TargetTime, u64) {
     match basis {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(b) => (
             TargetTime::from_frames(b.start_physical_frame(), b.sample_rate()).unwrap(),
             u64::from(b.sample_rate()),
@@ -84,6 +87,9 @@ fn owner(
 fn observe(owner: &mut AudioAuthority, units: u64, at: i64) {
     let basis = owner.coordinate_basis().unwrap();
     let coordinate = match basis {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceCounter { frequency, .. } => {
             NativeOutputCoordinate::Counter {
                 position: units,

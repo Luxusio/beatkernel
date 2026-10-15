@@ -225,14 +225,14 @@ async function upload(h) {
   assert.equal(reply(h,rpcId)?.error,undefined); assert.ok(reply(h,rpcId));
   h.samples=samples;return samples;
 }
-async function attach(h,{activate=true,startFrame=START,started=true}={}) {
+async function attach(h,{activate=true,startFrame=START,started=true,hostNs=ORIGIN}={}) {
   await upload(h);const audio=port(),rpcId=++h.nextRpc;
   await h.send({kind:"play-audio",playId:7,rpcId,port:audio,generation:7,queueCapacity:4096,timeoutMs:50});
   h.audio=audio;
   for(let count=0;!reply(h,rpcId)&&count<8;count++) await ackAudio(h);
   assert.equal(reply(h,rpcId)?.error,undefined);
   if(activate) {
-    await h.send({kind:"play-activate",playId:7,rpcId:++h.nextRpc,hostNs:ORIGIN,startFrame});
+    await h.send({kind:"play-activate",playId:7,rpcId:++h.nextRpc,hostNs,startFrame});
     if(started)await startOwner(h);
   }
   return audio;
@@ -401,6 +401,90 @@ test("retained raw observation refuses an absolute context frame outside signed 
   const failure=h.of("play-error").at(-1);assert.ok(failure);assert.match(failure.message,/Audio frame exceeds signed nanoseconds/);
   assert.equal(owner.calls.some(row=>row[0]==="retained-presentation"),false);
   assert.equal(owner.frees,1);
+});
+
+test("retained Worker forwards original signed pre-arm and positive raw pairs while playable admission, Started and input custody stay separate",async()=>{
+  const h=await catalog();const owner=await begin(h,{rate:44100,recordReplay:true,
+    captureBudget:{remainingRecords:128,remainingBytes:256*MiB}});
+  await attach(h,{startFrame:16785n,hostNs:1502429999n,started:false});
+  const score=owner.score,scoreBytes={...score};
+  const registrations=h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length;
+  // The port and binding are controlled wire endpoints. A held Started event
+  // does not grant real Step/native authority; AC021 owns that actual proof.
+  const started=envelope({tag:1n,boundary:0n,id:0n,serial:3n});started[70]=16785;started[71]=0;
+  const retained={metadata:snapshot(started).metadata,
+    history:words([1n,PROGRAM,16785n,44100n,0n,0n,0n,5000n,0n,1n,0n,0n,0n,0n,1n]),event:started};
+  let renderId=0;
+  async function observe(contextTime,performanceTime,observedNowMs) {
+    await h.send({kind:"play-render",playId:7,renderId:++renderId,
+      timestamp:{contextTime,performanceTime},observedNowMs});
+    assert.equal(h.audio.pending?.kind,"retained-poll");
+    await ackAudio(h,{report:renderReport({start:16785n,cursor:16914n}),retained});
+  }
+  await observe(0.375309,1530.9200000017881,1532.12);
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="retained-presentation"),
+    [["retained-presentation",-5303245n,1530920000n]]);
+  assert.equal(owner.calls.filter(row=>row[0]==="output").at(-1)[2],null,"negative actual clock is not playable output");
+  assert.equal(h.of("play-render-done").at(-1).retainedCapability,null);
+  await h.send({kind:"play-step",playId:7,tickId:1,events:[{hostNs:1531000000n,key:2,down:true,sequence:17n}],
+    watermark:1531000000n,nowNs:1533000000n,audioNs:0n});
+  await observe(0.375309,1531.9200000017881,1533.12); // Repeated output cannot refresh history.
+  await observe(0.375308,1532.9200000017881,1534.12); // Regressing negative estimate.
+  await observe(0.382072,1537.6850000023842,1540.08);
+  await observe(0.382072,1538.6850000023842,1541.08);
+  await observe(0.381,1539.6850000023842,1542.08);
+  await observe(0.383,1537,1542.08); // Source advances while original HOST regresses.
+  await observe(0,1542,1543); // Actual zero sentinel is still unavailable.
+  await observe(0.384,500,1543); // Stale actual association.
+  await observe(0.384,1545,1544); // Future estimate is not actual presentation yet.
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="retained-presentation"),[
+    ["retained-presentation",-5303245n,1530920000n],["retained-presentation",1459755n,1537685000n]]);
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="output").map(row=>row[2]),
+    [null,null,null,1459755n,null,null,null,null,null,null]);
+  assert.deepEqual(owner.calls.filter(row=>row[0]==="input"),[["input",1531000000n,2,true,17n,1533000000n]]);
+  assert.equal(owner.processedInput.length,0,"the wire fixture does not manufacture an acquired-prefix proof");
+  assert.equal(owner.retained_capability_words().length,0);
+  assert.ok(h.of("play-render-done").every(row=>row.retainedCapability===null));
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"),false);
+  assert.equal(h.of("play-retired-recordings").length,0);
+  assert.equal(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length,registrations);
+  assert.equal(owner.score,score);assert.deepEqual(owner.score,scoreBytes);
+  assert.deepEqual(owner.retainedHeld,started);assert.equal(h.of("play-error").length,0);
+  await stop(h);assert.equal(owner.replayTakes,1);
+  const final=h.of("play-stopped").at(-1);assert.ok(final?.replay instanceof File);assert.equal(final.replayComplete,false);
+});
+
+for(const [name,timestamp,now] of [
+  ["NaN context",{contextTime:NaN,performanceTime:1530.92},1532.12],
+  ["context overflow",{contextTime:9223372037,performanceTime:1530.92},1532.12],
+  ["HOST overflow",{contextTime:0.375309,performanceTime:9223372036855},9223372036855],
+]) test(`retained raw ${name} refuses before forwarding an invented clock or Started ACK`,async()=>{
+  const h=await catalog();const owner=await begin(h,{rate:44100});
+  await attach(h,{startFrame:16785n,hostNs:1502429999n,started:false});
+  await h.send({kind:"play-render",playId:7,renderId:1,timestamp,observedNowMs:now});
+  assert.ok(h.of("play-error").at(-1));assert.equal(owner.calls.some(row=>row[0]==="retained-presentation"),false);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"),false);assert.equal(owner.frees,1);
+});
+
+test("signed retained opt-in does not permit a caller-supplied negative projected presentation",async()=>{
+  const h=await catalog();const owner=await begin(h,{rate:44100});
+  await attach(h,{startFrame:16785n,hostNs:1502429999n,started:false});
+  await h.send({kind:"play-render",playId:7,renderId:1,presentedNs:-5303245n,presentedHostNs:1530920000n});
+  assert.match(h.of("play-error").at(-1)?.message??"",/presentation pair/i);
+  assert.equal(owner.calls.some(row=>row[0]==="retained-presentation"),false);assert.equal(owner.frees,1);
+});
+
+test("ordinary Worker keeps genuine pre-arm output unavailable with the unchanged nonnegative public helper",async()=>{
+  const h=await catalog();const owner=await begin(h,{rate:44100,retained:false});
+  await attach(h,{startFrame:16785n,hostNs:1502429999n,started:false});
+  await h.send({kind:"play-render",playId:7,renderId:1,
+    timestamp:{contextTime:0.375309,performanceTime:1530.9200000017881},observedNowMs:1532.12});
+  assert.equal(h.audio.pending?.kind,"poll");
+  await ackAudio(h,{report:renderReport({start:16785n,cursor:16914n})});
+  assert.equal(owner.calls.some(row=>row[0]==="presentation"||row[0]==="retained-presentation"),false);
+  assert.equal(owner.calls.filter(row=>row[0]==="output").at(-1)[2],null);
+  assert.equal(Object.hasOwn(h.of("play-render-done").at(-1),"retainedCapability"),false);
+  assert.equal(h.of("play-error").length,0);await stop(h);
 });
 
 test("cold retained None stays unavailable through preparation and uncommitted Started, then publishes only the serviced capability",async()=>{

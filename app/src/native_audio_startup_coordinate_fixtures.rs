@@ -53,6 +53,9 @@ fn descriptors() -> [AudioAuthorityCoordinateBasis; 3] {
 }
 fn coordinate(b: AudioAuthorityCoordinateBasis, n: u64) -> NativeOutputCoordinate {
     match b {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceCounter { frequency, .. } => {
             NativeOutputCoordinate::Counter {
                 position: n,
@@ -69,6 +72,9 @@ fn admit(
     at: i64,
 ) -> NativeGameplayResult<()> {
     match b {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(basis) => {
             p.admit_coordinate(CoordinateNativeAudioSnapshot::new(
                 NativeAudioSnapshot {

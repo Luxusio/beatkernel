@@ -459,6 +459,9 @@ pub(crate) fn validate_audio_coordinate_start(
             // validate_coordinate_seed retains the exact target creation basis.
             // Its device rate is independent of the source history's rate.
         }
+        crate::audio_authority::AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            return Err("native gameplay requires original native coordinate units".into());
+        }
     }
     let (preroll, rate) = match speed {
         Some(speed) => (speed.preroll(), speed.speed().rate()),

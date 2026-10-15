@@ -168,6 +168,7 @@ impl NativeEnd {
             AudioAuthorityCoordinateBasis::TargetFrame(b) => {
                 self.target_basis == Some((epoch, b)) && b.origin() == self.origin
             }
+            AudioAuthorityCoordinateBasis::SourceTimestamp(_) => false,
         };
         if !valid {
             return Err(EndError(

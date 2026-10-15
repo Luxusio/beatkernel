@@ -30,6 +30,9 @@ fn source(frequency: u64) -> AudioAuthorityCoordinateBasis {
 }
 fn coordinate(basis: AudioAuthorityCoordinateBasis, units: u64) -> NativeOutputCoordinate {
     match basis {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceCounter { frequency, .. } => {
             NativeOutputCoordinate::Counter {
                 position: units,
@@ -92,6 +95,9 @@ fn assert_output(owner: &AudioAuthority, original: i64, now: i64, raw: i64, logi
     assert_eq!(token.raw_output(), point(2, raw));
     assert_eq!(token.output(), point(3, logical));
     let origin = match owner.coordinate_basis().unwrap() {
+        AudioAuthorityCoordinateBasis::SourceTimestamp(_) => {
+            panic!("SourceTimestamp is not a native coordinate in this fixture")
+        }
         AudioAuthorityCoordinateBasis::SourceFrame(basis)
         | AudioAuthorityCoordinateBasis::SourceCounter { basis, .. } => basis.origin(),
         AudioAuthorityCoordinateBasis::TargetFrame(basis) => basis.origin(),

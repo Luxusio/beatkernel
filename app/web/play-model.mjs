@@ -276,8 +276,8 @@ export function presentationPoint(timestamp, start, rate, nowMs, maxAgeMs = 1000
 }
 // Keep the original host coordinate paired with the reported device position.
 // Neither coordinate is acquired or advanced by this numeric boundary.
-export function presentationPair(timestamp, start, rate, nowMs, maxAgeMs = 1000) {
-  if (!timestamp || ![timestamp.contextTime, timestamp.performanceTime, nowMs, maxAgeMs]
+export function presentationPair(timestamp, start, rate, nowMs, maxAgeMs = 1000, retained = false) {
+  if (typeof retained !== "boolean" || !timestamp || ![timestamp.contextTime, timestamp.performanceTime, nowMs, maxAgeMs]
     .every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
     throw new Error("Invalid audio presentation observation.");
   }
@@ -288,14 +288,15 @@ export function presentationPair(timestamp, start, rate, nowMs, maxAgeMs = 1000)
   const contextNs = secondsToNanos(timestamp.contextTime);
   const startNs = (start * 1000000000n + BigInt(rate) - 1n) / BigInt(rate);
   const relative = contextNs - startNs;
-  return relative < 0n ? null : { outputNs: relative, hostNs: millisecondsToNanos(timestamp.performanceTime) };
+  return relative < 0n && !retained ? null : { outputNs: relative, hostNs: millisecondsToNanos(timestamp.performanceTime) };
 }
 // Estimated associations are not proof of a physical clock reset. Retain the
 // accepted history when an estimate regresses; repeated output grants no progress.
-export function presentationAvailability(previous, pair) {
+export function presentationAvailability(previous, pair, retained = false) {
+  if (typeof retained !== "boolean") throw new Error("Invalid retained presentation mode.");
   for (const value of [previous, pair]) {
     if (value !== null && (!value || typeof value.outputNs !== "bigint" || typeof value.hostNs !== "bigint"
-      || value.outputNs < 0n || value.outputNs > I64_MAX || value.hostNs < 0n || value.hostNs > I64_MAX)) {
+      || value.outputNs < (retained ? I64_MIN : 0n) || value.outputNs > I64_MAX || value.hostNs < 0n || value.hostNs > I64_MAX)) {
       throw new Error("Invalid presentation association.");
     }
   }
