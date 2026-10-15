@@ -65,6 +65,16 @@ pub(super) struct AsioSetup {
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioSetup {
+    pub(super) fn fail(mut self, primary: Box<dyn Error>) -> Box<dyn Error> {
+        let cleanup = self
+            .control
+            .take()
+            .expect("ASIO setup control")
+            .close()
+            .map_err(|error| Box::new(error) as Box<dyn Error>);
+        self.release_unproved |= cleanup.is_err();
+        super::retain_asio_setup_probe_failure(primary, cleanup, self)
+    }
     pub(super) fn take_control(&mut self) -> AsioControl {
         self.release_unproved = true;
         self.control
@@ -89,7 +99,15 @@ impl AsioSetup {
 impl Drop for AsioSetup {
     fn drop(&mut self) {
         if let Some(control) = self.control.take() {
-            self.release_unproved |= control.close().is_err();
+            if let Err(error) = control.close() {
+                self.release_unproved = true;
+                // Abandoned setup has no Result channel. Preserve the native
+                // operation/domain/code in its control-thread diagnostic.
+                let _ = std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!("ASIO abandoned setup cleanup failed: {error:?}\n"),
+                );
+            }
         }
         if self.release_unproved {
             if let Some(window) = self.window.take() {
@@ -149,23 +167,35 @@ impl Setup {
                 window: Some(window),
                 release_unproved: false,
             };
-            let control = guard.control.as_mut().expect("ASIO setup control");
-            let rate = control.sample_rate()?;
-            if !rate.is_finite() || rate <= 0.0 || rate.fract() != 0.0 || rate > f64::from(u32::MAX)
-            {
-                return Err("ASIO rate must be integral positive u32".into());
-            }
-            let channels = options
-                .output_channels
-                .as_ref()
-                .ok_or("ASIO output channels required")?;
-            for channel in channels {
-                println!(
-                    "ASIO selected channel={:?}",
-                    control.channel_info(*channel, false)?
-                );
-            }
-            let format = AudioFormat::new(rate as u32, u16::try_from(channels.len())?)?;
+            let probed = (|| -> Result<AudioFormat> {
+                let control = guard.control.as_mut().expect("ASIO setup control");
+                let rate = control.sample_rate()?;
+                if !rate.is_finite()
+                    || rate <= 0.0
+                    || rate.fract() != 0.0
+                    || rate > f64::from(u32::MAX)
+                {
+                    return Err("ASIO rate must be integral positive u32".into());
+                }
+                let channels = options
+                    .output_channels
+                    .as_ref()
+                    .ok_or("ASIO output channels required")?;
+                for channel in channels {
+                    println!(
+                        "ASIO selected channel={:?}",
+                        control.channel_info(*channel, false)?
+                    );
+                }
+                Ok(AudioFormat::new(
+                    rate as u32,
+                    u16::try_from(channels.len())?,
+                )?)
+            })();
+            let format = match probed {
+                Ok(format) => format,
+                Err(error) => return Err(guard.fail(error)),
+            };
             println!(
                 "ASIO selected registration={driver:?}; actual format={format:?}; timer/latency bounds are supplied estimates, not native accuracy proof"
             );
@@ -231,34 +261,41 @@ impl Setup {
             }
             #[cfg(feature = "asio-sdk")]
             Self::Asio { mut guard, format } => {
-                let control = guard.control.as_mut().expect("ASIO setup control");
-                let registration = control.registration().clone();
-                let request = match options.buffer {
-                    BufferRequest::DeviceDefault => AsioBufferRequest::DriverPreferred,
-                    BufferRequest::Frames(n) => AsioBufferRequest::Frames(n),
-                    _ => return Err("ASIO buffer must be preferred or exact frames".into()),
-                };
-                let constraints = control.buffer_constraints()?;
-                let resolved = constraints.resolve(request)?;
-                if resolved as usize > AudioLimits::MAX_RENDER_FRAMES {
-                    return Err("ASIO preferred buffer exceeds core render ceiling".into());
-                }
-                println!(
+                let probed = (|| -> Result<AsioLiveConfig> {
+                    let control = guard.control.as_mut().expect("ASIO setup control");
+                    let registration = control.registration().clone();
+                    let request = match options.buffer {
+                        BufferRequest::DeviceDefault => AsioBufferRequest::DriverPreferred,
+                        BufferRequest::Frames(n) => AsioBufferRequest::Frames(n),
+                        _ => return Err("ASIO buffer must be preferred or exact frames".into()),
+                    };
+                    let constraints = control.buffer_constraints()?;
+                    let resolved = constraints.resolve(request)?;
+                    if resolved as usize > AudioLimits::MAX_RENDER_FRAMES {
+                        return Err("ASIO preferred buffer exceeds core render ceiling".into());
+                    }
+                    println!(
                     "ASIO requested={request:?}; reported={constraints:?}; resolved={resolved} frames"
                 );
-                let live = AsioLiveConfig {
-                    registration,
-                    channels: options
-                        .output_channels
-                        .clone()
-                        .ok_or("ASIO channels missing")?,
-                    buffer: request,
-                    sample_rate: format.sample_rate(),
-                    timer_error: options.asio_timer_error,
-                    drift_error: options.asio_drift_error,
-                    latency_error: options.asio_latency_error,
-                    age: options.asio_anchor_age,
+                    Ok(AsioLiveConfig {
+                        registration,
+                        channels: options
+                            .output_channels
+                            .clone()
+                            .ok_or("ASIO channels missing")?,
+                        buffer: request,
+                        sample_rate: format.sample_rate(),
+                        timer_error: options.asio_timer_error,
+                        drift_error: options.asio_drift_error,
+                        latency_error: options.asio_latency_error,
+                        age: options.asio_anchor_age,
+                    })
+                })();
+                let live = match probed {
+                    Ok(live) => live,
+                    Err(error) => return Err(guard.fail(error)),
                 };
+                let request = live.buffer;
                 let control = guard.take_control();
                 let mut stream = if retained_history {
                     AsioStream::prepare_with_clock_and_source_history(

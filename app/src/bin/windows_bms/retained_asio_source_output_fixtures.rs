@@ -743,6 +743,218 @@ fn retained_asio_typed_start_cleanup_and_destination_failures_attempt_every_memb
     }
 }
 
+// The actual cold error mapper retains typed probe/close failures. This guard is
+// only a destruction counter; it cannot stand in for a native handle or window.
+mod setup_probe_failure {
+    use super::super::{retain_asio_setup_probe_failure, NativeOutputError};
+    use beatkernel::audio::OutputOpenFailure;
+    use std::{cell::Cell, error::Error, fmt, io, rc::Rc};
+
+    struct DropGuard {
+        drops: Rc<Cell<usize>>,
+        label: &'static str,
+    }
+    impl Drop for DropGuard {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+    #[derive(Debug)]
+    struct ProbeFailure {
+        operation: &'static str,
+        code: i32,
+        cause: io::Error,
+    }
+    impl fmt::Display for ProbeFailure {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{} refused with code {}", self.operation, self.code)
+        }
+    }
+    impl Error for ProbeFailure {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.cause)
+        }
+    }
+    type Failure = OutputOpenFailure<NativeOutputError, DropGuard, ()>;
+
+    #[test]
+    fn retained_asio_probe_and_close_failures_keep_both_typed_boxes_and_pending_guard() {
+        let primary = Box::new(ProbeFailure {
+            operation: "sample-rate probe",
+            code: -998,
+            cause: io::Error::from_raw_os_error(5),
+        });
+        let primary_pointer = primary.as_ref() as *const ProbeFailure;
+        let cleanup = Box::new(io::Error::from_raw_os_error(16));
+        let cleanup_pointer = cleanup.as_ref() as *const io::Error;
+        let drops = Rc::new(Cell::new(0));
+        let guard = DropGuard {
+            drops: Rc::clone(&drops),
+            label: "initial probe owner",
+        };
+        let error = retain_asio_setup_probe_failure(primary, Err(cleanup), guard);
+        let failure = error
+            .downcast_ref::<Failure>()
+            .expect("failed close must keep the existing pending-owner carrier");
+        assert!(failure.mixer().is_none());
+        assert_eq!(
+            failure.pending_owner().unwrap().label,
+            "initial probe owner"
+        );
+        assert_eq!(drops.get(), 0, "the error still owns its pending guard");
+        let retained_primary = failure.error().0.downcast_ref::<ProbeFailure>().unwrap();
+        assert_eq!(retained_primary as *const _, primary_pointer);
+        assert_eq!(retained_primary.operation, "sample-rate probe");
+        assert_eq!(retained_primary.code, -998);
+        let retained_cleanup = failure
+            .cleanup_error()
+            .unwrap()
+            .0
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(retained_cleanup as *const _, cleanup_pointer);
+        assert_eq!(retained_cleanup.raw_os_error(), Some(16));
+        assert_eq!(
+            error.to_string(),
+            "sample-rate probe refused with code -998"
+        );
+        let wrapper = error
+            .source()
+            .unwrap()
+            .downcast_ref::<NativeOutputError>()
+            .unwrap();
+        let source = wrapper
+            .source()
+            .unwrap()
+            .downcast_ref::<ProbeFailure>()
+            .unwrap();
+        assert_eq!(source as *const _, primary_pointer);
+        assert_eq!(
+            source
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert_eq!(
+            failure
+                .cleanup_error()
+                .unwrap()
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap() as *const _,
+            cleanup_pointer
+        );
+        drop(error);
+        assert_eq!(drops.get(), 1);
+        assert_eq!(Rc::strong_count(&drops), 1);
+    }
+
+    #[test]
+    fn retained_asio_probe_io_and_typed_cleanup_survive_carrier_extraction_without_guard_drop() {
+        let primary = Box::new(io::Error::from_raw_os_error(22));
+        let primary_pointer = primary.as_ref() as *const io::Error;
+        let cleanup = Box::new(ProbeFailure {
+            operation: "control release",
+            code: -999,
+            cause: io::Error::from_raw_os_error(16),
+        });
+        let cleanup_pointer = cleanup.as_ref() as *const ProbeFailure;
+        let drops = Rc::new(Cell::new(0));
+        let error = retain_asio_setup_probe_failure(
+            primary,
+            Err(cleanup),
+            DropGuard {
+                drops: Rc::clone(&drops),
+                label: "channel-count probe owner",
+            },
+        );
+        let failure = error.downcast::<Failure>().expect("typed pending failure");
+        let (primary, recovered, pending, cleanup) = failure.into_parts();
+        assert!(recovered.is_none());
+        let primary_io = primary.0.downcast_ref::<io::Error>().unwrap();
+        assert_eq!(primary_io as *const _, primary_pointer);
+        assert_eq!(primary_io.raw_os_error(), Some(22));
+        let cleanup = cleanup.unwrap();
+        let retained_cleanup = cleanup.0.downcast_ref::<ProbeFailure>().unwrap();
+        assert_eq!(retained_cleanup as *const _, cleanup_pointer);
+        assert_eq!(retained_cleanup.code, -999);
+        assert_eq!(
+            cleanup.to_string(),
+            "control release refused with code -999"
+        );
+        assert_eq!(
+            retained_cleanup
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(16)
+        );
+        assert_eq!(pending.as_ref().unwrap().label, "channel-count probe owner");
+        drop(primary);
+        drop(cleanup);
+        assert_eq!(
+            drops.get(),
+            0,
+            "moving and dropping diagnostics does not drop the guard"
+        );
+        drop(pending);
+        assert_eq!(drops.get(), 1);
+        assert_eq!(Rc::strong_count(&drops), 1);
+    }
+
+    #[test]
+    fn retained_asio_probe_close_success_returns_exact_original_box_and_drops_guard_once() {
+        let primary = Box::new(ProbeFailure {
+            operation: "initial output channels",
+            code: -997,
+            cause: io::Error::from_raw_os_error(5),
+        });
+        let primary_pointer = primary.as_ref() as *const ProbeFailure;
+        let drops = Rc::new(Cell::new(0));
+        let error = retain_asio_setup_probe_failure(
+            primary,
+            Ok(()),
+            DropGuard {
+                drops: Rc::clone(&drops),
+                label: "successfully closed probe owner",
+            },
+        );
+        let retained = error
+            .downcast_ref::<ProbeFailure>()
+            .expect("successful close must return the original error without another carrier");
+        assert_eq!(retained as *const _, primary_pointer);
+        assert!(!error.is::<Failure>());
+        assert!(!error.is::<NativeOutputError>());
+        assert_eq!(
+            error.to_string(),
+            "initial output channels refused with code -997"
+        );
+        assert_eq!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert_eq!(
+            drops.get(),
+            1,
+            "successful close releases its guard immediately"
+        );
+        drop(error);
+        assert_eq!(drops.get(), 1);
+        assert_eq!(Rc::strong_count(&drops), 1);
+    }
+}
+
 // Separate Windows typing tier: no stream, HWND, native ticket or authority token is constructed.
 #[cfg(all(target_os = "windows", feature = "asio-sdk"))]
 #[test]

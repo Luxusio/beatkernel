@@ -15,6 +15,44 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+struct NativeOutputError(Box<dyn Error>);
+#[cfg(any(target_os = "windows", test))]
+impl std::fmt::Display for NativeOutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+#[cfg(any(target_os = "windows", test))]
+impl Error for NativeOutputError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+/// Preserve the original probe error and the actual cleanup diagnostic separately.
+/// The native caller supplies the real guard after its one explicit close attempt.
+#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+fn retain_asio_setup_probe_failure<G: 'static>(
+    primary: Box<dyn Error>,
+    cleanup: Result<()>,
+    guard: G,
+) -> Box<dyn Error> {
+    match cleanup {
+        Ok(()) => {
+            drop(guard);
+            primary
+        }
+        Err(cleanup) => Box::new(
+            beatkernel::audio::OutputOpenFailure::<NativeOutputError, G, ()>::pending_state(
+                NativeOutputError(primary),
+                guard,
+            )
+            .with_cleanup_error(NativeOutputError(cleanup)),
+        ),
+    }
+}
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Backend {

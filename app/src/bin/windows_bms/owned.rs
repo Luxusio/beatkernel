@@ -33,18 +33,6 @@ use beatkernel_platform::{
     },
 };
 
-#[derive(Debug)]
-pub(super) struct NativeOutputError(Box<dyn Error>);
-impl std::fmt::Display for NativeOutputError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl Error for NativeOutputError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.0.as_ref())
-    }
-}
 pub(super) struct OwnedOutput {
     pub(super) native: Output,
     epoch: u64,
@@ -846,9 +834,19 @@ pub(super) fn complete_asio_owner(
     clock: QpcClock,
 ) -> Result<WindowsOutputOwner> {
     let source = mixer.configuration().format();
-    let live =
-        super::live_output::AsioLiveConfig::from_options(guard.registration(), options, format)?;
-    let anchor = live.anchor(clock)?;
+    let probed = (|| -> Result<_> {
+        let live = super::live_output::AsioLiveConfig::from_options(
+            guard.registration(),
+            options,
+            format,
+        )?;
+        let anchor = live.anchor(clock)?;
+        Ok((live, anchor))
+    })();
+    let (live, anchor) = match probed {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(guard.fail(error)),
+    };
     let latency = live.clock_bounds().latency;
     let backend = RemixedOutputBackend::new(WindowsAsioCompleteBackend {
         clock,
