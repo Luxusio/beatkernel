@@ -1,6 +1,6 @@
 # BMS 플레이어 전체 작업 분해 구조(WBS)
 
-기준일: 2026-10-15. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
+기준일: 2026-10-16. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
 사용자가 요청한 전체 TODO/진행률의 기준 문서다. 현재 병렬 개발 묶음만으로
 전체 목표를 대체하지 않는다. [원래 명세](../../plan.md),
 [플레이어 요구사항](REQ__bms-player.md),
@@ -1218,7 +1218,7 @@ Native collector termination 절에 있다.
   - [ ] **BK-WBS-13.05.04** 표준 sample-rate와 dense 실제 player의 seek/pause/rebind 반복 resource stress를 실행한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=현재 production launcher/owner에서44100/48000Hz·대형 chart·solo/local/online의 반복 seek/rebind를 고정하고 CPU/RSS·queue depth·retired owner·terminal drain을 기록한다.1000Hz sparse 또는64lanes 결과로 대신하지 않는다.
   - [ ] **BK-WBS-13.05.05** 실제 장시간 native/browser wall-clock soak와 owner/queue/memory 누수를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=지원 OS/browser·실제 clock/output/input·GPU/network를 고정해 장시간 실행하고 시작/steady/종료 CPU/RSS·queue/owner 수·xrun·cleanup raw data를 보존한다. 가상20h/week 순회를 실제 elapsed soak로 부르지 않는다.
 - [ ] **BK-WBS-13.06** 전체 RT callback과 판정 hot path alloc/lock/I/O/error 경로를 계측한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=일반/오류/포화·모든 backend; scoped 테스트만 확대하지 않음.
-  - [ ] **BK-WBS-13.06.01** 일반·거절·포화 judge/Runtime hot path의 allocation·lock·IO 경계를 계측한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=TASK__runtime-input-allocation-budget의 app/tests/runtime_input_allocations.rs에서 총66개 측정 row(교정9/실제 공개 API57)의 calibrated4-hook count/bytes와 고정상한을 구현했다. debug/release 기준선13/0, 최종 root Verify14/0·각66상한 PASS; cold/reused·0/4096 completed-prefix·solo/cohort1/2/4/64·first/last/unassigned·queue failure/poison·HID/External/mapper 양성대조를 포함한다. [실제 근거·실패 원본·한계](../changes/2026-10-16-runtime-input-allocations.md)를 따르며 정식 DEEP code와 독립 qa-cli debug/release14/0·각66상한 PASS, 한 번 owning verify는 자동 완료 기록 부재로 PENDING이며 close는 미완료다. Linux x86_64 경험적 요청량을 source 감사와 구분하고 System/caller callback/Native clock·runtime lock/IO tracing·다른 thread·각 OS/물리 callback 의무가 남아 W를 유지한다.
+  - [ ] **BK-WBS-13.06.01** 일반·거절·포화 judge/Runtime hot path의 allocation·lock·IO 경계를 계측한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=TASK__runtime-input-allocation-budget의 app/tests/runtime_input_allocations.rs에서 총66개 측정 row(교정9/실제 공개 API57)의 calibrated4-hook count/bytes와 고정상한을 구현했다. debug/release 기준선13/0, 최종 root Verify14/0·각66상한 PASS; cold/reused·0/4096 completed-prefix·solo/cohort1/2/4/64·first/last/unassigned·queue failure/poison·HID/External/mapper 양성대조를 포함한다. [실제 근거·실패 원본·한계](../changes/2026-10-16-runtime-input-allocations.md)를 따르며 정식 DEEP code와 독립 qa-cli debug/release14/0·각66상한 PASS, 한 번 owning verify는 자동 완료 기록 부재로 PENDING이며 close는 미완료다. Linux x86_64 경험적 요청량을 source 감사와 구분하고 System/caller callback/Native clock·runtime lock/IO tracing·다른 thread·각 OS/물리 callback 의무가 남아 W를 유지한다. 후속 TASK__judge-refresh-empty-route는 빈 추가 route 임시 할당을 제거하고 core837/0·새 release4/0·app local_runtime36/0·core WASM typing0을 실제 root Verify했다. 동일66사례 debug/release14/0에서31개 감소·35개 동일,30개는 alloc/dealloc 각각1회·4B 및 fanout은2회·8B 감소했다. 관측된31개 상한을 좁힌 최종 양 profile14/0·각66상한도 PASS다. [새 실행 기록](../changes/2026-10-16-judge-empty-route-allocation.md)의 산출물·요청량 한계를 유지하며 정식 review→QA와 넓은 효과 관측은 아직 남는다.
   - [ ] **BK-WBS-13.06.02** core Mixer의 render·pause/end·invalid/saturated/disconnected 경로 allocation을 확인한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=`cargo test -p beatkernel --locked --test audio_rt_alloc`; 범위=실제 alloc/realloc/dealloc calibration과 render 경계 밖 assertion을 확인한다. 이 검사는 OS callback의 lock/IO·native 제출/음향까지 증명하지 않는다.
   - [ ] **BK-WBS-13.06.03** WASAPI retained Source worker와 실제 Source/Target publication의 bounded allocation 경계를 확인한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=E65/E70의 software scope와 crates/beatkernel-platform/tests/wasapi_source_worker_allocations.rs 및 app/tests/coordinate_{source,target}_replacement_allocations.rs를 current source로 재실행한다. original nonempty merger와 error/cold/refusal 경계를 포함한다.
   - [ ] **BK-WBS-13.06.04** ALSA·CoreAudio·ASIO와 converted Target의 실제 전체 callback 경계를 계측한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=현재 각 backend owner·변환·채널/geometry·최대 callback·실패/포화의 실제 계측 유무와 누락을 먼저 audit한다. CoreAudio retained Source는 진행 중이며 portable callback 실행/foreign typing은 실제 native callback 전체 검증이 아니다. 검증된 source/meter와 미구현 측정 지점을 구분해 갱신한다.
@@ -1386,6 +1386,13 @@ Native collector termination 절에 있다.
 
 ## 현재 진행 작업과 연결
 
+현재 active task는 `TASK__judge-refresh-empty-route`다. 기본 interaction의
+빈 추가 route 임시 할당을 제거했고 실제 core837/0·새 release4/0·app local_runtime36/0·
+core WASM typing0을 확인했다. 같은66사례 양 profile에서31개 감소·35개 동일이며,
+감소한31개 상한 적용 후에도 각각14/0·66상한 PASS다. 독립 review→QA는 아직 남았다.
+새 native675d5cbd…와 미갱신 browser4개의 한계를 [실행 기록](../changes/2026-10-16-judge-empty-route-allocation.md)에 적었다.
+전체136/489·오디오12/27 및13.06.01W를 유지한다.
+
 현재 배속 전환 `TASK__retained-runtime-rate-switch`의 `BK-WBS-05.13.06`은 V다.
 AC040·041·042 수정을 커밋하고 새 독립 리뷰, required browser14/14·15/15,
 전체 Node1703/0 및 실제 fault 후 download/Save/Load·상대 보존을 확인했다.
@@ -1397,7 +1404,7 @@ root와 독립 qa-cli가 각각 debug/release14/0·각66상한 PASS이며 정식
 한 번 owning verify는 자동 완료 기록 부재로 PENDING이라 태스크 종료는 미완료다.
 상세 수치와 관측되지 않은 lock/IO·물리 경계는
 [실행 기록](../changes/2026-10-16-runtime-input-allocations.md)에 구분한다.
-다음 `TASK__judge-refresh-empty-route`는 기본 노트의 임시 route 할당 제거를 위한 별도 대기 작업이며 아직 감소 수치를 주장하지 않는다.
+당시 다음으로 지정한 `TASK__judge-refresh-empty-route`의 현재 구현·실측과 남은 gate는 위 절을 따른다.
 
 아래 표는 이전 `TASK__retained-source-coreaudio-output`의 연결 기록이다. 원래
 `BK-WBS-07.08.07.15`의 범위를12개 실행 단위로 추적한다. 구현된 portable
@@ -1471,6 +1478,11 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-16 Judge empty-route: 실제 동일66사례 양 profile에서31개 요청량 감소·35개
+  동일을 확인하고 관측된31개 고정 상한을 좁혔다. core837/0·새 release4/0·
+  app local_runtime36/0·최종 meter 각각14/0·66상한과 core WASM typing0이다.
+  정식 review/QA·넓은 lock/IO/물리 의무가 남아13.06.01W와136/489·오디오12/27을 유지한다.
 
 - 2026-10-15 CoreAudio E75: callback/native ownership/backend/UI/solo/local 소프트웨어
   연결과 future 관측·history 승인 경합 수정을 마쳤다. frozen2a7313c6의 독립 정식

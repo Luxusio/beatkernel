@@ -7,6 +7,18 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+현재 진행 작업(2026-10-16): TASK__judge-refresh-empty-route에서 빈 additional의
+임시 route Vec를 제거하고 nonempty 알고리즘·callback·deadline을 보존했다.
+독립 작성한 core 회귀4개를 포함한 전체 core837/0, 새 release4/0,
+app local_runtime36/0와 core WASM typing0을 실제 root Verify했다.
+기존66사례를 바꾸지 않은 debug/release14/0 실측에서31개는 감소·35개는 동일했다.
+30개는 alloc/dealloc 각각1회·4B, fanout1개는 각각2회·8B 감소했고 증가한 필드는 없다.
+그 뒤31개 정적 상한만 좁힌 최종 양 profile도14/0·66상한 PASS다.
+새 native675d5cbd…는 과거6f/c43와 다르며 browser4개는 미갱신이라
+현재 GUI/browser 성능 PASS로 확대하지 않는다. 독립 정식 review→QA는 아직 남았다.
+13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
+[실측·행동 회귀·산출물 한계](../changes/2026-10-16-judge-empty-route-allocation.md)를 따른다.
+
 입력 계측 checkpoint(2026-10-16): TASK__runtime-input-allocation-budget에서13.06.01의
 실제 Judge/Runtime/Solo/Group 입력 계측과 고정 case별 상한을 구현했다.
 교정 기준선 debug/release 각각13/0, 상한 삽입 후 최종 root Verify 각각14/0이다.
@@ -18,13 +30,17 @@ Linux x86_64 경험적 상한이며 다른 target은 의미 검사를 유지하�
 아래 c43 GUI 증거는 해당 과거 바이너리에만 한정한다. 현재 native GUI PASS를 주지 않는다.
 독립 정식 DEEP code와 qa-cli(debug/release14/0·각66상한)가 추가 PASS했다.
 한 번 owning verify는 자동 완료 기록 부재로 PENDING이며 태스크 종료는 미완료다.
-다음 별도 대기 작업은 기본 노트의 임시 route 할당을 제거하는 TASK__judge-refresh-empty-route다.
+당시 다음으로 지정한 TASK__judge-refresh-empty-route의 현재 상태는 위 절을 따른다.
 13.06.01은 lock/IO·물리 경계 의무가 남아
 W를 유지하고 전체136/489·오디오12/27은 변하지 않는다.
 [실행·실패 교정·효과 한계](../changes/2026-10-16-runtime-input-allocations.md)를 따른다.
 직전 배속 전환 child는 실제 장치 검증 BLOCKED_ENV로 보존했고 전체 Goal은 활성이다.
 
-현재 checkpoint(2026-10-16): AC042 오류 폭주 수정0cba6616의 관련152개와
+아래 배속 전환 checkpoint와 QA 기록은 각 당시 revision의 과거 증거다.
+그 절의 source·artifact 동일성은 현재 Judge 소스와 native675d5cbd… 검증으로
+이월하지 않는다. 현재 입력 최적화의 실행 범위와 산출물은 위 절이 우선한다.
+
+과거 checkpoint(2026-10-16): AC042 오류 폭주 수정0cba6616의 관련152개와
 새 독립 DEEP code/security/doc 리뷰가 PASS다. 새 required browser는 원본 strict
 runner1회로 필수14/14·전체15/15, console/page/network0·overflow0이다.
 실제 원본8953137a…/8528B, 정수 phase의 두 cut과6cohort File→Worklet→Rust

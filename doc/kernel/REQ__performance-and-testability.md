@@ -212,6 +212,8 @@ Bound queues and work, and make overflow, refusal and cancellation explicit.
 
 ## Actual input allocation observation
 
+For an interaction with no additional controls, Judge refresh shall borrow the local primary control without temporary route heap storage. Preserve primary-first unique routing and the existing nonempty Vec algorithm, callback behavior and inclusive/strict-successor deadline semantics. Validate the actual same-workload before/after request deltas in debug and release before narrowing static limits; a smaller request count is not a latency or whole-player ranking claim. Constructor canonicalization and test-owned state/snapshot observations remain outside focused callback logs, which are separate from allocation workloads.
+
 Measure the existing public JudgeEngine input, Runtime legacy/observed input,
 SoloRuntime and RuntimeGroup entry points with a calibrated per-thread System
 allocator wrapper. Count alloc, alloc_zeroed, realloc and dealloc separately,

@@ -571,14 +571,22 @@ impl JudgeEngine {
 
     fn refresh(&mut self, index: usize, consumed_deadline: Option<i128>) {
         let key = (self.chart.objects()[index].id, index);
-        let mut routes = vec![self.controls[index]];
-        for control in self.interactions[index].additional_controls() {
-            if !routes.contains(control) {
-                routes.push(*control);
+        let primary = self.controls[index];
+        let additional = self.interactions[index].additional_controls();
+        let mut owned_routes;
+        let routes = if additional.is_empty() {
+            std::slice::from_ref(&primary)
+        } else {
+            owned_routes = vec![primary];
+            for control in additional {
+                if !owned_routes.contains(control) {
+                    owned_routes.push(*control);
+                }
             }
-        }
+            &owned_routes
+        };
         if self.eligibility[index] == StartEligibility::EvaluatorDefined {
-            for control in &routes {
+            for control in routes {
                 if self.interactions[index].state() == InteractionState::Pending {
                     self.custom_pending.entry(*control).or_default().insert(key);
                 } else if let Some(indices) = self.custom_pending.get_mut(control) {
@@ -588,7 +596,7 @@ impl JudgeEngine {
         }
         if self.interactions[index].state() == InteractionState::Active {
             self.active.insert(key);
-            for control in &routes {
+            for control in routes {
                 self.active_controls
                     .entry(*control)
                     .or_default()
@@ -596,7 +604,7 @@ impl JudgeEngine {
             }
         } else {
             self.active.remove(&key);
-            for control in &routes {
+            for control in routes {
                 if let Some(indices) = self.active_controls.get_mut(control) {
                     indices.remove(&key);
                 }

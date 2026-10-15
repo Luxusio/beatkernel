@@ -166,13 +166,26 @@ fn measure<T>(operation: impl FnOnce() -> T) -> (T, Requests) {
     let result = operation();
     (result, guard.finish())
 }
-// Frozen on 2026-10-16 from the root's actual debug and release runs of
-// source SHA256 30b4854e19bd3ddcb3ae8d9a0f4331f8efccfea607cd425377cf12736c986093.
-// Both profiles: rustc 1.98.1 (48a229cea), LLVM22.1.8, Linux x86_64,
-// pointer8 / PhysicalInputEvent144 / JudgeEvent136 / RuntimeReport344 bytes.
+// Initially frozen on 2026-10-16 from the root's actual debug and release
+// runs of meter source SHA256
+// 30b4854e19bd3ddcb3ae8d9a0f4331f8efccfea607cd425377cf12736c986093.
 // Original logs: target/wf/runtime-input-alloc-ac002-14124/
 // baseline-{debug,release}-calibrated.log (ignored diagnostic artifacts).
-// Durable interpretation/build provenance: doc/changes/2026-10-16-runtime-input-allocations.md.
+// Historical provenance: doc/changes/2026-10-16-runtime-input-allocations.md.
+// After Judge's empty-route optimization, only the 31 measured lower-cost cases
+// were tightened from actual debug/release runs of the unchanged pre-budget
+// meter SHA256 33b57d357cf710fbaf60921886b16dd4083c442e49a2cc0410e13c26e9d858d6
+// and engine.rs SHA256
+// 1b70cc1f73423b97b226d231a4c55bb67fb3ed25900375e83a972b83784fdd15.
+// Post-route logs: target/wf/judge-refresh-ac002-14125/before-budgets/
+// meter-{debug,release}.log; full comparison: post-route-measurements.json.
+// Of those cases, 30 save one allocation/deallocation request and four bytes
+// each; runtime.observed.fanout saves two requests and eight bytes each.
+// The other 35 cases and all workloads are unchanged; zeroed/realloc fields,
+// realloc_old_bytes and overflow are unchanged in every case.
+// Current provenance: doc/changes/2026-10-16-judge-empty-route-allocation.md.
+// Both measurements: rustc 1.98.1 (48a229cea), LLVM22.1.8, Linux x86_64,
+// pointer8 / PhysicalInputEvent144 / JudgeEvent136 / RuntimeReport344 bytes.
 // Limits are empirical allocator request ceilings, not portable memory-layout
 // promises or CPU/lock/IO/physical-callback guarantees. No compiler-version or
 // current type-size escape hatch: future supported-host builds check these same
@@ -267,14 +280,14 @@ fn frozen_budget(name: &str) -> Option<Requests> {
         | "group.2.last" | "group.4.first" | "group.4.last" | "group.64.first"
         | "group.64.last" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2724,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2720,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
@@ -288,40 +301,40 @@ fn frozen_budget(name: &str) -> Option<Requests> {
         },
         "group.failure.disconnected" | "group.failure.full" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2756,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2752,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
         "judge.association.reused" | "judge.prefix.4096" => Requests {
             alloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
-            },
-            dealloc: Operation {
                 attempted: 4,
                 succeeded: 4,
-                requested_bytes: 348,
+                requested_bytes: 888,
+            },
+            dealloc: Operation {
+                attempted: 3,
+                succeeded: 3,
+                requested_bytes: 344,
             },
             ..Requests::default()
         },
         "judge.legacy.hit.fresh" | "judge.observed.hit.fresh" | "judge.prefix.0" => Requests {
             alloc: Operation {
-                attempted: 6,
-                succeeded: 6,
-                requested_bytes: 1008,
+                attempted: 5,
+                succeeded: 5,
+                requested_bytes: 1004,
             },
             dealloc: Operation {
-                attempted: 4,
-                succeeded: 4,
-                requested_bytes: 348,
+                attempted: 3,
+                succeeded: 3,
+                requested_bytes: 344,
             },
             ..Requests::default()
         },
@@ -335,14 +348,14 @@ fn frozen_budget(name: &str) -> Option<Requests> {
         },
         "runtime.association.reused" | "runtime.prefix.4096" => Requests {
             alloc: Operation {
-                attempted: 8,
-                succeeded: 8,
-                requested_bytes: 2300,
+                attempted: 7,
+                succeeded: 7,
+                requested_bytes: 2296,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
@@ -351,66 +364,66 @@ fn frozen_budget(name: &str) -> Option<Requests> {
         | "runtime.mapper.same-domain-control"
         | "runtime.observed.hit.fresh" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2628,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2624,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
         "runtime.audio.disconnected" | "runtime.audio.full" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2660,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2656,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
         "runtime.legacy.hit.fresh" => Requests {
             alloc: Operation {
-                attempted: 10,
-                succeeded: 10,
-                requested_bytes: 2372,
+                attempted: 9,
+                succeeded: 9,
+                requested_bytes: 2368,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
         "runtime.mapper.allocating" => Requests {
             alloc: Operation {
-                attempted: 13,
-                succeeded: 13,
-                requested_bytes: 2690,
+                attempted: 12,
+                succeeded: 12,
+                requested_bytes: 2686,
             },
             dealloc: Operation {
-                attempted: 7,
-                succeeded: 7,
-                requested_bytes: 954,
+                attempted: 6,
+                succeeded: 6,
+                requested_bytes: 950,
             },
             ..Requests::default()
         },
         "runtime.observed.fanout" => Requests {
             alloc: Operation {
-                attempted: 16,
-                succeeded: 16,
-                requested_bytes: 3520,
+                attempted: 14,
+                succeeded: 14,
+                requested_bytes: 3512,
             },
             dealloc: Operation {
-                attempted: 10,
-                succeeded: 10,
-                requested_bytes: 1784,
+                attempted: 8,
+                succeeded: 8,
+                requested_bytes: 1776,
             },
             ..Requests::default()
         },
@@ -432,40 +445,40 @@ fn frozen_budget(name: &str) -> Option<Requests> {
         },
         "runtime.prefix.0" => Requests {
             alloc: Operation {
-                attempted: 10,
-                succeeded: 10,
-                requested_bytes: 2500,
+                attempted: 9,
+                succeeded: 9,
+                requested_bytes: 2496,
             },
             dealloc: Operation {
-                attempted: 5,
-                succeeded: 5,
-                requested_bytes: 892,
+                attempted: 4,
+                succeeded: 4,
+                requested_bytes: 888,
             },
             ..Requests::default()
         },
         "solo.audio.admitted" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2724,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2720,
             },
             dealloc: Operation {
-                attempted: 6,
-                succeeded: 6,
-                requested_bytes: 1244,
+                attempted: 5,
+                succeeded: 5,
+                requested_bytes: 1240,
             },
             ..Requests::default()
         },
         "solo.audio.disconnected" | "solo.audio.full" => Requests {
             alloc: Operation {
-                attempted: 11,
-                succeeded: 11,
-                requested_bytes: 2756,
+                attempted: 10,
+                succeeded: 10,
+                requested_bytes: 2752,
             },
             dealloc: Operation {
-                attempted: 6,
-                succeeded: 6,
-                requested_bytes: 1244,
+                attempted: 5,
+                succeeded: 5,
+                requested_bytes: 1240,
             },
             ..Requests::default()
         },
