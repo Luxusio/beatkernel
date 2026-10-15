@@ -15,6 +15,14 @@ frozen actual epoch/basis/Source/HOST expectations and original upper-bound HOST
 coverage. Current stream failure/liveness checks precede any cached release;
 duplicates do not refresh age. Classify only the exact recovery-unavailable
 error for the existing Owner re-probe; preserve all other typed failures.
+An already-authorized retirement must not mask a cached native fault, failed
+telemetry or original cleanup error. Return those failures before the narrow
+healthy-authorization refusal, retaining the original cleanup allocation.
+Each successful or pending output freezes its actual multimedia anchor and
+latency uncertainty. Applying new timer, drift, age or latency bounds must affect
+the new output; backend defaults cannot override the applied request. Keep the
+existing request constructor defaults compatible and allow an explicit bounds
+override. Old accepted epoch evidence is never retimestamped by new settings.
 The concrete Windows output retains its actual hidden HWND through every
 success/pending/error/Drop path until native release is proved. Common business
 policy never owns raw handles or unsafe driver operations. Preserve typed
@@ -70,11 +78,10 @@ bounds. No assumption of universal driver timestamp reliability or acoustic
 accuracy. Port policy stays OS-independent; native clock/device calls remain in
 the gated adapter. No extra render callback allocation, lock or dynamic dispatch.
 
-Author independent portable real-Mixer report/interval admission/provenance tests
-and SDK-only error mapping with recovered real PCM/queues, without creating
-drivers, registry controls, QPC clocks or callback owners. SDK source/tests and
-actual stream getter remain uncompiled by four permitted Linux/WASM checks.
-Assertions/runtime/formal review/QA remain deferred; scoped Rustfmt and four
-sequential compile-only checks follow both paired writer terminal stops.
-Native play-loop/UI replacement composition, blocking-call isolation and
-platform/device acceptance remain pending. Full BMS player Goal stays active.
+Verify portable policy with real Mixer report/interval admission/provenance
+tests and gated native error mapping with recovered real PCM/queues. Tests must
+not invent drivers, registry controls, QPC clocks or callback owners. Linux
+execution, Windows Rust-only typing, authentic SDK build and physical driver
+acceptance are reported separately. Native play-loop/UI composition and final
+independent review/QA remain pending while this integration is in progress.
+Full BMS player Goal stays active.

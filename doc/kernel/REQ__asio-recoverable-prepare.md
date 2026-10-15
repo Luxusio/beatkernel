@@ -22,6 +22,12 @@ authorized from uncertain cleanup. See the
 [retained Source contract](../runtime/REQ__retained-source-output-replacement.md).
 This is an implementation requirement, not a completed native acceptance claim.
 
+The Windows setup guard covers both native open and subsequent rate/channel
+queries: an implicit control Drop on a query error cannot establish release.
+Transfer the actual control and Window together to successful stream ownership.
+Replacement request windows may coexist with the old output, so hidden window
+class identities must be distinct with checked exhaustion handling.
+
 AsioBlockRenderer exposes new_recoverable alongside compatible new. Invalid
 frame/channel/capacity/storage preparation returns MixerOpenFailure with the
 original renderer error and unchanged mixer. Native ASIO preparation stages
@@ -61,10 +67,11 @@ success remain unchanged. No real-time allocation/lock/dynamic dispatch or SDK/
 dependency/license changes. Priming recovery retains current software state;
 do not claim pre-prime cursor rollback or unheard-buffer delivery.
 
-Author independent portable renderer failure/PCM ownership and diagnostic state
-tests, plus SDK-gated pure close-evidence/preflight cases that call no driver,
-registry, COM or QPC. The Windows/MSVC/SDK C++ ABI and gated tests remain
-uncompiled by the four permitted Linux/WASM commands. Assertions/runtime/formal
-review/QA remain deferred. Scope formatting and four sequential compile-only
-checks follow both paired writer terminal stops. Full BMS player Goal and live
-application handoff remain incomplete.
+Verify renderer failure/PCM ownership and diagnostic state with real portable
+components; gated native lifecycle tests use the actual production static
+operations rather than a second lifecycle model. Native diagnostics and original
+cleanup errors must survive simultaneous retirement authorization. Keep the
+healthy-authorization refusal and invalid caller arguments distinguishable.
+Report portable execution and gated Rust-only typing separately from authentic
+Windows/MSVC/SDK ABI and physical driver acceptance. The latter remain
+unverified here; full BMS player Goal and live application handoff remain active.

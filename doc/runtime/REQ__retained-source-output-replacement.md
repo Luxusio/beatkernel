@@ -5,7 +5,10 @@
 The ASIO vertical under development follows the same common Source Owner,
 typed Output UI and solo/cohort pumps. Preserve NativeOutputState, original
 pending PCM/report/admitted prefix, Source history and creation identity through
-same-family replacement. This section defines intended behavior; implementation
+same-family replacement. The flow pauses playback, stops and reconfigures native
+output, then resumes the same play. A silent reconfiguration gap is expected;
+uninterrupted sound or physically pop-free switching is not established by
+software PCM preservation. This section defines intended behavior; implementation
 and available proof are tracked in WBS07.08.07.14 and the
 [ASIO change record](../changes/2026-10-15-asio-retained-source-output.md).
 
