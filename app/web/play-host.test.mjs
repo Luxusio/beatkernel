@@ -1098,7 +1098,7 @@ test("Window record RPC: local save retains selected original member and the who
       { player: 2, replay: captureFile(second), replayComplete: true, replayError: null },
     ], completedArchive: archive, archivePlayers: [1,2], archiveError: null }));
     assert.equal(h.get("records-save").disabled, true, "member selection remains explicit");
-    h.get("captured-replay").value = "2"; h.get("captured-replay").emit("change");
+    h.get("captured-replay").value = `${session.id}:2`; h.get("captured-replay").emit("change");
     h.click("records-save"); await flush();
     const request = game.messages("records-request").find(message => message.action === "save");
     assert.equal(request.value.player, 2); assert.equal(request.value.archivePlayer, 2);
@@ -5523,7 +5523,7 @@ test("local saved targets freeze before audio acquisition and member comparisons
   assert.match(rows.children[1].textContent, /Player 2.*only second comparison stopped/);
   assert.match(h.get("local-results").children[1].textContent, /second recording export failed/);
   assert.equal(h.get("play").disabled, false); assert.equal(h.get("opponent-player-file:1").disabled, false);
-  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
+  h.get("captured-replay").value = `${start.playId}:1`; h.get("captured-replay").emit("change");
   assert.equal(h.get("export").disabled, false);
   h.click("export"); await flush();
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), prefix);
@@ -6936,7 +6936,7 @@ test("one automatic member records and saves its actual cohort row while an inde
   assert.doesNotMatch(content(h.get("local-results")), /777|18446744073709551615/);
   assert.match(h.get("multiplayer-status").textContent, /Player 1.*remote Player 4294967295.*604800\.000000001.*18446744073709551615/);
   assert.equal(h.get("export").disabled, true, "the one-member cohort still selects the actual recording explicitly");
-  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
+  h.get("captured-replay").value = `${start.playId}:1`; h.get("captured-replay").emit("change");
   h.click("export"); await flush();
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), bytes);
   assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-1-complete.bkr`);
@@ -6967,7 +6967,7 @@ test("automatic cohort metadata refusal and failed prefixes release for retry wi
     replays: [{ player: 1, replay: captureFile(prefix), replayError: null, replayComplete: false }],
     multiplayer: { finalWritten: false, finalAcknowledged: false, error: "group disconnected", peers: [localPeer(1, null, { status: "disconnected" })] } });
   await h.receive(failure); assert.match(h.get("status").textContent, /actual member input failure/);
-  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+  h.get("captured-replay").value = `${failed.playId}:1`; h.get("captured-replay").emit("change"); h.click("export"); await flush();
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), prefix);
   assert.equal(h.downloads.at(-1).filename, `beatkernel-${failed.playId}-player-1-prefix.bkr`);
   const retry = await launchPeerSession(h), before = h.get("multiplayer-status").textContent;
@@ -7134,7 +7134,7 @@ test("joined local network results retain separate full-width peer prefixes and 
   assert.match(local, /member 2 export refused/); assert.doesNotMatch(local, /18446744073709551615|9007199254740993/);
   assert.equal(h.get("title").textContent, preview.title); assert.equal(h.get("position").value, preview.position);
   assert.equal(h.get("play").disabled, false); assert.equal(h.get("export").disabled, true);
-  h.get("captured-replay").value = "3"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+  h.get("captured-replay").value = `${start.playId}:3`; h.get("captured-replay").emit("change"); h.click("export"); await flush();
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), third);
   assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-3-complete.bkr`);
   await h.receive(final); assert.equal(writes.length, 1);
@@ -7172,8 +7172,8 @@ test("malformed local peer envelopes reject the entire comparison without scalar
     assert.equal(h.get("play").disabled, false);
     assert.doesNotMatch(h.get("status").textContent, /Replay export failed|cleanup failed/);
     assert.doesNotMatch(content(h.get("local-results")), /unavailable|malformed/);
-    assert.deepEqual(h.get("captured-replay").children.filter(option => option.value !== "").map(option => option.value), ["1", "2"]);
-    h.get("captured-replay").value = "2"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+    assert.deepEqual(h.get("captured-replay").children.filter(option => option.value !== "").map(option => option.value), [`${start.playId}:1`, `${start.playId}:2`]);
+    h.get("captured-replay").value = `${start.playId}:2`; h.get("captured-replay").emit("change"); h.click("export"); await flush();
     assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), second);
     await h.close();
   }
@@ -7287,7 +7287,7 @@ test("peer display errors and malformed or absent final prefixes never change lo
     await h.receive(localFinal(start, { replays: [{ player: 1, replay: captureFile(Uint8Array.from([66, 75, 82])), replayComplete: false, replayError: null }],
       multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peers: [localPeer(1, 91, peer)] } }));
     assert.match(content(h.get("local-results")), /Player 1.*Hits 1.*Misses 0/);
-    h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
+    h.get("captured-replay").value = `${start.playId}:1`; h.get("captured-replay").emit("change");
     assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /prefix/);
     assert.doesNotMatch(h.get("status").textContent, /Replay export failed|Gameplay cleanup failed/);
     const display = h.get("multiplayer-status").textContent;
@@ -7630,7 +7630,7 @@ test("a valid playing room closure preserves Window input and output while final
     assert.match(h.get("multiplayer-status").textContent, expected);
     assert.match(h.get("multiplayer-status").textContent, /Coordinated room drain cancelled/);
     assert.match(content(h.get("local-results")), /Recorded prefix/);
-    assert.equal(h.get("captured-replay").children.some(option => option.value === String(player)), true);
+    assert.equal(h.get("captured-replay").children.some(option => option.value === `${start.playId}:${player}`), true);
     await h.close();
   }
   for (const error of ["", 7]) {
@@ -7691,7 +7691,7 @@ test("joined room drain outcomes remain distinct while the natural cleanup wait 
     assert.equal(writes.length, 1); assert.match(text, expected);
     assert.match(text, /written and acknowledged by the room relay/);
     assert.match(content(h.get("local-results")), /Complete/);
-    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    h.get("captured-replay").value = `${start.playId}:${player}`; h.get("captured-replay").emit("change");
     assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /complete/i);
     assert.equal(h.get("play").disabled, false);
     const once = writes.length;
@@ -7743,7 +7743,7 @@ test("joined room Results use bounded metadata and acknowledged Worker pages wit
     }
     const status = h.get("multiplayer-status").textContent, local = content(h.get("local-results"));
     assert.match(status, /full write unconfirmed.*Coordinated room drain cancelled/);
-    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    h.get("captured-replay").value = `${start.playId}:${player}`; h.get("captured-replay").emit("change");
     assert.equal(h.get("export").disabled, false);
     const display = watchPlayDisplay(h), layout = h.layoutReads;
     const inputs = worker.messages("play-step").length, renders = worker.messages("play-render").length;
@@ -7795,7 +7795,7 @@ test("room Results metadata, page and renderer failures affect only retained pre
       }) : null,
     });
     const local = content(h.get("local-results"));
-    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    h.get("captured-replay").value = `${start.playId}:${player}`; h.get("captured-replay").emit("change");
     assert.equal(h.get("export").disabled, false);
     if (["notice", "reply", "refusal", "timeout", "seek"].includes(fault)) {
       h.click("room-score-prev"); await flush(); const request = worker.last("play-room-page");

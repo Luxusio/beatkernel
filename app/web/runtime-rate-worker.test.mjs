@@ -813,21 +813,27 @@ const {harness,flush,finalScore:baseFinalScore,selectedRecording,chooseRecording
 function finalScore(playId,fields={}) {
   return baseFinalScore(playId,{replay:null,replayComplete:false,replayError:null,...fields});
 }
-async function windowStart(h,{record=false,metadata={},ready=true}={}) {
+async function windowStart(h,{record=false,metadata={},ready=true,local=false}={}) {
   await h.preview();h.get("runtime-retained").checked=true;h.get("record").checked=record;h.get("live-end").value="2";
-  const pending=await h.begin(),worker=h.workers[0];
+  if(local) {
+    await localCount(h,2);h.click("local-discover");await flush();
+    localAssign(h,1,1n);localAssign(h,2,2n);
+  }
+  const pending=await h.begin(),worker=h.workers.at(-1);
   await h.reply(pending,{kind:"prepared",mode:"live",title:"Retained",artist:"Fixture",notes:1,samples:0,
     lanes:[0x11],opponentCount:0,startNs:0n,endNs:2000000000n,retained:true,programId:PROGRAM,
-    capability:null,liveSpeed:"1/1",liveSpeedNumerator:1n,liveSpeedDenominator:1n,...metadata});
+    capability:null,liveSpeed:"1/1",liveSpeedNumerator:1n,liveSpeedDenominator:1n,
+    ...(local?{localPlayers:[1,2],localPage:0}:{}),...metadata});
   const upload=worker.last("play-samples-upload");assert.ok(upload);await h.admitSamples(upload,0);
   await h.reply(upload,{kind:"samples-uploaded",count:0,bytes:0});
   await h.reply(worker.last("play-audio"),null);await h.reply(worker.last("play-activate"),null);
   await h.geometry({playId:pending.playId});
+  h.lastSettledTick=0;
   if(ready)await windowCapability(h,pending,capability());
   return pending;
 }
 async function windowCapability(h,session,value) {
-  const worker=h.workers[0];
+  const worker=h.workers.at(-1);
   await h.advance(8);
   for(let count=0;count<4;count++) {
     const step=worker.last("play-step");
@@ -995,6 +1001,109 @@ test("Window retains raw region drafts and touch acquisition order through pendi
   }finally{await h.close();}
 });
 
+function windowKeyboardEvents(h) {
+  return h.workers.at(-1).messages("play-step").flatMap(row=>row.events).filter(row=>Object.hasOwn(row,"key"));
+}
+async function settleWindowKeyboard(h,session) {
+  const worker=h.workers.at(-1);
+  for(let count=0;count<4;count++) {
+    const step=worker.last("play-step");
+    if(!step||step.tickId===h.lastSettledTick)break;
+    await h.receive({kind:"play-step-done",playId:session.playId,tickId:step.tickId,
+      commandsPending:false,pendingInputs:0,songNs:0n,hits:0n,misses:0n,combo:0n,preOriginInputs:0});
+    h.lastSettledTick=step.tickId;
+  }
+  assert.equal(worker.last("play-step")?.tickId??0,h.lastSettledTick,"the actual keyboard prefix is acknowledged");
+}
+function focusWindowKeyboard(h,target) {
+  target.focus();h.document.activeElement=target;target.emit("focus");
+}
+async function finishWindowKeyboard(h,session) {
+  h.click("stop");await flush();
+  await h.receive(session.localPlanWords?localFinal(session):finalScore(session.playId));
+}
+
+for(const local of [false,true])for(const editorId of ["runtime-rate","runtime-start","runtime-end"]) {
+  const route=local?"local":"solo";
+  test(`Window retained ${route} runtime editor ${editorId} delivers the original held-key release and allows the next press`,async()=>{
+    const h=await harness({touchSupported:local});try {
+      const session=await windowStart(h,{local}),worker=h.workers.at(-1),canvas=h.get("canvas"),editor=h.get(editorId);
+      assert.deepEqual(Array.from(session.localPlanWords??[]),local?[1,1,1,0,2,1,2,0]:[]);
+      h.setNow(1301);focusWindowKeyboard(h,canvas);
+      const down=h.window.emit("keydown",{target:canvas,code:"KeyZ",repeat:false,timeStamp:1300.125});await flush();
+      assert.equal(down.defaultPrevented,true);
+      const first={hostNs:1300125000n,key:2,down:true,sequence:1n};
+      assert.deepEqual(windowKeyboardEvents(h),[first]);
+      await settleWindowKeyboard(h,session);
+      focusWindowKeyboard(h,editor);await flush();
+      assert.deepEqual(windowKeyboardEvents(h),[first],"focus alone cannot fabricate a release or clear the gameplay press");
+      const repeat=h.window.emit("keydown",{target:editor,code:"KeyZ",repeat:true,timeStamp:1300.1875});await flush();
+      assert.equal(repeat.defaultPrevented,false,"editor key presses retain their native typing action");
+      const up=h.window.emit("keyup",{target:editor,code:"KeyZ",repeat:false,timeStamp:1300.25});await flush();
+      const released={hostNs:1300250000n,key:2,down:false,sequence:2n};
+      assert.deepEqual(windowKeyboardEvents(h),[first,released],"the real editor-targeted key-up keeps its original timestamp and sequence");
+      await settleWindowKeyboard(h,session);
+      h.window.emit("keyup",{target:editor,code:"KeyZ",repeat:false,timeStamp:1300.3125});await flush();
+      assert.deepEqual(windowKeyboardEvents(h),[first,released],"a duplicate key-up cannot release the same press twice");
+      focusWindowKeyboard(h,canvas);
+      h.window.emit("keydown",{target:canvas,code:"KeyZ",repeat:false,timeStamp:1300.375});await flush();
+      await settleWindowKeyboard(h,session);
+      h.window.emit("keyup",{target:canvas,code:"KeyZ",repeat:false,timeStamp:1300.5});await flush();
+      await settleWindowKeyboard(h,session);
+      assert.deepEqual(windowKeyboardEvents(h),[first,released,
+        {hostNs:1300375000n,key:2,down:true,sequence:3n},
+        {hostNs:1300500000n,key:2,down:false,sequence:4n}],"the next genuine gameplay pair has no stuck press or hidden acquisition");
+      assert.equal(worker.messages("play-stop").length,0);assert.equal(worker.messages("play-retained").length,0);
+      await finishWindowKeyboard(h,session);
+    }finally{await h.close();}
+  });
+
+  test(`Window retained ${route} runtime editor ${editorId} preserves fresh typing without gameplay acquisition`,async()=>{
+    const h=await harness({touchSupported:local});try {
+      const session=await windowStart(h,{local}),worker=h.workers.at(-1),editor=h.get(editorId),canvas=h.get("canvas");
+      assert.deepEqual(Array.from(session.localPlanWords??[]),local?[1,1,1,0,2,1,2,0]:[]);
+      const draft=editorId==="runtime-rate"?"003/002":"1.234567891";
+      editor.value=draft;focusWindowKeyboard(h,editor);h.setNow(1301);
+      for(const [type,repeat,timeStamp] of [["keydown",false,1300.125],["keydown",true,1300.1875],["keyup",false,1300.25]]) {
+        const event=h.window.emit(type,{target:editor,code:"KeyZ",repeat,timeStamp});
+        assert.equal(event.defaultPrevented,false,"fresh editor input keeps the native editing action");
+      }
+      editor.emit("input");await flush();
+      assert.deepEqual(windowKeyboardEvents(h),[]);assert.equal(editor.value,draft);
+      assert.equal(worker.messages("play-retained").length,0);assert.equal(worker.messages("play-stop").length,0);
+      focusWindowKeyboard(h,canvas);
+      h.window.emit("keydown",{target:canvas,code:"KeyZ",repeat:false,timeStamp:1300.375});await flush();
+      await settleWindowKeyboard(h,session);
+      h.window.emit("keyup",{target:canvas,code:"KeyZ",repeat:false,timeStamp:1300.5});await flush();
+      await settleWindowKeyboard(h,session);
+      assert.deepEqual(windowKeyboardEvents(h),[
+        {hostNs:1300375000n,key:2,down:true,sequence:1n},
+        {hostNs:1300500000n,key:2,down:false,sequence:2n}],"typing consumed no shared gameplay sequence or pressed state");
+      await finishWindowKeyboard(h,session);
+    }finally{await h.close();}
+  });
+}
+
+for(const editorId of ["runtime-rate","runtime-start","runtime-end"])for(const code of ["Escape","F5","F9"]) {
+  test(`Window runtime editor ${editorId} preserves ${code} Play control routing`,async()=>{
+    const h=await harness();try {
+      const session=await windowStart(h),worker=h.workers.at(-1),editor=h.get(editorId);
+      focusWindowKeyboard(h,editor);h.setNow(1301);
+      const event=h.window.emit("keydown",{target:editor,code,repeat:false,timeStamp:1300.125});await flush();
+      assert.equal(event.defaultPrevented,true);assert.deepEqual(windowKeyboardEvents(h),[]);
+      if(code==="Escape") {
+        assert.equal(worker.last("play-stop").playId,session.playId);assert.equal(worker.messages("play-retained").length,0);
+      } else {
+        const request=worker.last("play-retained");assert.equal(request.playId,session.playId);
+        assert.equal(request.action,code==="F5"?"restart-original":"pause");
+        if(code==="F9")assert.equal(request.paused,true);
+        assert.equal(worker.messages("play-retained").length,1);assert.equal(worker.messages("play-stop").length,0);
+      }
+      await finishWindowKeyboard(h,session);
+    }finally{await h.close();}
+  });
+}
+
 test("Window accepts retired cohort atomically with null scores, unique attempt tuples and custody before ACK",async()=>{
   const h=await harness();try {
     const session=await windowStart(h,{record:true}),worker=h.workers[0];
@@ -1002,19 +1111,281 @@ test("Window accepts retired cohort atomically with null scores, unique attempt 
     const ack=worker.last("play-retired-recordings-ack");assert.equal(ack.accepted,true);assert.equal(ack.boundarySerial,21n);
     const choices=()=>h.get("captured-replay").children.filter(option=>option.value!=="");
     assert.equal(ack.remainingRecords,127);assert.equal(choices().length,1);
+    assert.equal(choices()[0].value,`${session.playId}:${PROGRAM}:21:1`);
     const second=retired(session,22n);await h.receive(second);
     assert.equal(worker.last("play-retired-recordings-ack").accepted,true);
     assert.equal(choices().length,2,"same player in later attempt has a distinct tuple");
+    assert.equal(choices()[1].value,`${session.playId}:${PROGRAM}:22:1`);
     await h.receive(first);assert.equal(worker.last("play-retired-recordings-ack").accepted,false);
     assert.equal(choices().length,2);
     h.click("stop");await flush();await h.receive(finalScore(session.playId,{replay:new File([new Uint8Array([66,75,82,77])],"current.bkr"),replayComplete:false,replayError:null}));
     assert.equal(choices().length,3,"terminal capture key cannot alias a retired boundary");
+    assert.equal(choices()[2].value,`${session.playId}:${PROGRAM}:current:1`);
     h.get("captured-replay").value=choices()[0].value;h.get("captured-replay").emit("change");
     h.click("records-save");await flush();
     const save=worker.messages("records-request").find(row=>row.action==="save")?.value;assert.ok(save);
     assert.equal(save.metadata.hits,null);assert.equal(save.metadata.misses,null);assert.equal(save.metadata.combo,null);
     assert.equal(save.metadata.complete,false);assert.equal(save.replayFile,first.replays[0].replay);
     assert.equal(save.archiveBlob,null);assert.equal(save.archivePlayer,null);
+  }finally{await h.close();}
+});
+
+function windowCaptureChoices(h) {
+  return h.get("captured-replay").children.filter(option=>option.value!=="");
+}
+function originalWindowCapture(name,marker) {
+  const file=new File([Uint8Array.of(66,75,82,marker)],name);
+  file.arrayBuffer=()=>assert.fail("Window must preserve the original recording File handle");
+  return file;
+}
+function sizedWindowCapture(name,size,marker=1) {
+  const file=originalWindowCapture(name,marker);
+  // File metadata is the controlled endpoint, as in the existing retired
+  // budget fixture; the Window must never allocate or acquire its body.
+  Object.defineProperty(file,"size",{value:size});
+  return file;
+}
+async function boundedWindowStash(h,{records=1,bytePressure=false}={}) {
+  const session=await windowStart(h,{record:true}),worker=h.workers.at(-1),rows=[];
+  const prefixes=bytePressure?3:Math.min(records,127);
+  for(let index=0;index<prefixes;index++) {
+    const serial=1000n+BigInt(index),file=sizedWindowCapture(`held-${index}.bkr`,bytePressure?64*MiB:4,index);
+    await h.receive(retired(session,serial,[1],()=>file));
+    assert.equal(worker.last("play-retired-recordings-ack").accepted,true,"fixture enters custody through actual retired acceptance");
+    rows.push({key:`${session.playId}:${PROGRAM}:${serial}:1`,file});
+  }
+  const current=bytePressure&&records!==3?sizedWindowCapture("held-current.bkr",MiB)
+    :records===128?sizedWindowCapture("held-current.bkr",4):null;
+  h.click("stop");await flush();await h.receive(finalScore(session.playId,{replay:current}));
+  if(current)rows.push({key:`${session.playId}:${PROGRAM}:current:1`,file:current});
+  assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.map(row=>row.key));
+  assert.equal(h.get("play").disabled,false);
+  return rows;
+}
+async function ordinaryWindowDraft(h,players=1,record=true) {
+  h.get("runtime-retained").checked=false;h.get("live-end").value="";h.get("record").checked=record;
+  await localCount(h,players);
+  if(players>1) {
+    h.click("local-discover");await flush();
+    for(let player=1;player<=players;player++)localAssign(h,player,BigInt(player));
+  }
+}
+async function finishOrdinaryWindow(h,session,files=[]) {
+  h.click("stop");await flush();
+  await h.receive(session.start.localPlanWords===undefined
+    ?finalScore(session.id,{replay:files[0]??null})
+    :localFinal(session.start,{replays:Array.from(session.start.localPlanWords).filter((_,index)=>index%4===0)
+      .map((player,index)=>({player,replay:files[index]??null,replayComplete:false,replayError:null}))}));
+}
+async function selectWindowCapture(h,key,file) {
+  assert.equal(windowCaptureChoices(h).filter(option=>option.value===key).length,1,"one selectable row per capture identity");
+  h.get("captured-replay").value=key;h.get("captured-replay").emit("change");
+  const count=windowCaptureChoices(h).length,downloads=h.downloads.length;
+  h.click("export");await flush();
+  assert.equal(h.urls.at(-1).blob,file,"selection downloads the exact original File");
+  assert.equal(h.downloads.length,downloads+1);
+  assert.equal(windowCaptureChoices(h).length,count,"download preserves unsaved custody");
+}
+async function saveWindowCapture(h,file,player=1,players=[1]) {
+  const worker=h.workers.at(-1),before=worker.messages("records-request").filter(row=>row.action==="save").length;
+  h.click("records-save");await flush();
+  const requests=worker.messages("records-request").filter(row=>row.action==="save");
+  assert.equal(requests.length,before+1,"explicit Save sends one storage request");
+  const value=requests.at(-1).value;
+  assert.equal(value.replayFile,file,"selection saves the exact original File");
+  assert.equal(value.player,player);assert.deepEqual(value.players,players);
+  assert.equal(value.archiveBlob,null);assert.equal(value.archivePlayer,null);
+  assert.match(h.get("status").textContent,/Recording saved/);
+  return value;
+}
+
+test("Window retained captures keep session identity when a replacement Worker reuses Program and boundary IDs",async()=>{
+  const h=await harness({noWindowRecordBinary:true});try {
+    const first=await windowStart(h,{record:true}),oldWorker=h.workers.at(-1);
+    const oldPrefix=originalWindowCapture("old-prefix.bkr",31),oldCurrent=originalWindowCapture("old-current.bkr",32);
+    await h.receive(retired(first,21n,[1],()=>oldPrefix));
+    assert.equal(oldWorker.last("play-retired-recordings-ack").accepted,true);
+    h.click("stop");await flush();await h.receive(finalScore(first.playId,{replay:oldCurrent}));
+    const previousKeys=[`${first.playId}:${PROGRAM}:21:1`,`${first.playId}:${PROGRAM}:current:1`];
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),previousKeys);
+    assert.equal(h.recordCalls.filter(row=>row.method==="save").length,0);
+
+    h.window.emit("pagehide");await flush();assert.equal(oldWorker.terminations,1);
+    h.window.emit("pageshow",{persisted:true});
+    const second=await windowStart(h,{record:true}),worker=h.workers.at(-1);
+    assert.notEqual(worker,oldWorker);assert.ok(second.playId>first.playId);
+    const prefix=originalWindowCapture("replacement-prefix.bkr",33),current=originalWindowCapture("replacement-current.bkr",34);
+    const cohort=retired(second,21n,[1],()=>prefix);await h.receive(cohort);
+    const accepted=worker.last("play-retired-recordings-ack");
+    assert.equal(accepted.accepted,true,"a new session may reuse the replacement Worker's Program/boundary/player");
+    assert.equal(accepted.programId,PROGRAM);assert.equal(accepted.boundarySerial,21n);
+    assert.equal(accepted.remainingRecords,125);
+    const beforeDuplicate=windowCaptureChoices(h).map(option=>option.value);
+    await h.receive(cohort);
+    const duplicate=worker.last("play-retired-recordings-ack");
+    assert.equal(duplicate.accepted,false,"the same session/Program/boundary/player still refuses");
+    assert.equal(duplicate.remainingRecords,accepted.remainingRecords);assert.equal(duplicate.remainingBytes,accepted.remainingBytes);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),beforeDuplicate,"duplicate refusal is atomic");
+    h.click("stop");await flush();await h.receive(finalScore(second.playId,{replay:current}));
+    const rows=[{key:previousKeys[0],file:oldPrefix},{key:previousKeys[1],file:oldCurrent},
+      {key:`${second.playId}:${PROGRAM}:21:1`,file:prefix},{key:`${second.playId}:${PROGRAM}:current:1`,file:current}];
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.map(row=>row.key));
+    assert.equal(new Set(rows.map(row=>row.key)).size,4);
+    for(const row of rows)await selectWindowCapture(h,row.key,row.file);
+    assert.equal(h.recordCalls.filter(row=>row.method==="save").length,0,"downloads do not automatically save Files");
+    for(let index=0;index<rows.length;index++) {
+      const row=rows[index];await selectWindowCapture(h,row.key,row.file);
+      await saveWindowCapture(h,row.file);
+      assert.equal(windowCaptureChoices(h).length,rows.length-index-1,"successful Save releases only its selected retained File");
+    }
+  }finally{await h.close();}
+});
+
+test("Window repeated ordinary solo captures retain distinct session selection beside unsaved retained Files",async()=>{
+  const h=await harness({noWindowRecordBinary:true});try {
+    const retainedSession=await windowStart(h,{record:true}),prefix=originalWindowCapture("retained-before-solo.bkr",41);
+    await h.receive(retired(retainedSession,21n,[1],()=>prefix));
+    assert.equal(h.workers.at(-1).last("play-retired-recordings-ack").accepted,true);
+    h.click("stop");await flush();await h.receive(finalScore(retainedSession.playId));
+    h.get("runtime-retained").checked=false;h.get("live-end").value="";
+    const rows=[{key:`${retainedSession.playId}:${PROGRAM}:21:1`,file:prefix}];
+    for(const marker of [42,43]) {
+      const session=await h.launch(),file=originalWindowCapture(`ordinary-solo-${marker}.bkr`,marker);
+      assert.equal(Object.hasOwn(session.start,"retained"),false);assert.equal(session.start.recordReplay,true);
+      assert.ok(session.id>retainedSession.playId);
+      h.click("stop");await flush();await h.receive(finalScore(session.id,{replay:file}));
+      rows.push({key:`${session.id}:solo`,file});
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.map(row=>row.key));
+    }
+    assert.equal(new Set(windowCaptureChoices(h).map(option=>option.value)).size,3);
+    for(const row of rows) {
+      await selectWindowCapture(h,row.key,row.file);await saveWindowCapture(h,row.file);
+    }
+  }finally{await h.close();}
+});
+
+test("Window repeated ordinary local captures retain session and member selection beside unsaved retained Files",async()=>{
+  const h=await harness({touchSupported:true,noWindowRecordBinary:true});try {
+    const retainedSession=await windowStart(h,{record:true}),prefix=originalWindowCapture("retained-before-local.bkr",51);
+    await h.receive(retired(retainedSession,21n,[1],()=>prefix));
+    assert.equal(h.workers.at(-1).last("play-retired-recordings-ack").accepted,true);
+    h.click("stop");await flush();await h.receive(finalScore(retainedSession.playId));
+    h.get("runtime-retained").checked=false;h.get("live-end").value="";await localCount(h,2);
+    const rows=[{key:`${retainedSession.playId}:${PROGRAM}:21:1`,file:prefix,player:1,players:[1]}];
+    for(const marker of [52,54]) {
+      h.click("local-discover");await flush();localAssign(h,1,1n);localAssign(h,2,2n);
+      const session=await h.launch();assert.equal(Object.hasOwn(session.start,"retained"),false);assert.equal(session.start.recordReplay,true);
+      const files=[originalWindowCapture(`ordinary-local-${marker}-1.bkr`,marker),
+        originalWindowCapture(`ordinary-local-${marker}-2.bkr`,marker+1)];
+      h.click("stop");await flush();await h.receive(localFinal(session.start,{replays:files.map((replay,index)=>({
+        player:index+1,replay,replayComplete:false,replayError:null}))}));
+      files.forEach((file,index)=>rows.push({key:`${session.id}:${index+1}`,file,player:index+1,players:[1,2]}));
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.map(row=>row.key));
+      assert.equal(h.get("records-save").disabled,true,"local member selection remains explicit");
+    }
+    assert.equal(new Set(windowCaptureChoices(h).map(option=>option.value)).size,5);
+    for(const row of rows) {
+      await selectWindowCapture(h,row.key,row.file);await saveWindowCapture(h,row.file,row.player,row.players);
+    }
+  }finally{await h.close();}
+});
+
+for(const players of [1,2])for(const pressure of ["slots","bytes"]) {
+  const route=players===1?"solo":"local";
+  test(`Window ordinary ${route} refuses recording admission before ownership when retained ${pressure} cannot reserve its final export`,async()=>{
+    const h=await harness({touchSupported:true,noWindowRecordBinary:true});try {
+      const rows=await boundedWindowStash(h,pressure==="slots"?{records:129-players}:{bytePressure:true});
+      await ordinaryWindowDraft(h,players);
+      const worker=h.workers.at(-1),starts=worker.messages("play-start").length,
+        stops=worker.messages("play-stop").length,opens=h.opens.length;
+      h.click("play");await flush();
+      assert.equal(worker.messages("play-start").length,starts,"capacity refusal precedes Worker playback admission");
+      assert.equal(worker.messages("play-stop").length,stops,"refused admission creates no gameplay owner to stop");
+      assert.equal(h.opens.length,opens,"capacity refusal precedes a new audio owner");
+      assert.equal(worker.terminations,0);
+      assert.match(h.get("status").textContent,/save|download/i,"refusal explains how existing custody can be recovered");
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.map(row=>row.key));
+      assert.equal(h.get("captured-replay").disabled,false,"old File selection remains usable after refusal");
+      assert.equal(h.recordCalls.filter(row=>row.method==="save").length,0);assert.equal(h.downloads.length,0);
+      await selectWindowCapture(h,rows[0].key,rows[0].file);
+      await saveWindowCapture(h,rows[0].file);
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),rows.slice(1).map(row=>row.key),"Save releases only its selected held row");
+      const retry=await h.launch();assert.equal(retry.start.recordReplay,true);
+      await finishOrdinaryWindow(h,retry);
+    }finally{await h.close();}
+  });
+
+  test(`Window ordinary ${route} completes the exactly reserved final export beside retained ${pressure}`,async()=>{
+    const h=await harness({touchSupported:true,noWindowRecordBinary:true});try {
+      const held=await boundedWindowStash(h,pressure==="slots"?{records:128-players}:{records:3,bytePressure:true});
+      await ordinaryWindowDraft(h,players);const session=await h.launch();
+      assert.equal(session.start.recordReplay,true);assert.equal(Object.hasOwn(session.start,"retained"),false);
+      const files=Array.from({length:players},(_,index)=>sizedWindowCapture(`exact-${route}-${index}.bkr`,64*MiB/players,index+11));
+      await finishOrdinaryWindow(h,session,files);
+      const added=files.map((file,index)=>({key:`${session.id}:${players===1?"solo":index+1}`,file}));
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[...held,...added].map(row=>row.key));
+      assert.equal(h.get("play").disabled,false,"the original final receipt completes the lifecycle");
+      assert.equal(h.audio.stopStarts,1);assert.equal(h.workers.at(-1).terminations,0);
+      for(let index=0;index<added.length;index++) {
+        const row=added[index],before=windowCaptureChoices(h).length;
+        await selectWindowCapture(h,row.key,row.file);
+        await saveWindowCapture(h,row.file,index+1,Array.from({length:players},(_,member)=>member+1));
+        assert.equal(windowCaptureChoices(h).length,before-1,"ordinary appended rows release exact bounded custody after Save ACK");
+      }
+      assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),held.map(row=>row.key));
+    }finally{await h.close();}
+  });
+}
+
+for(const mode of ["capture-off","replay"])test(`Window ${mode} bypasses full retained recording custody`,async()=>{
+  const h=await harness({noWindowRecordBinary:true});try {
+    const held=await boundedWindowStash(h,{records:128});
+    await ordinaryWindowDraft(h,1,mode==="replay");
+    const replayFile=mode==="replay"?selectedRecording().file:null;
+    if(replayFile)chooseRecording(h,[replayFile]);
+    const session=await h.launch(0,mode==="replay"?"replay":"live");
+    if(mode==="replay") {
+      assert.equal(session.start.mode,"replay");assert.equal(Object.hasOwn(session.start,"recordReplay"),false);
+      assert.equal(session.start.replayFile,replayFile,"replay preserves the original selected File handle");
+    } else assert.equal(session.start.recordReplay,false);
+    assert.equal(Object.hasOwn(session.start,"captureBudget"),false);
+    assert.equal(Object.hasOwn(session.start,"retained"),false);
+    await finishOrdinaryWindow(h,session);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),held.map(row=>row.key));
+    assert.equal(h.get("play").disabled,false);assert.equal(h.recordCalls.filter(row=>row.method==="save").length,0);
+    assert.equal(h.downloads.length,0);
+  }finally{await h.close();}
+});
+
+test("Window saving the last Program row preserves bounded ordinary custody through the next play",async()=>{
+  const h=await harness({noWindowRecordBinary:true});try {
+    const [program]=await boundedWindowStash(h);
+    await ordinaryWindowDraft(h);const first=await h.launch(),one=originalWindowCapture("bounded-ordinary-one.bkr",71);
+    await finishOrdinaryWindow(h,first,[one]);
+    const firstKey=`${first.id}:solo`;
+    await selectWindowCapture(h,program.key,program.file);await saveWindowCapture(h,program.file);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[firstKey]);
+    const second=await h.launch(),two=originalWindowCapture("bounded-ordinary-two.bkr",72);
+    await finishOrdinaryWindow(h,second,[two]);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[firstKey,`${second.id}:solo`],"remaining unsaved ordinary row keeps append policy active");
+    await selectWindowCapture(h,firstKey,one);await saveWindowCapture(h,one);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[`${second.id}:solo`]);
+    await selectWindowCapture(h,`${second.id}:solo`,two);await saveWindowCapture(h,two);
+    assert.equal(windowCaptureChoices(h).length,0);
+  }finally{await h.close();}
+});
+
+test("Window ordinary-only legacy recordings still replace the previous last capture",async()=>{
+  const h=await harness({noWindowRecordBinary:true});try {
+    await h.preview();await ordinaryWindowDraft(h);
+    const first=await h.launch(),one=originalWindowCapture("legacy-one.bkr",81);
+    await finishOrdinaryWindow(h,first,[one]);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[`${first.id}:solo`]);
+    const second=await h.launch(),two=originalWindowCapture("legacy-two.bkr",82);
+    await finishOrdinaryWindow(h,second,[two]);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[`${second.id}:solo`]);
+    await selectWindowCapture(h,`${second.id}:solo`,two);await saveWindowCapture(h,two);
+    assert.deepEqual(windowCaptureChoices(h).map(option=>option.value),[`${second.id}:solo`],"legacy last capture remains available after Save");
   }finally{await h.close();}
 });
 

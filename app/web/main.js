@@ -679,6 +679,7 @@ function retainRoomResults(session) {
 }
 let lastReplay = null;
 let capturedReplays = [];
+let boundedCaptureCustody = false;
 let replayURL = null;
 let replayURLTimer = null;
 let selectedReplay = null;
@@ -2253,6 +2254,14 @@ async function play(mode = "live") {
     try { validateLiveColdPhase(section.startNs, liveSpeed); }
     catch (error) { ui["live-speed"].focus(); status(String(error.message).slice(0, 4096), true); return; }
   }
+  if (mode === "live" && ui.record.checked === true
+    && (boundedCaptureCustody || ui["runtime-retained"].checked === true)) {
+    const budget = captureBudget();
+    if (budget.remainingRecords < localRoster.players.length || budget.remainingBytes < 64 * 1024 * 1024) {
+      status("Captured recording capacity exhausted. Save captured recordings before starting another recorded play; download remains available.", true);
+      return;
+    }
+  }
   clearHistoricalRecord();
   if (mode === "live" && localRoster.players.length === 1) {
     try { validateOpponentTargets(opponents.snapshot()); }
@@ -2741,7 +2750,8 @@ function key(event, down) {
       if (!event.repeat && !ui[control].disabled) void requestRetained(code === "F5" ? "restart-original" : "pause");
       return;
     }
-    if (session.retained && [ui["runtime-rate"], ui["runtime-start"], ui["runtime-end"]].includes(event.target)) return;
+    if (session.retained && [ui["runtime-rate"], ui["runtime-start"], ui["runtime-end"]].includes(event.target)
+      && (down || !session.pressed.has(code))) return;
     if (!live()) return;
     const binding = session.bindings.find(row => row[1] === code);
     if (!binding) return;
@@ -3581,7 +3591,7 @@ function stopPlay(reason, failed = false, completed = false) {
             chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null,
             ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: 1 } : {}) };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
-          if (capturedReplays.some(row => row.programId !== undefined)) retainCapturedRows([lastReplay]);
+          if (boundedCaptureCustody) retainCapturedRows([lastReplay]);
           else capturedReplays = [lastReplay];
           showCapturedReplays(true);
         }
@@ -3692,8 +3702,8 @@ function showCapturedReplays(selectSolo = false) {
 }
 
 function captureKey(record) {
-  return record.programId === undefined ? String(record.player ?? "solo")
-    : `${record.programId}:${record.boundarySerial === null ? "current" : record.boundarySerial}:${record.player ?? 1}`;
+  return record.programId === undefined ? `${record.id}:${record.player ?? "solo"}`
+    : `${record.id}:${record.programId}:${record.boundarySerial === null ? "current" : record.boundarySerial}:${record.player ?? 1}`;
 }
 function captureBudget() {
   return { remainingRecords: 128 - capturedReplays.length,
@@ -3712,6 +3722,7 @@ function retainCapturedRows(rows) {
   const budget = captureBudget();
   if (rows.length > budget.remainingRecords || bytes > budget.remainingBytes) throw new Error("Captured recording File capacity exhausted.");
   capturedReplays.push(...rows);
+  if (rows.length) boundedCaptureCustody = true;
 }
 function receiveRetiredRecordings(session, data) {
   let error = null;
@@ -3769,7 +3780,7 @@ function showLocalResults(session, failed, publish = true) {
   if (publish) ui["local-results"].replaceChildren(rows);
   if (session.recordReplay && !session.retained) {
     revokeReplayURL();
-    if (capturedReplays.some(row => row.programId !== undefined)) retainCapturedRows(recordings);
+    if (boundedCaptureCustody) retainCapturedRows(recordings);
     else capturedReplays = recordings;
     showCapturedReplays(); // A member recording is never selected by aliasing the first row.
   }
@@ -4281,8 +4292,9 @@ async function recordAction(action, menuTicket = null) {
           players: captured.players, player: captured.player ?? 1 } });
         if (!recordCurrent(operation)) return;
         committed = operation.committed = "Recording saved. ";
-        if (captured.programId !== undefined) {
+        if (boundedCaptureCustody) {
           capturedReplays = capturedReplays.filter(row => row !== captured);
+          boundedCaptureCustody = capturedReplays.length > 0;
           if (lastReplay === captured) lastReplay = null;
           showCapturedReplays();
         }
