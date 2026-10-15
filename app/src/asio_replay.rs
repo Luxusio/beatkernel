@@ -662,7 +662,9 @@ impl AsioReplayPresentation {
                     .map_err(|_| "ASIO replay playback extent overflow")?,
             )
             .ok_or("ASIO replay playback grid overflow")?;
-        if observation.sample_rate != self.rate
+        if observation.delivered_first_frame != report.start_frame
+            || observation.delivered_frames != report.frames
+            || observation.sample_rate != self.rate
             || observation.output_origin != self.origin
             || observation.output != self.point(report.start_frame)?
             || report.frames == 0

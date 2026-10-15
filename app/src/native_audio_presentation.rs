@@ -936,8 +936,7 @@ impl NativeAudioPresentation {
                         let basis = basis.ok_or("accepted ASIO creation basis is missing")?;
                         NativeOutputCoordinate::StreamFrame {
                             frame: observation
-                                .render
-                                .start_frame
+                                .delivered_first_frame
                                 .checked_sub(basis.start_physical_frame())
                                 .ok_or("accepted ASIO block precedes its creation basis")?,
                         }
@@ -991,6 +990,10 @@ mod coordinate_fixtures;
 #[cfg(test)]
 #[path = "native_audio_presentation_asio_coordinate_fixtures.rs"]
 mod asio_coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "native_asio_delivery_fixtures.rs"]
+mod native_asio_delivery_fixtures;
 
 #[cfg(test)]
 #[path = "native_audio_practice_target_coordinate_fixtures.rs"]

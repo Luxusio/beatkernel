@@ -35,7 +35,9 @@ pub struct PauseBoundary {
     pub host: ClockPoint,
     pub playback_frame: u64,
 }
-/// Original actual render block and its assessed presentation interval.
+/// Original whole render block and its assessed presentation interval.
+/// Partial native deliveries require coordinate pause control; adapters must
+/// reject them before constructing this whole-block-only scalar evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PauseIntervalObservation {
     pub output_origin: ClockPoint,

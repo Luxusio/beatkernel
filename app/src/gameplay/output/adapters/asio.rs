@@ -1,7 +1,7 @@
 //! Trusted same-thread ASIO acquisition and original interval evidence.
 use crate::{
     gameplay::output::adapters::observation::{
-        asio_pause_observation, observe_asio_with_basis, ReplacementObservationError,
+        checked_asio_pause_observation, observe_asio_with_basis, ReplacementObservationError,
     },
     gameplay::output::ports::OutputReplacementBackend,
     live_pause::LivePauseObservation,
@@ -238,7 +238,8 @@ impl OutputReplacementBackend for AsioReplacementBackend {
         _: ClockPair,
         now: ClockPoint,
     ) -> Result<LivePauseObservation, Self::Error> {
-        Ok(asio_pause_observation(output.observation, now))
+        checked_asio_pause_observation(output.observation, now)
+            .map_err(AsioReplacementError::Presentation)
     }
 }
 

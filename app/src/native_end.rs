@@ -994,7 +994,9 @@ impl NativeEnd {
         observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
     ) -> Result<Option<EndBoundary>, EndError> {
         self.require_scalar()?;
-        if observation.sample_rate != self.rate
+        if observation.delivered_first_frame != observation.render.start_frame
+            || observation.delivered_frames != observation.render.frames
+            || observation.sample_rate != self.rate
             || observation.output_origin != self.origin
             || observation.output != self.point(observation.render.start_frame)?
             || observation.render.frames == 0

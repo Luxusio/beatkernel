@@ -94,15 +94,16 @@ impl CoordinateNativeAudioSnapshot {
                     return Err(Error::BasisMismatch);
                 }
                 let expected = observation
-                    .render
-                    .start_frame
+                    .delivered_first_frame
                     .checked_sub(snapshot.basis.start_physical_frame())
                     .ok_or(Error::FrameBeforeBasis)?;
                 if expected != frame {
                     return Err(Error::CoordinateMismatch);
                 }
-                let validated = AsioPresentationObservation::from_render(
+                let validated = AsioPresentationObservation::from_delivery(
                     observation.render,
+                    observation.delivered_first_frame,
+                    observation.delivered_frames,
                     observation.sample_rate,
                     observation.host,
                     0,

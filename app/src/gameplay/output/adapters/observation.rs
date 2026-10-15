@@ -70,24 +70,63 @@ pub fn observe_asio(
         })
         .map_err(ReplacementObservationError::Discipline)
 }
-/// Copies the complete original render and host interval without substituting receipt time.
+/// Keeps the scalar whole-block interface compatible. Unsupported partial delivery
+/// remains unavailable; callers that need the refusal use the checked companion.
 pub fn asio_pause_observation(
     observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
     now: beatkernel::time::ClockPoint,
 ) -> crate::live_pause::LivePauseObservation {
-    crate::live_pause::LivePauseObservation::Interval {
-        observation: observation.map(|value| crate::playback_pause::PauseIntervalObservation {
-            output_origin: value.output_origin,
-            sample_rate: value.sample_rate,
-            render: value.render,
-            clock: crate::native_start::StartInterval {
-                output: value.output,
-                before: value.host.before,
-                after: value.host.after,
-            },
-        }),
-        now,
-    }
+    checked_asio_pause_observation(observation, now).unwrap_or(
+        crate::live_pause::LivePauseObservation::Interval {
+            observation: None,
+            now,
+        },
+    )
+}
+
+/// Copies only complete original renders into the scalar pause interval model.
+/// A prefix starting at the original block start is still a partial delivery.
+pub fn checked_asio_pause_observation(
+    observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
+    now: beatkernel::time::ClockPoint,
+) -> Result<
+    crate::live_pause::LivePauseObservation,
+    beatkernel_platform::audio::asio::AsioPresentationError,
+> {
+    use beatkernel_platform::audio::asio::{AsioPresentationError, AsioPresentationObservation};
+    let observation = observation
+        .map(|value| {
+            if value.delivered_first_frame != value.render.start_frame
+                || value.delivered_frames != value.render.frames
+            {
+                return Err(AsioPresentationError::Malformed);
+            }
+            let validated = AsioPresentationObservation::from_delivery(
+                value.render,
+                value.delivered_first_frame,
+                value.delivered_frames,
+                value.sample_rate,
+                value.host,
+                0,
+                0,
+                value.output_origin,
+            )?;
+            if validated.output != value.output {
+                return Err(AsioPresentationError::Malformed);
+            }
+            Ok(crate::playback_pause::PauseIntervalObservation {
+                output_origin: value.output_origin,
+                sample_rate: value.sample_rate,
+                render: value.render,
+                clock: crate::native_start::StartInterval {
+                    output: value.output,
+                    before: value.host.before,
+                    after: value.host.after,
+                },
+            })
+        })
+        .transpose()?;
+    Ok(crate::live_pause::LivePauseObservation::Interval { observation, now })
 }
 #[cfg(test)]
 #[path = "asio_observation_fixtures.rs"]
