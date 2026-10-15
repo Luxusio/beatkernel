@@ -316,6 +316,12 @@ Browser와 native Records의 실제 preview·DETAILS·WATCH 흐름에 이 역사
 
 ## UI와 검증 기준
 
+실제 브라우저 검증의 패키지 근거는 UI의 `pkg/beatkernel_bms_runtime{.js,_bg.wasm}`와
+Worklet의 `audio-pkg/beatkernel_bms_runtime{.js,_bg.wasm}` 소비4파일을 사용한다.
+각 feature의 원본 WASM에서 해당 소비 이름으로 matching bindgen을 생성하고
+실제 import와 strict runner가 읽는 파일의 hash를 확인한다. 다른 out-name으로
+생성한 미사용 파일은 현재 브라우저 실행의 새 빌드 증거가 아니다.
+
 시작 화면의 입력·상세·고정 상태 문구는 **초기 배속**을 명시한다. 실행 중 실제
 적용값은 기존 Current practice의 검증된 owner capability로 표시한다. 시작 배속을
 현재 배속처럼 표시하지 않으며, pending·거절·F5 대기 중에는 마지막 실제 적용값을

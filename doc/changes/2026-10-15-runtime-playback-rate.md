@@ -757,14 +757,22 @@ native-cohort-axis-first-14121.log (같은 증거 폴더).
 수정한10개 Rust 경로의 edition2021/skip_children=true formatter가 통과했다.
 shared settings.rs의 다른 기존 formatter drift는 문자열 한 줄 수정과 구분해
 남겼으며 baseline 정리를 추가하지 않았다. Root31077은 전체 app library/bin/
-85 integration 대상 컴파일, UI/audio release WASM과 각각 직후의 matching bindgen을
-모두 exit0으로 끝냈다. 전체 app 컴파일7m22s, UI50.18s, audio30.51s다.
+85 integration 대상 컴파일, UI/audio release WASM 빌드를 exit0으로 끝냈다.
+문서 감사가 audio bindgen 출력명 오류를 확인해 실제 소비 경로로 다시 생성했다. 전체 app 컴파일7m22s, UI50.18s, audio30.51s다.
 현재 UI WASM=db4f3e9bcf556d627a81cac3ffdeed4c17e31522a064c50d598a80e4019a7f76,
-audio WASM=06b698ffc61ec9e44ecee905441b53c3a5c02603cf344d64a99d1e39f5410825,
+audio WASM=d7ca72a92c108a8fa563459ae158d62f7f6723a7b08a1ab0b4bfc59187b863d3,
 UI JS=33733edc7cb07d63a7f79fb9c813706cf811b193230ef561a8c4c826f90fb89e,
-audio JS=29807f3845b7f6ca4d95d5f04aa687b7d698254bb98a3cfacc736cd6737abcec,
+audio JS=eaa1340083a7e6dc40b6cecbd8b9c888b8f07ac311ddf0d9d26116c0f849eb40,
 native main=0f39b0f5f58933caf25bba4b38d06b3b5c4ef1453f228d8265e56ed93ff66031이다.
-UI 동일성도 새 실제 빌드 뒤 측정했으며 audio는 이전 d7ca72a9와 다르다.
+UI/audio 동일성은 새 실제 빌드와 실제 소비 이름의 bindgen 뒤 측정했다.
+Root의 첫 audio 명령은 --out-name beatkernel_bms_audio로 사용되지 않는 파일을
+만들었고, 최초 hash 로그의06b698/29807은 그 파일의 값이었다. 실제 Worklet과
+strict runner는 audio-pkg/beatkernel_bms_runtime{.js,_bg.wasm}를 소비한다.
+같은 마지막 browser-audio raw WASM을 --out-name beatkernel_bms_runtime으로 다시
+변환했으며 그 사이 다른 WASM 빌드는 없었다. 잘못 생성한 자기 소유의 미사용
+4파일만 삭제했다. 최초 명령/로그는 실패 근거로 보존하며 현재 소비4파일의 값은
+browser-consumed-bindgen-sha256-14121.log, 수정 명령은
+browser-audio-consumed-bindgen-14121.log로 별도 보존한다.
 로그는 같은 증거 폴더의 all-app-targets-build-14121.log,
 scoped-rustfmt-ten-14121.log, browser{,-audio}-remediation-*-14121.log,
 native-remediation-player-sha256-14121.log다. 새 전체 앱 runtime 검증과 독립 리뷰,

@@ -17,7 +17,9 @@ AC036–039의 문구·포맷·enum 소비자·Linux 실행 경계 수정을 마
 Root의 관련 Window100/0·입력35/0, allocation 각3/0·Settings14/0·startup9/0,
 main/Linux solo 각1/0·cohort 각10/0/6/0과10경로 포맷을 확인했다. 중복 실행은
 고유 coverage처럼 합산하지 않는다. 전체85 integration 포함 app 컴파일과 실제
-UI/audio release WASM·즉시 matching bindgen·native main 빌드가 모두 통과했다.
+UI/audio release WASM·소비 경로의 matching bindgen·native main 빌드가 모두 통과했다.
+문서 감사에서 첫 audio out-name 오류를 찾아 사용 중인 runtime 이름으로 다시 생성했고,
+현재 소비4파일의 hash를 별도 확인했다. 미사용 출력의 hash를 현재 검증으로 쓰지 않는다.
 새 전체 runtime 검사와 독립 리뷰/QA/UX를 수행하며 이전 PASS를 새 소스의 PASS로 바꾸지 않는다.
 실제 desktop QA는 Records·가변 기록 조회/고정 상대 거절을 확인했으나
 /dev/input·/dev/snd 부재와 ALSA default 카드 실패로 native 재생이 BLOCKED_ENV다.
