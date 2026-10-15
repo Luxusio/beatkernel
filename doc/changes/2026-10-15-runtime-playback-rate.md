@@ -488,3 +488,33 @@ VM의 고정 metadata endpoint를 사용하며 실제 대용량 저장·장치 �
 새 browser runner는 기존12 required와 추가 fixed-opponent 검사를 유지하면서
 실제 editor release와 game-menu Records preview를 추가한다. 이 새 실행과 정식
 독립 재리뷰·필수 QA는 아직 완료되지 않았다. WBS136/489·오디오12/27은 유지한다.
+
+
+## 열네 번째 실제 브라우저와 두 번째 독립 리뷰
+
+`fc14ca44`는 실제 게임 메뉴 Records PREVIEW/DETAILS와 편집기에서의 held key-up을
+검사하는 runner를 커밋했다. 원래12필수 흐름·추가 고정 상대 Save/Load 검사를
+유지하고 필수 검사를14개로 늘렸다. 원본 trusted 입력의 timestamp·sequence와
+저장된 File을 재생한 release·실제 그려진 pressed=0을 확인한다.
+
+실제 실행83650은 `target/wf/runtime-rate-browser-fourteenth-14117/evidence.json`에서
+PASS다. 필수14개 모두 PASS·전체15checks·unmet/errors/consoleErrors/networkErrors
+빈 배열·networkOverflow=false이며 owned browser/Xvfb가 모두 exit0이다.
+UI `101c39b1d1300dc9350fa4086242b08fe8867f6fa666c001795058d24b2b1781`,
+audio `c83755b0f5145dfc4b671f0e304e43fceaf2a3af3d34334b65e50609be6d4c01`의
+실제 matching WASM을 사용했다. `variable-records-menu-history-canvas.png`도 직접
+열어 원래 practice 범위·historical score/gauge·상세 navigation 표시를 확인했다.
+이것은 개발 통합 증거이며 독립 qa-browser가 아니다.
+
+후속 독립 DEEP code/security 리뷰는 동일한 결함2건을 각각 FIX_NOW로 판정했다.
+Window가10초 timeout 뒤 원본 retired File을 수락하면 Worker가 수락을 잊고,
+Stop 재전송은 중복 tuple로 거절되어 임시 기록의 저장을 막을 수 있다. 또 Rust가
+retired capture를 꺼낸 뒤 직렬화하면 실제 할당 실패로 원본을 잃고, 자동 정리
+재시도가 기록 부재를 성공한 null row로 처리할 수 있다. 앞선5건의 수정은 유지된다.
+
+AC032는 실제 수락을 일시적인 Promise와 독립적으로 보존한다. AC033은 borrowed
+직렬화가 성공한 뒤에만 원본 capture slot을 소비한다. 두 구현·독립 테스트 팀은
+파일 소유권을 나눠 병렬 수정 중이며, root가 실제 회귀 검증을 실행한다.
+수정 뒤 새 matching WASM/browser와 새 정식 리뷰·필수 browser/CLI/desktop QA가
+남는다. 현재 개발 증거로 독립 QA나 실제 장치·음향·성능 acceptance를 대신하지
+않으며, WBS05.13.06 W·전체136/489·오디오 커널12/27과 full player Goal을 유지한다.

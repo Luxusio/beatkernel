@@ -14,8 +14,13 @@ f9243be5는 browser/native Records의 가변 조건 역사 조회와 별도 고�
 반영한다. 현재 관련 Node368/0·Rust 기록 조회10+34+23=67/0이 통과했고,
 focus 전용9+15=24/0도 통과했다. 서로 겹치는 검사는 합산하지 않는다.
 실제 release UI/audio WASM과 즉시 matching bindgen 빌드도 통과했다.
-새 게임 메뉴 Records·editor release 흐름을 포함한 실제 browser 재검증과
-새 독립 code/security review, browser/CLI/desktop QA는 남아 있다.
+열네 번째 실제 browser83650은 새 게임 메뉴 Records·editor release를 포함한
+필수14흐름 모두 PASS(추가 저장 검사까지15checks), console/network 오류0,
+owned browser/Xvfb exit0이다. 실행한 runner는 fc14ca44로 커밋했다.
+후속 독립 code/security 리뷰는 같은 기록 회수 결함2건을 각각 수정 필요로 판정했다.
+늦은 수락 ACK의 timeout 이후 보존과 인코딩 실패 시 원본 capture 보존을
+서로 독립된 구현·테스트 두 팀으로 수정 중이다. 새 정식 리뷰와
+browser/CLI/desktop QA는 남아 있으며, 이 변경 뒤 WASM/browser를 다시 검증한다.
 전체136/489·오디오 커널12/27을 유지하며 개발 증거를 독립 QA PASS로 표시하지 않는다.
 
 리뷰 전 개발 통합 checkpoint: 실제 브라우저 필수12개 흐름이

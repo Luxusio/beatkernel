@@ -229,6 +229,17 @@ current 종료 응답의 File·metadata 검증에 실패하면 원본 immutable 
 보존하고 보관 승인과 Worker 해제를 보류한다. 실패한 응답을 빈 기록 목록의
 성공으로 바꾸거나, 기존 retired 기록과 current 기록의 보관 키를 합치지 않는다.
 
+전송 대기 시간이 지나도 이전 File 소유권과 실제 수락 여부는 유지한다. 동일한
+session·Program·boundary에 대한 유효한 Window 수락은 Promise의 timeout 여부와
+독립적으로 보관한다. 늦게 도착한 실제 수락 뒤 Stop으로 정리할 때 이미 수락된
+File을 다시 보내지 않으며, 중복 tuple 거절을 완화하거나 timeout을 수락으로
+취급하지 않는다. 수락하지 않은 기록은 계속 Worker가 소유한다.
+
+retired prefix는 직렬화가 성공한 뒤에만 Rust의 보관 slot에서 꺼낸다. 인코딩의
+할당·한도 오류에서는 원본 header·배속 이력·accepted operation과 player를 그대로
+유지하고 재시도할 수 있어야 한다. 재시도가 기록 부재를 성공으로 보고하면 안 된다.
+기존 stopped/current capture의 일회 내보내기 계약은 유지한다.
+
 기존 retained File이 있어 일반 solo/local 기록도 같은 목록에 추가하는 경우에는
 시작 전에 실제 roster 수와 기존 cohort당64MiB 한도에 맞는 최종 보관 공간을
 확보한다. 공간 부족이면 재생 admission 전에 거절하며 기존 File의 선택·Save·
