@@ -139,8 +139,50 @@ log or a fabricated PASS.
 
 ## Gates, artifacts and remaining original scope
 
-Independent formal code review and subsequent independent CLI QA are pending
-at this checkpoint. No automatic review/QA completion or task close is claimed.
+Candidate3082556b9315ac2e447cbf7e643b30a49fd13ad3 received an actual fresh
+DEEP formal code-review PASS with zero findings after two fresh discovery
+finals. Subsequent independent qa-cli returned actual PASS at executed-command
+depth: current relay build, public help, safe invalid option (expected exit1,
+UnknownOption), both integration targets no-run, scoped rustfmt/diff/WBS and
+fresh strict actual19. Room17passed in9.18s; pending2passed in0.08s, with zero
+failed/ignored/filtered. This was one fresh QA product execution, not reused
+root evidence.
+
+QA relay PID2020792 on UDP55932 passed owned socket-inode readiness, received
+SIGINT, exited0 and joined. Cargo-test PID2020882 exited0 and joined. Postflight
+confirmed all13recorded owned child PIDs/groups absent and UDP55932 unbound;
+synthetic private keys remained0600. Every QA command preserved all six source
+hashes, unchanged pending fixture, native binary, HEAD and raw/logical index.
+
+QA evidence: target/wf/webtransport-delayed-accept-qa-cli-14129/.
+invocations.json SHA256:
+01cd6a1c62f4c0921ceecd001f4c51d78da9f267dbe1d77a5d7619ce2e5a3207.
+fresh19/invocations.json SHA256:
+e863bf69a9222efdbaf3141e64a4af5ef0e90e3d1e0898a9e79428e86a43e5e1.
+fresh19/tests.log SHA256:
+71cdbf5fd2d7d4332740e81c1ca0e395e108bac29206eb51bb350b8ce81e1abd.
+postflight.json SHA256:
+6d0f7bebef9286314c6116e765b93c6720f931919137b92af7f314c4ee963e6c.
+
+QA independently made the same five-versus-six-line preservation-checker error.
+Its original helper/log and wrapper AssertionError/exit1 remain preserved in
+invocations.json. Only a new corrected static helper was rerun; it exited0 in
+source-checks-followup-01.json, log SHA256
+8eff7275d4f545d20eedcd06a03413796222b1580064198975f70b22aa09a111.
+No test or product source changed and no product command was repeated. Root
+checked all ten original command log hashes, the corrected static log, fresh
+execution logs and current source/native identities before these three
+facts-only documentation edits.
+
+After those actual ordered finals, one owning task_verify returned PENDING:
+RECEIPTS.jsonl was absent with zero rows. The owning returned empty-stream park
+pair was passed verbatim to task_blocked; only this child is blocked, with no
+PASS/close or manually authored receipt. Source writes remain owner-permitted,
+and the whole Goal remains active. owning-verification.json is diagnostic RPC
+evidence, not a receipt. Actual finals are NON-ATTESTING for formal close.
+Post-QA changes are limited to these three evidence documents, followed by an
+independent stored-evidence documentation check; no product rerun is warranted
+for the factual update.
 
 The native headless relay remains223670608bytes, SHA256
 74e28d69631d77470d7d1f2c8f4f5f1c2912a9e0467949722f27cc54e91e8790.
