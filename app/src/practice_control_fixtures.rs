@@ -1,5 +1,840 @@
 use super::*;
 use crate::practice_control::*;
+use beatkernel::audio::{
+    PracticeBoundaryKind, PracticeRateEvent, PracticeRateOutcome, PracticeRateRefusal,
+    PracticeReceipt, PracticeRestartEvent,
+};
+use beatkernel::transport::Rate as ControlRate;
+
+fn control_rate(numerator: i64, denominator: u64) -> ControlRate {
+    ControlRate::new(numerator, denominator).unwrap()
+}
+
+fn transaction_cap() -> PracticeTransactionCapability {
+    PracticeTransactionCapability {
+        practice: cap(),
+        rate: PracticeRateState {
+            revision: 7,
+            rate: ControlRate::NORMAL,
+        },
+    }
+}
+
+fn typed_controls() -> PracticeControls {
+    let mut controls = PracticeControls::new();
+    controls
+        .advertise_transactions(Some(transaction_cap()))
+        .unwrap();
+    controls
+}
+
+// These copied core DTOs prove mailbox validation and correlation only. The
+// actual PCM/phase transition is exercised by the independent audio fixtures.
+fn copied_rate_event(request: PracticeTransactionRequest) -> PracticeRateEvent {
+    let PracticeTransactionRequest::Rate {
+        id,
+        generation,
+        expected,
+        requested_rate,
+    } = request
+    else {
+        panic!("rate request required")
+    };
+    PracticeRateEvent {
+        request_id: id,
+        generation,
+        iteration: 0,
+        request_revision: expected.revision,
+        applied_revision: expected.revision + 1,
+        physical_frame: 200,
+        playback_frame: 150,
+        active_elapsed_nanos: 3_125_000,
+        previous_rate: expected.rate,
+        requested_rate,
+        applied_rate: requested_rate,
+        outcome: if requested_rate == expected.rate {
+            PracticeRateOutcome::Noop
+        } else {
+            PracticeRateOutcome::Applied
+        },
+    }
+}
+
+fn copied_rate_reply(
+    request: PracticeTransactionRequest,
+    event: PracticeRateEvent,
+) -> PracticeTransactionReply {
+    let PracticeTransactionRequest::Rate { id, generation, .. } = request else {
+        panic!("rate request required")
+    };
+    PracticeTransactionReply::Rate {
+        id,
+        generation,
+        result: Ok(event),
+    }
+}
+
+fn copied_restart_event(request: PracticeTransactionRequest) -> PracticeRestartEvent {
+    let PracticeTransactionRequest::RestartOriginal {
+        id,
+        generation,
+        expected,
+    } = request
+    else {
+        panic!("restart request required")
+    };
+    PracticeRestartEvent {
+        boundary: PracticeReceipt {
+            request_id: id,
+            generation: generation + 1,
+            iteration: 0,
+            physical_frame: 200,
+            playback_frame: 150,
+            requested_song_time: t(10),
+            applied_song_time: t(10),
+            correction_nanos: 0,
+            kind: PracticeBoundaryKind::Requested,
+        },
+        request_revision: expected.revision,
+        applied_revision: expected.revision + 1,
+        previous_rate: expected.rate,
+        requested_rate: ControlRate::NORMAL,
+        applied_rate: ControlRate::NORMAL,
+        outcome: PracticeRateOutcome::Applied,
+    }
+}
+
+fn copied_restart_reply(
+    request: PracticeTransactionRequest,
+    event: PracticeRestartEvent,
+) -> PracticeTransactionReply {
+    let PracticeTransactionRequest::RestartOriginal { id, generation, .. } = request else {
+        panic!("restart request required")
+    };
+    PracticeTransactionReply::RestartOriginal {
+        id,
+        generation,
+        result: Ok(event),
+    }
+}
+
+fn assert_transaction_untouched(
+    controls: &mut PracticeControls,
+    capability: PracticeTransactionCapability,
+    request: PracticeTransactionRequest,
+) {
+    assert_eq!(controls.transaction_capability(), Some(capability));
+    assert_eq!(controls.capability(), Some(capability.practice));
+    assert_eq!(controls.pending_transaction(), Some(request));
+    assert!(controls.pending());
+    assert!(controls.take_transaction_response().is_none());
+    assert!(controls.take_transaction(true).is_none());
+}
+
+#[test]
+fn typed_practice_advertisement_is_explicit_and_invalid_scalar_changes_are_atomic() {
+    let mut controls = PracticeControls::new();
+    assert!(controls.transaction_capability().is_none());
+    assert!(controls.request_rate(control_rate(2, 1)).is_err());
+    assert!(controls.request_original_restart().is_err());
+    controls.advertise(Some(cap())).unwrap();
+    assert_eq!(controls.capability(), Some(cap()));
+    assert!(controls.transaction_capability().is_none());
+    assert!(controls.request_rate(control_rate(2, 1)).is_err());
+    assert!(controls.request_original_restart().is_err());
+    controls
+        .advertise_transactions(Some(transaction_cap()))
+        .unwrap();
+    assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+    for invalid_rate in [control_rate(0, 1), control_rate(-1, 2)] {
+        let mut invalid = transaction_cap();
+        invalid.rate.rate = invalid_rate;
+        assert!(controls.advertise_transactions(Some(invalid)).is_err());
+        assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+        assert!(controls.request_rate(invalid_rate).is_err());
+        assert!(!controls.pending());
+    }
+    let mut invalid = transaction_cap();
+    invalid.practice.min_target = t(2);
+    invalid.practice.max_target = t(1);
+    assert!(controls.advertise_transactions(Some(invalid)).is_err());
+    assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+    assert_eq!(controls.capability(), Some(cap()));
+    controls.advertise_transactions(None).unwrap();
+    assert!(controls.transaction_capability().is_none());
+    assert!(controls.capability().is_none());
+}
+
+#[test]
+fn typed_practice_rate_region_and_restart_share_one_slot_and_one_id_allocator() {
+    let mut controls = typed_controls();
+    let mut previous_id = 0;
+    for operation in 0..3 {
+        let id = match operation {
+            0 => controls.request_rate(control_rate(2, 1)).unwrap(),
+            1 => controls
+                .request(PracticeAction::Scrub { target: t(20) })
+                .unwrap(),
+            _ => controls.request_original_restart().unwrap(),
+        };
+        assert!(id > previous_id);
+        previous_id = id;
+        let request = controls.pending_transaction().unwrap();
+        assert!(controls.request_rate(control_rate(3, 2)).is_err());
+        assert!(controls.request(PracticeAction::DisableLoop).is_err());
+        assert!(controls.request_original_restart().is_err());
+        assert_eq!(controls.take_transaction(true), Some(request));
+        assert!(controls.take_transaction(true).is_none());
+        let reply = match request {
+            PracticeTransactionRequest::Region(request) => PracticeTransactionReply::Region {
+                reply: PracticeReply {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Err("pre-cut queue admission refused".into()),
+                },
+                rate: None,
+            },
+            PracticeTransactionRequest::Rate { id, generation, .. } => {
+                PracticeTransactionReply::Rate {
+                    id,
+                    generation,
+                    result: Err("pre-cut queue admission refused".into()),
+                }
+            }
+            PracticeTransactionRequest::RestartOriginal { id, generation, .. } => {
+                PracticeTransactionReply::RestartOriginal {
+                    id,
+                    generation,
+                    result: Err("pre-cut queue admission refused".into()),
+                }
+            }
+        };
+        controls.reply_transaction(&reply).unwrap();
+        assert!(controls.pending()); // An unconsumed reply still owns the slot.
+        assert_eq!(controls.pending_transaction(), Some(request));
+        assert!(controls.request_rate(control_rate(3, 2)).is_err());
+        assert!(controls.request(PracticeAction::DisableLoop).is_err());
+        assert!(controls.request_original_restart().is_err());
+        let response = controls.take_transaction_response().unwrap();
+        assert_eq!(response.request, request);
+        assert_eq!(response.reply, reply);
+        assert!(!controls.pending());
+        assert!(controls.pending_transaction().is_none());
+        assert!(controls.take_transaction_response().is_none());
+    }
+}
+
+#[test]
+fn typed_practice_rate_waits_while_paused_without_consuming_or_duplicating_request() {
+    let mut controls = typed_controls();
+    let id = controls.request_rate(control_rate(3, 2)).unwrap();
+    let request = controls.pending_transaction().unwrap();
+    assert!(controls.rate_pending());
+    for _ in 0..3 {
+        assert!(controls.take_transaction(false).is_none());
+        assert_eq!(controls.pending_transaction(), Some(request));
+        assert!(controls.rate_pending());
+    }
+    assert_eq!(controls.take_transaction(true), Some(request));
+    assert!(controls.take_transaction(true).is_none());
+    assert!(controls.take_transaction(false).is_none());
+    assert!(controls.rate_pending());
+    let event = copied_rate_event(request);
+    assert_eq!(event.request_id, id);
+    controls
+        .reply_transaction(&copied_rate_reply(request, event))
+        .unwrap();
+    assert!(controls.rate_pending());
+    assert_eq!(
+        controls.take_transaction_response().unwrap().request,
+        request
+    );
+    assert!(!controls.rate_pending());
+    controls.request(PracticeAction::DisableLoop).unwrap();
+    assert!(!controls.rate_pending());
+}
+
+#[test]
+fn typed_practice_legacy_probes_never_consume_any_typed_variant() {
+    for operation in 0..3 {
+        let mut controls = typed_controls();
+        match operation {
+            0 => controls.request_rate(control_rate(2, 1)).unwrap(),
+            1 => controls
+                .request(PracticeAction::Scrub { target: t(10) })
+                .unwrap(),
+            _ => controls.request_original_restart().unwrap(),
+        };
+        let request = controls.pending_transaction().unwrap();
+        assert!(controls.pending_request().is_none());
+        assert!(controls.take_request().is_none());
+        assert!(controls.take_response().is_none());
+        let legacy_request = PracticeRequest {
+            id: match request {
+                PracticeTransactionRequest::Region(request) => request.id,
+                PracticeTransactionRequest::Rate { id, .. }
+                | PracticeTransactionRequest::RestartOriginal { id, .. } => id,
+            },
+            generation: 1,
+            action: PracticeAction::Scrub { target: t(10) },
+        };
+        assert!(controls.reply(&applied(legacy_request, 2)).is_err());
+        assert_eq!(controls.take_transaction(true), Some(request));
+        let reply = match request {
+            PracticeTransactionRequest::Rate { .. } => {
+                copied_rate_reply(request, copied_rate_event(request))
+            }
+            PracticeTransactionRequest::RestartOriginal { .. } => {
+                copied_restart_reply(request, copied_restart_event(request))
+            }
+            PracticeTransactionRequest::Region(request) => PracticeTransactionReply::Region {
+                reply: applied(request, 2),
+                rate: Some(PracticeRateState {
+                    revision: 8,
+                    rate: ControlRate::NORMAL,
+                }),
+            },
+        };
+        controls.reply_transaction(&reply).unwrap();
+        assert!(controls.take_response().is_none());
+        assert!(controls.pending());
+        assert_eq!(controls.take_transaction_response().unwrap().reply, reply);
+    }
+}
+
+#[test]
+fn typed_practice_legacy_region_request_and_response_remain_compatible() {
+    let mut controls = PracticeControls::new();
+    controls.advertise(Some(cap())).unwrap();
+    controls
+        .request(PracticeAction::Scrub { target: t(10) })
+        .unwrap();
+    let request = controls.pending_request().unwrap();
+    assert!(controls.pending_transaction().is_none());
+    assert!(controls.take_transaction(true).is_none());
+    assert!(controls.take_transaction_response().is_none());
+    assert_eq!(controls.pending_request(), Some(request));
+    assert_eq!(controls.take_request(), Some(request));
+    assert!(controls.take_request().is_none());
+    let reply = applied(request, 2);
+    controls.reply(&reply).unwrap();
+    assert!(controls.take_transaction_response().is_none());
+    let response = controls.take_response().unwrap();
+    assert_eq!(response.request, request);
+    assert_eq!(response.reply, reply);
+    assert!(controls.transaction_capability().is_none());
+    assert_eq!(controls.capability().unwrap().generation, 2);
+}
+
+#[test]
+fn typed_practice_applied_and_noop_consume_one_revision_in_the_same_attempt() {
+    for requested_rate in [control_rate(2, 1), control_rate(2, 2)] {
+        let mut controls = typed_controls();
+        controls.request_rate(requested_rate).unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let event = copied_rate_event(request);
+        let reply = copied_rate_reply(request, event);
+        controls.reply_transaction(&reply).unwrap();
+        assert_eq!(
+            controls.transaction_capability(),
+            Some(PracticeTransactionCapability {
+                practice: cap(),
+                rate: PracticeRateState {
+                    revision: 8,
+                    rate: requested_rate,
+                },
+            })
+        );
+        assert!(controls.reply_transaction(&reply).is_err());
+        assert!(controls.take_transaction(true).is_none());
+        let response = controls.take_transaction_response().unwrap();
+        assert_eq!(response.request, request);
+        assert_eq!(response.reply, reply);
+        assert!(controls.reply_transaction(&reply).is_err());
+        assert!(controls.take_transaction_response().is_none());
+        assert_eq!(controls.capability().unwrap().generation, 1);
+    }
+}
+
+#[test]
+fn typed_practice_reply_before_take_and_wrong_variant_do_not_publish_success() {
+    let mut controls = typed_controls();
+    controls.request_rate(control_rate(2, 1)).unwrap();
+    let request = controls.pending_transaction().unwrap();
+    let reply = copied_rate_reply(request, copied_rate_event(request));
+    assert!(controls.reply_transaction(&reply).is_err());
+    assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+    assert_eq!(controls.take_transaction(true), Some(request));
+    let PracticeTransactionRequest::Rate { id, generation, .. } = request else {
+        unreachable!()
+    };
+    let wrong = PracticeTransactionReply::RestartOriginal {
+        id,
+        generation,
+        result: Err("wrong variant".into()),
+    };
+    assert!(controls.reply_transaction(&wrong).is_err());
+    assert_transaction_untouched(&mut controls, transaction_cap(), request);
+    controls.reply_transaction(&reply).unwrap();
+}
+
+#[test]
+fn typed_practice_invalid_copied_rate_facts_are_rejected_without_partial_commit() {
+    // No PCM is manufactured here: these values exercise the DTO trust boundary.
+    for fault in 0..17 {
+        let mut controls = typed_controls();
+        controls.request_rate(control_rate(2, 1)).unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let valid = copied_rate_event(request);
+        let mut event = valid;
+        match fault {
+            0 => event.request_id += 1,
+            1 => event.generation += 1,
+            2 => event.request_revision += 1,
+            3 => event.applied_revision = event.request_revision,
+            4 => event.applied_revision += 1,
+            5 => event.previous_rate = control_rate(3, 2),
+            6 => event.requested_rate = control_rate(3, 2),
+            7 => event.applied_rate = control_rate(3, 2),
+            8 => event.physical_frame = event.playback_frame - 1,
+            9 => event.active_elapsed_nanos = -1,
+            10 => event.previous_rate = control_rate(0, 1),
+            11 => event.requested_rate = control_rate(-1, 1),
+            12 => event.applied_rate = control_rate(0, 1),
+            13 => event.outcome = PracticeRateOutcome::Noop,
+            14 => event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity),
+            15 | 16 => {}
+            _ => unreachable!(),
+        }
+        let mut reply = copied_rate_reply(request, event);
+        if let PracticeTransactionReply::Rate { id, generation, .. } = &mut reply {
+            if fault == 15 {
+                *id += 1;
+            } else if fault == 16 {
+                *generation += 1;
+            }
+        }
+        assert!(controls.reply_transaction(&reply).is_err(), "fault {fault}");
+        assert_transaction_untouched(&mut controls, transaction_cap(), request);
+        controls
+            .reply_transaction(&copied_rate_reply(request, valid))
+            .unwrap();
+        assert_eq!(controls.transaction_capability().unwrap().rate.revision, 8);
+    }
+}
+
+#[test]
+fn typed_practice_same_rate_requires_noop_instead_of_applied() {
+    let mut controls = typed_controls();
+    controls.request_rate(control_rate(8, 8)).unwrap();
+    let request = controls.take_transaction(true).unwrap();
+    let valid = copied_rate_event(request);
+    assert_eq!(valid.outcome, PracticeRateOutcome::Noop);
+    let mut invalid = valid;
+    invalid.outcome = PracticeRateOutcome::Applied;
+    assert!(
+        controls
+            .reply_transaction(&copied_rate_reply(request, invalid))
+            .is_err()
+    );
+    assert_transaction_untouched(&mut controls, transaction_cap(), request);
+    controls
+        .reply_transaction(&copied_rate_reply(request, valid))
+        .unwrap();
+}
+
+#[test]
+fn typed_practice_pre_cut_error_and_actual_audio_refusal_remain_distinct() {
+    for actual_cut in [false, true] {
+        let mut controls = typed_controls();
+        controls.request_rate(control_rate(2, 1)).unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let PracticeTransactionRequest::Rate { id, generation, .. } = request else {
+            unreachable!()
+        };
+        let reply = if actual_cut {
+            let mut event = copied_rate_event(request);
+            event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity);
+            event.applied_revision = 7;
+            event.applied_rate = ControlRate::NORMAL;
+            copied_rate_reply(request, event)
+        } else {
+            PracticeTransactionReply::Rate {
+                id,
+                generation,
+                result: Err("queue refused before active PCM boundary".into()),
+            }
+        };
+        controls.reply_transaction(&reply).unwrap();
+        assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+        let response = controls.take_transaction_response().unwrap();
+        assert_eq!(response.request, request);
+        assert_eq!(response.reply, reply);
+        let PracticeTransactionReply::Rate { result, .. } = response.reply else {
+            unreachable!()
+        };
+        if actual_cut {
+            let event = result.unwrap();
+            assert_eq!(event.physical_frame, 200);
+            assert_eq!(event.playback_frame, 150);
+            assert_eq!(
+                event.outcome,
+                PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity)
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                "queue refused before active PCM boundary"
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_practice_actual_refusal_cannot_change_rate_or_revision() {
+    for fault in 0..2 {
+        let mut controls = typed_controls();
+        controls.request_rate(control_rate(2, 1)).unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let mut event = copied_rate_event(request);
+        event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity);
+        event.applied_rate = ControlRate::NORMAL;
+        event.applied_revision = 7;
+        let valid = event;
+        if fault == 0 {
+            event.applied_revision += 1;
+        } else {
+            event.applied_rate = control_rate(2, 1);
+        }
+        assert!(
+            controls
+                .reply_transaction(&copied_rate_reply(request, event))
+                .is_err()
+        );
+        assert_transaction_untouched(&mut controls, transaction_cap(), request);
+        // Current and requested generation/revision still agree. A capacity
+        // refusal cannot truthfully be relabelled as superseded control state.
+        for wrong_reason in [
+            PracticeRateRefusal::StaleRevision,
+            PracticeRateRefusal::StaleGeneration,
+        ] {
+            let mut mislabeled = valid;
+            mislabeled.outcome = PracticeRateOutcome::Refused(wrong_reason);
+            assert!(
+                controls
+                    .reply_transaction(&copied_rate_reply(request, mislabeled))
+                    .is_err()
+            );
+            assert_transaction_untouched(&mut controls, transaction_cap(), request);
+        }
+        controls
+            .reply_transaction(&copied_rate_reply(request, valid))
+            .unwrap();
+        assert_eq!(controls.transaction_capability(), Some(transaction_cap()));
+    }
+}
+
+#[test]
+fn typed_practice_stale_generation_facts_preserve_the_newer_advertisement() {
+    let mut controls = typed_controls();
+    controls.request_rate(control_rate(2, 1)).unwrap();
+    let request = controls.take_transaction(true).unwrap();
+    let current = PracticeTransactionCapability {
+        practice: PracticeCapability {
+            generation: 2,
+            ..cap()
+        },
+        rate: PracticeRateState {
+            revision: 8,
+            rate: control_rate(1, 2),
+        },
+    };
+    controls.advertise_transactions(Some(current)).unwrap();
+    let mut event = copied_rate_event(request);
+    event.generation = 2;
+    event.previous_rate = current.rate.rate;
+    event.applied_rate = current.rate.rate;
+    event.applied_revision = current.rate.revision;
+    event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::StaleGeneration);
+    let mut wrong_actual_attempt = event;
+    wrong_actual_attempt.generation = 3;
+    assert!(
+        controls
+            .reply_transaction(&copied_rate_reply(request, wrong_actual_attempt))
+            .is_err()
+    );
+    assert_transaction_untouched(&mut controls, current, request);
+    let reply = copied_rate_reply(request, event);
+    controls.reply_transaction(&reply).unwrap();
+    assert_eq!(controls.transaction_capability(), Some(current));
+    let response = controls.take_transaction_response().unwrap();
+    assert_eq!(response.request, request);
+    assert_eq!(response.reply, reply);
+    let PracticeTransactionReply::Rate {
+        generation, result, ..
+    } = response.reply
+    else {
+        unreachable!()
+    };
+    assert_eq!(generation, 1); // Original request, not the later actual attempt.
+    assert_eq!(result.unwrap().generation, 2);
+    assert_eq!(controls.transaction_capability(), Some(current));
+}
+
+#[test]
+fn typed_practice_stale_revision_refusal_preserves_the_actual_current_state() {
+    let mut controls = typed_controls();
+    controls.request_rate(control_rate(2, 1)).unwrap();
+    let request = controls.take_transaction(true).unwrap();
+    let current = PracticeTransactionCapability {
+        practice: cap(),
+        rate: PracticeRateState {
+            revision: 8,
+            rate: control_rate(1, 2),
+        },
+    };
+    controls.advertise_transactions(Some(current)).unwrap();
+    let mut event = copied_rate_event(request);
+    event.previous_rate = current.rate.rate;
+    event.applied_rate = current.rate.rate;
+    event.applied_revision = current.rate.revision;
+    event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::StaleRevision);
+    let mut stale_fabrication = event;
+    stale_fabrication.applied_revision = 7;
+    stale_fabrication.previous_rate = ControlRate::NORMAL;
+    stale_fabrication.applied_rate = ControlRate::NORMAL;
+    assert!(
+        controls
+            .reply_transaction(&copied_rate_reply(request, stale_fabrication))
+            .is_err()
+    );
+    assert_transaction_untouched(&mut controls, current, request);
+    let reply = copied_rate_reply(request, event);
+    controls.reply_transaction(&reply).unwrap();
+    assert_eq!(controls.transaction_capability(), Some(current));
+    assert_eq!(controls.take_transaction_response().unwrap().reply, reply);
+}
+
+#[test]
+fn typed_practice_revoke_cancels_once_without_admitting_a_late_actual_reply() {
+    for taken in [false, true] {
+        let mut controls = typed_controls();
+        controls.request_rate(control_rate(2, 1)).unwrap();
+        let request = controls.pending_transaction().unwrap();
+        if taken {
+            assert_eq!(controls.take_transaction(true), Some(request));
+        }
+        controls.revoke("cancelled by owner");
+        controls.revoke("later cleanup");
+        assert!(controls.capability().is_none());
+        assert!(controls.transaction_capability().is_none());
+        assert!(controls.pending());
+        assert!(
+            controls
+                .reply_transaction(&copied_rate_reply(request, copied_rate_event(request)))
+                .is_err()
+        );
+        let response = controls.take_transaction_response().unwrap();
+        assert_eq!(response.request, request);
+        let PracticeTransactionReply::Rate { result, .. } = response.reply else {
+            unreachable!()
+        };
+        assert_eq!(result.unwrap_err(), "cancelled by owner");
+        assert!(!controls.pending());
+        assert!(!controls.rate_pending());
+        assert!(controls.take_transaction_response().is_none());
+        assert!(controls.request_rate(control_rate(2, 1)).is_err());
+    }
+}
+
+#[test]
+fn typed_practice_revoke_preserves_an_already_published_actual_result() {
+    let mut controls = typed_controls();
+    controls.request_rate(control_rate(2, 1)).unwrap();
+    let request = controls.take_transaction(true).unwrap();
+    let reply = copied_rate_reply(request, copied_rate_event(request));
+    controls.reply_transaction(&reply).unwrap();
+    controls.revoke("owner exited after the actual cut");
+    assert!(controls.pending());
+    assert!(controls.transaction_capability().is_none());
+    let response = controls.take_transaction_response().unwrap();
+    assert_eq!(response.request, request);
+    assert_eq!(response.reply, reply);
+}
+
+#[test]
+fn typed_practice_region_results_preserve_rate_and_advance_the_explicit_revision() {
+    for action in [
+        PracticeAction::Scrub { target: t(10) },
+        PracticeAction::Loop {
+            start: t(10),
+            end: t(20),
+        },
+        PracticeAction::DisableLoop,
+    ] {
+        let mut controls = typed_controls();
+        controls.request(action).unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let PracticeTransactionRequest::Region(region) = request else {
+            unreachable!()
+        };
+        let generation = if action == PracticeAction::DisableLoop {
+            1
+        } else {
+            2
+        };
+        let reply = PracticeTransactionReply::Region {
+            reply: applied(region, generation),
+            rate: Some(PracticeRateState {
+                revision: 8,
+                rate: ControlRate::NORMAL,
+            }),
+        };
+        controls.reply_transaction(&reply).unwrap();
+        let current = controls.transaction_capability().unwrap();
+        assert_eq!(current.practice.generation, generation);
+        assert_eq!(current.rate.revision, 8);
+        assert_eq!(current.rate.rate, ControlRate::NORMAL);
+        assert_eq!(controls.take_transaction_response().unwrap().reply, reply);
+    }
+}
+
+#[test]
+fn typed_practice_region_cannot_omit_or_change_its_frozen_rate_state() {
+    for invalid_rate in [
+        None,
+        Some(PracticeRateState {
+            revision: 7,
+            rate: ControlRate::NORMAL,
+        }),
+        Some(PracticeRateState {
+            revision: 9,
+            rate: ControlRate::NORMAL,
+        }),
+        Some(PracticeRateState {
+            revision: 8,
+            rate: control_rate(2, 1),
+        }),
+    ] {
+        let mut controls = typed_controls();
+        controls
+            .request(PracticeAction::Scrub { target: t(10) })
+            .unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let PracticeTransactionRequest::Region(region) = request else {
+            unreachable!()
+        };
+        let invalid = PracticeTransactionReply::Region {
+            reply: applied(region, 2),
+            rate: invalid_rate,
+        };
+        assert!(controls.reply_transaction(&invalid).is_err());
+        assert_transaction_untouched(&mut controls, transaction_cap(), request);
+    }
+}
+
+#[test]
+fn typed_practice_restart_is_one_actual_generation_and_revision_transition() {
+    let mut controls = PracticeControls::new();
+    let mut capability = transaction_cap();
+    capability.rate.rate = control_rate(2, 1);
+    controls.advertise_transactions(Some(capability)).unwrap();
+    controls.request_original_restart().unwrap();
+    assert!(!controls.rate_pending());
+    let request = controls.take_transaction(true).unwrap();
+    let event = copied_restart_event(request);
+    let reply = copied_restart_reply(request, event);
+    controls.reply_transaction(&reply).unwrap();
+    assert!(controls.reply_transaction(&reply).is_err());
+    let current = controls.transaction_capability().unwrap();
+    assert_eq!(current.practice.generation, 2);
+    assert_eq!(current.rate.revision, 8);
+    assert_eq!(current.rate.rate, ControlRate::NORMAL);
+    let response = controls.take_transaction_response().unwrap();
+    assert_eq!(response.request, request);
+    assert_eq!(response.reply, reply);
+    assert!(controls.take_transaction_response().is_none());
+}
+
+#[test]
+fn typed_practice_invalid_restart_facts_do_not_move_the_old_anchor() {
+    for fault in 0..15 {
+        let mut controls = typed_controls();
+        controls.request_original_restart().unwrap();
+        let request = controls.take_transaction(true).unwrap();
+        let valid = copied_restart_event(request);
+        let mut event = valid;
+        match fault {
+            0 => event.boundary.request_id += 1,
+            1 => event.boundary.generation -= 1,
+            2 => event.boundary.generation += 1,
+            3 => event.request_revision += 1,
+            4 => event.applied_revision -= 1,
+            5 => event.previous_rate = control_rate(2, 1),
+            6 => event.requested_rate = control_rate(0, 1),
+            7 => event.applied_rate = control_rate(2, 1),
+            8 => event.boundary.physical_frame = event.boundary.playback_frame - 1,
+            9 => event.boundary.kind = PracticeBoundaryKind::Looped,
+            10 => event.outcome = PracticeRateOutcome::Noop,
+            11 => event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::StaleRevision),
+            12 => event.boundary.iteration = 1,
+            13 => event.boundary.applied_song_time = t(11),
+            14 => event.boundary.correction_nanos = 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            controls
+                .reply_transaction(&copied_restart_reply(request, event))
+                .is_err(),
+            "fault {fault}"
+        );
+        assert_transaction_untouched(&mut controls, transaction_cap(), request);
+        controls
+            .reply_transaction(&copied_restart_reply(request, valid))
+            .unwrap();
+    }
+}
+
+#[test]
+fn typed_practice_restart_refusal_marker_keeps_old_generation_and_revision() {
+    let mut controls = PracticeControls::new();
+    let mut capability = transaction_cap();
+    capability.rate.rate = control_rate(2, 1);
+    controls.advertise_transactions(Some(capability)).unwrap();
+    controls.request_original_restart().unwrap();
+    let request = controls.take_transaction(true).unwrap();
+    let mut event = copied_restart_event(request);
+    event.boundary.generation = 1;
+    event.boundary.kind = PracticeBoundaryKind::ControlRejectedRevision;
+    event.applied_revision = 7;
+    event.applied_rate = capability.rate.rate;
+    event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity);
+    let mut wrong_marker = event;
+    wrong_marker.boundary.kind = PracticeBoundaryKind::Requested;
+    assert!(
+        controls
+            .reply_transaction(&copied_restart_reply(request, wrong_marker))
+            .is_err()
+    );
+    assert_transaction_untouched(&mut controls, capability, request);
+    for wrong_reason in [
+        PracticeRateRefusal::StaleRevision,
+        PracticeRateRefusal::StaleGeneration,
+    ] {
+        let mut mislabeled = event;
+        mislabeled.outcome = PracticeRateOutcome::Refused(wrong_reason);
+        assert!(
+            controls
+                .reply_transaction(&copied_restart_reply(request, mislabeled))
+                .is_err()
+        );
+        assert_transaction_untouched(&mut controls, capability, request);
+    }
+    let reply = copied_restart_reply(request, event);
+    controls.reply_transaction(&reply).unwrap();
+    assert_eq!(controls.transaction_capability(), Some(capability));
+    assert_eq!(controls.take_transaction_response().unwrap().reply, reply);
+}
 fn t(ns: i64) -> Timestamp {
     Timestamp::from_nanos(ns)
 }
@@ -71,16 +906,20 @@ fn practice_control_response_retains_originating_action_across_actual_lock_conte
 #[test]
 fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     let (publisher, viewer) = channel();
-    assert!(viewer
-        .request_practice(PracticeAction::Scrub { target: t(1) })
-        .is_err());
+    assert!(
+        viewer
+            .request_practice(PracticeAction::Scrub { target: t(1) })
+            .is_err()
+    );
     publisher.advertise_practice(Some(cap())).unwrap();
-    assert!(viewer
-        .request_practice(PracticeAction::Loop {
-            start: t(2),
-            end: t(1)
-        })
-        .is_err());
+    assert!(
+        viewer
+            .request_practice(PracticeAction::Loop {
+                start: t(2),
+                end: t(1)
+            })
+            .is_err()
+    );
     let id = viewer
         .request_practice(PracticeAction::Scrub {
             target: t(604_800_000_000_000),
@@ -89,9 +928,11 @@ fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     let request = publisher.take_practice_request().unwrap().unwrap();
     assert_eq!(request.id, id);
     assert!(publisher.take_practice_request().unwrap().is_none());
-    assert!(viewer
-        .request_practice(PracticeAction::DisableLoop)
-        .is_err());
+    assert!(
+        viewer
+            .request_practice(PracticeAction::DisableLoop)
+            .is_err()
+    );
     viewer.request_pause(true);
     assert!(!viewer.pause_requested());
     assert!(viewer.request_output(vec![]).is_err());
@@ -115,12 +956,14 @@ fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     assert!(next > id);
     let request = publisher.take_practice_request().unwrap().unwrap();
     publisher.reply_practice(&applied(request, 2)).unwrap(); // Mode receipt keeps generation.
-    assert!(viewer
-        .take_practice_reply()
-        .unwrap()
-        .unwrap()
-        .result
-        .is_ok());
+    assert!(
+        viewer
+            .take_practice_reply()
+            .unwrap()
+            .unwrap()
+            .result
+            .is_ok()
+    );
 }
 #[test]
 fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
@@ -128,14 +971,18 @@ fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
     with_publisher(publisher.clone(), || {
         advertise_practice(Some(cap())).unwrap();
         publish_pause(PauseState::Paused);
-        assert!(viewer
-            .request_practice(PracticeAction::DisableLoop)
-            .is_err());
+        assert!(
+            viewer
+                .request_practice(PracticeAction::DisableLoop)
+                .is_err()
+        );
         publish_pause(PauseState::Running);
         viewer.request_pause(true);
-        assert!(viewer
-            .request_practice(PracticeAction::DisableLoop)
-            .is_err());
+        assert!(
+            viewer
+                .request_practice(PracticeAction::DisableLoop)
+                .is_err()
+        );
         viewer.request_pause(false);
         let id = viewer
             .request_practice(PracticeAction::Scrub { target: t(8) })
@@ -159,12 +1006,14 @@ fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
         Ok(())
     })
     .unwrap();
-    assert!(viewer
-        .take_practice_reply()
-        .unwrap()
-        .unwrap()
-        .result
-        .is_err());
+    assert!(
+        viewer
+            .take_practice_reply()
+            .unwrap()
+            .unwrap()
+            .result
+            .is_err()
+    );
     assert!(viewer.practice_capability().unwrap().is_none());
 }
 #[test]
@@ -447,11 +1296,10 @@ fn practice_presentation_cohort_invalid_last_member_and_stale_commit_are_atomic(
         }
         let mut invalid = practice_attempt(&source, &policy);
         invalid.score.hits = 1;
-        assert!(prepare_practice_presentation(
-            1,
-            &[(PlayerId(3), &attempt), (PlayerId(9), &invalid)]
-        )
-        .is_err());
+        assert!(
+            prepare_practice_presentation(1, &[(PlayerId(3), &attempt), (PlayerId(9), &invalid)])
+                .is_err()
+        );
         assert_eq!(practice_current().players[0].score.hits, 1);
         let stale =
             prepare_practice_presentation(1, &[(PlayerId(3), &attempt), (PlayerId(9), &attempt)])
@@ -612,7 +1460,7 @@ fn practice_recording_attempt(
 }
 #[test]
 fn practice_applied_identity_survives_cancel_and_visual_poison_without_screen_reset() {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     let source = practice_original();
     let policy = practice_policy(&source);
     for fault in 0..3 {
@@ -630,18 +1478,22 @@ fn practice_applied_identity_survives_cancel_and_visual_poison_without_screen_re
             if fault == 0 {
                 viewer.cancel();
             } else {
-                assert!(catch_unwind(AssertUnwindSafe(|| {
-                    let _guard = publisher.0.latest.lock().unwrap();
-                    panic!("scripted visual publication poison");
-                }))
-                .is_err());
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _guard = publisher.0.latest.lock().unwrap();
+                        panic!("scripted visual publication poison");
+                    }))
+                    .is_err()
+                );
             }
             if fault == 2 {
-                assert!(catch_unwind(AssertUnwindSafe(|| {
-                    let _guard = publisher.0.native_launch.lock().unwrap();
-                    panic!("scripted complete metadata swap poison");
-                }))
-                .is_err());
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _guard = publisher.0.native_launch.lock().unwrap();
+                        panic!("scripted complete metadata swap poison");
+                    }))
+                    .is_err()
+                );
             }
             apply_practice_identity(&mut staged, 2);
             let applied = viewer.take_native_launch().unwrap().unwrap();

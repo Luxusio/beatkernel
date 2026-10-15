@@ -146,6 +146,30 @@ pub trait NativeGameplayHost {
     ) -> NativeGameplayResult<()> {
         Err("native host does not support retained practice acknowledgements".into())
     }
+    /// Opt in only after a runtime-rate retained owner is installed.
+    fn advertise_practice_transactions(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeTransactionCapability>,
+    ) -> NativeGameplayResult<()> {
+        if capability.is_some() {
+            return Err("native host does not support runtime practice".into());
+        }
+        Ok(())
+    }
+    /// Paused owners leave rate requests pending until an active frame is possible.
+    fn take_practice_transaction(
+        &mut self,
+        _: bool,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeTransactionRequest>> {
+        Ok(None)
+    }
+    /// Publish actual typed control facts; unsupported hosts cannot acknowledge them.
+    fn commit_practice_transaction_reply(
+        &mut self,
+        _: &crate::practice_control::PracticeTransactionReply,
+    ) -> NativeGameplayResult<()> {
+        Err("native host does not support runtime practice acknowledgements".into())
+    }
     /// Commit cold prepared UI state at a qualified practice boundary.
     fn prepare_practice_presentation(
         &mut self,
