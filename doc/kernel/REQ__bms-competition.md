@@ -1333,8 +1333,9 @@ Browser room adapters and the native timed stream connector use RoomPlayClient;
 browser Page/Worker committed activation is source-integrated. Client progress
 publication, peer presentation, final drain and native app room activation still
 require integration before playable multi-host acceptance. TLS,
-browser/native interoperability, physical synchronization and performance remain
-unverified under the user's execution deferral.
+browser/native interoperability, physical synchronization and performance are
+not established by this composition alone. Verification is active; current
+executed scope and remaining obligations are recorded in the WBS/evidence notes.
 
 
 ## Browser room client committed-start bridge
@@ -1381,3 +1382,63 @@ is a refusal. Page lobby and native timed drivers now have source integrations;
 client participant progress/final ACKs, native app room activation and actual
 browser/audio interoperability remain required. No performance/runtime acceptance is inferred
 from JavaScript fixtures or source compilation.
+
+## Actual server Commit receipt and stale terminal evidence
+
+Real server ordering acceptance uses the original group serve actor, real
+HTTP/3 streams and genuinely prepared selected two-player cohorts on three hosts.
+Test controls are cfg(test)-only and scoped to that actor future; they introduce
+no shipped runtime flag, public API, product branch or new trust policy.
+Preserve strict explicit CA and exact Origin validation and the original public
+client/transport owners. Existing portable fixtures are complementary evidence.
+
+A held server Written must be the original Command created after successful
+write_all of the actual matching StartCommit, with unchanged participant/write
+ID, target, admitted time and completed time. Actual matching client Commit
+reception does not grant server write credit. Before normal replay or either
+cancellation, positively observe both non-target server Commit receipts processed
+and actual matching client Commits while the exact target
+remains in flight, the room is uncommitted and its relay inactive. Check this
+barrier both at initial hold and after later actual commands. In the normal
+control, requeue the original value once without retimestamping or policy
+relaxation; require an observation
+after original written/pump processing that commitment and relay activation
+now hold, followed by actual progress/final ACK/drain and every client close.
+
+Cancellation cases send a real Leave from another host or actually finish its
+transport while that original receipt is outstanding. Preserve each survivor's
+first genuine non-timeout failure and immutable identity/roster/schedule history
+before local cleanup. Hold the original target terminal tuple, including its
+unmodified result, Resource and session permit, in a gated future within the
+same JoinSet. Do not clone, dispose early, fabricate or substitute a terminal.
+
+Admit a genuinely different selected identity at the exact same URL/key with
+nonzero unique participant IDs disjoint from the old leases. Before releasing
+either stale event, positively observe the completed three-member Collecting
+admission and capture its identity, ordered roster/deadline, scoped resource/frame
+IDs and absence of PreparedRoom; match the public clients' Collecting roster.
+Leave tests process Written then terminal; disconnect tests process terminal then
+Written. Await each actual processed acknowledgement before releasing the next:
+Written inside the original missing-resource branch, terminal after that branch
+and original Resource drop. Exact tokens/result fingerprints, increasing processed
+ordinals and unchanged independent replacement snapshots are required. The real
+cases exercise the outer stale-resource guard; the inner terminal_room membership
+guard retains its separate portable evidence. After both acknowledgements and
+all old close attempts, require later genuine replacement Ready/start, every
+directed progress/final ACK, explicit drain and close. Cached success is insufficient.
+
+Notice waits poll without blocking required client runtime servicing. Keep failed
+owners' original transport runtimes progressing without granting new protocol
+credit or erasing first failures. Actor observer errors propagate through its
+existing result cleanup; fixture replay/poll/client errors use a fixture-owned
+guard that releases gates, requests shutdown, attempts every owned client close,
+observes completion after server Runtime disposal and joins the actual thread.
+Do not assert during unwind cleanup or detach a thread. An outer owned test
+process deadline is the hard hang boundary; forced termination is failure.
+
+This evidence proves complete Commit bytes with a deliberately outstanding actor
+receipt and two original stale-event orders. It does not prove partial wire-write
+cancellation, forced late successful setup acquisition, arbitrary other orders,
+unscoped real-terminal execution, injected fixture cleanup failures, post-final
+failures, browser/device/physical synchronization or full-player completion.
+Keep those original obligations and WBS12.09.03 unfinished until directly proved.

@@ -743,8 +743,12 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
     let mut expiry = tokio::time::interval(Duration::from_millis(100));
     expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let shutdown = tokio::signal::ctrl_c();
+    #[cfg(test)]
+    let shutdown = network_fixtures::shutdown(shutdown);
     tokio::pin!(shutdown);
     let result = async {
+        #[cfg(test)]
+        network_fixtures::started(options.bind, commands.clone())?;
         loop {
             tokio::select! {
                 biased;
@@ -763,7 +767,13 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                 }
                 command = requests.recv() => {
                     let Some(command) = command else { return Err(cancelled()); };
-                    let Some(peer) = resources.get(&command.id) else { continue; };
+                    #[cfg(test)]
+                    let Some(command) = network_fixtures::intercept_command(command, &registry, &resources, &frames, &rooms)? else { continue; };
+                    let Some(peer) = resources.get(&command.id) else {
+                        #[cfg(test)]
+                        network_fixtures::skipped_command(&command, &registry, &resources, &frames, &rooms)?;
+                        continue;
+                    };
                     let key = peer.key.clone();
                     let previous_received = peer.last_received;
                     let time = now(origin)?;
@@ -822,6 +832,8 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                         Err(_) => registry.release(command.id, time).map_err(invalid)?,
                     };
                     release(&mut resources, &mut frames, &mut rooms, tickets);
+                    #[cfg(test)]
+                    network_fixtures::after_command(command.id, &registry, &resources, &frames, &rooms)?;
                 }
                 // Drain already queued controls before observing termination:
                 // a Leave or malformed control still cancels the whole room.
@@ -829,6 +841,10 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                 // higher-priority duplicate close_reason sweep.
                 finished = peers.join_next(), if !peers.is_empty() => {
                     let (id, peer_result, resource) = finished.ok_or_else(|| invalid("peer task missing"))?.map_err(invalid)?;
+                    #[cfg(test)]
+                    let Some((id, peer_result, resource)) = network_fixtures::intercept_terminal((id, peer_result, resource), &mut peers)? else { continue; };
+                    #[cfg(test)]
+                    let had_resource = resources.contains_key(&id);
                     if let Some(key) = resources.get(&id).map(|peer| peer.key.clone()) {
                         let time = now(origin)?;
                         let tickets = if peer_result.as_ref().err().is_some_and(|error| error.kind() == io::ErrorKind::InvalidData) {
@@ -841,6 +857,8 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                         release(&mut resources, &mut frames, &mut rooms, tickets);
                     }
                     drop(resource);
+                    #[cfg(test)]
+                    network_fixtures::after_terminal(id, &peer_result, had_resource, &registry, &resources, &frames, &rooms)?;
                 }
                 finished = setups.join_next(), if !setups.is_empty() => {
                     let candidate = finished.ok_or_else(|| invalid("setup task missing"))?.map_err(invalid)?;
@@ -872,6 +890,8 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                         let result = peer_io(ticket.id, read, write, commands, receiver, limit, peer_stopped, origin).await;
                         (ticket.id, result, resource)
                     });
+                    #[cfg(test)]
+                    network_fixtures::after_admission(&registry, &resources, &frames, &rooms)?;
                 }
                 incoming = endpoint.accept() => {
                     if setups.len() >= options.max_setups || peers.len() >= options.max_sessions {
@@ -908,3 +928,7 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
 #[cfg(test)]
 #[path = "multiplayer_webtransport_group_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "multiplayer_webtransport_group_network_fixtures.rs"]
+mod network_fixtures;
