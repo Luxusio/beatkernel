@@ -131,10 +131,32 @@ records the exact fresh credential/process recipe, names and cleanup bounds.
 
 ## Independent gates and retained scope
 
-Formal independent review, subsequent independent qa-cli and the one owning
-verify/close-or-park are still pending. These root results are not their PASS.
-WBS12.09.03 remains V; overall136/489, remaining353 and audio12/27 are unchanged.
-The full native Goal remains active and incomplete.
+Actual code_review_server_commit_14130_c1 completed DEEP/both with zero findings
+on HEAD b1a4177b2bcffd96ad1de1c8867c8197a78ed9b4. Subsequent independent
+qa_cli_server_commit_14130 returned actual PASS after current build/no-run0,
+group17/0 in6.96s (2922 unrelated filters), pending2/0 in0.08s and room17/0
+in9.21s (integration ignored/filter0), help0/invalid1 and static checks.
+Fresh QA preserves all10 tracked hashes, HEAD/raw+logical index and native
+identity before/after every invocation. All10 recorded PIDs/groups are absent;
+relay PID2247353 passed owned socket readiness on UDP42921, SIGINT0/join,
+port rebind and six private keys0600.
+
+Fresh QA evidence: target/wf/webtransport-server-commit-qa-cli-14130/.
+- postflight.json SHA256 dbd4886eb892b02bc13f8cf9ac473681d6f18fdeb1a74dabc1347616aef39706.
+- library/invocations.json SHA256 8ced65c9cae8044e2cbb7ef8e42687588b7b80baa290f6a17b71efd2f03b3178.
+- integration/invocations.json SHA256 82536997ad2260cc0a703ced9f1eab061e49cce50f9854dff2b0d9ea934f87f8.
+QA's initial root Git ownership guard occurred before any product command;
+the preserved bootstrap diagnostic was resolved with process-local safe.directory,
+without configuration changes or a repeated product run.
+
+One owning task_verify returned PENDING with no receipt file/zero rows despite
+the actual ordered reviewer and QA finals. The owner task_blocked operation
+published the exact returned empty-stream park pair. These actual results are
+NON-ATTESTING for official task closure; no close, fabricated receipt or
+receipt-only rerun occurred. The full Goal stays active. Seven critical
+source/test/REQ files and native identity are preserved while only three factual
+notes are synchronized after QA. WBS12.09.03 remains V; overall136/489,
+remaining353 and audio12/27 are unchanged.
 
 ## Known ceiling
 
