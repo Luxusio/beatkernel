@@ -1,12 +1,13 @@
 # Change native output from a retained paused-play screen
 
-A live-output child screen retains the live Play instance, worker, roster,
-capture and input ownership. Enter only from acknowledged paused, nonterminal,
-nonnetwork live play whose actual output adapter advertises control support.
+An output child screen retains its original live or Watch Play instance and
+worker; live play additionally retains its roster, capture and input ownership.
+Enter only from acknowledged paused, nonterminal, nonnetwork play whose actual
+output adapter advertises control support.
 Back returns to the same Play instance and leaves playback paused. Owner finish,
 cancellation, focus loss and close settle requests and dispose child UI state
-through existing lifecycle rules. Replay and unsupported adapters do not expose
-this action. An unavailable F2/open action is ignored without writing a session
+through existing lifecycle rules. Watch exposes this action only for the
+composed Linux converted ALSA adapter; unsupported adapters do not expose it. An unavailable F2/open action is ignored without writing a session
 failure or changing an existing session diagnostic. Rejected clipboard and IME
 edits show an error on the live-output draft while retaining its editor/settings;
 a successful subsequent edit clears that local error. Native input remains
@@ -61,8 +62,11 @@ error. Idle UI reply polling reads the atomic busy flag and takes no mutex.
 
 Live requests contain only supported output fields with existing byte/field
 bounds. They cannot change chart, keyboard mapping, recording, playback origin,
-sample rate or channel format. Linux initially supports ALSA endpoint, hardware
-buffer and processing period. Empty draft values retain the current setting;
+source sample rate or source channel format. A converted adapter may expose
+its supported native target rate, encoding and channel matrix while preserving
+the immutable source grid and explicitly refusing incompatible pending PCM.
+Linux supports the exact fields advertised by its actual converted ALSA owner,
+including endpoint, hardware buffer and processing period. Empty draft values retain the current setting;
 an explicit default endpoint remains available. Other native request shapes can
 be represented by capability metadata when their owners are composed; do not
 advertise unsupported modes or silently fall back.
@@ -87,7 +91,46 @@ Author command/lifecycle/IME/draft and actual bridge/controller/pump fixtures pl
 portable native conversion tests. The user lifted verification deferral on
 2026-10-06: execute relevant tests and checks alongside implementation. The
 earlier compile-only restriction no longer applies. Final close still requires
-actual ordered independent review and required QA evidence. Current session
-delegation follows the user's instruction to wait for another parallel request.
+actual ordered independent review and required QA evidence. Current REQUEST authorizes disjoint parallel source/test authors; an earlier
+session-specific wait-for-another-request statement is historical.
 Foreign-call isolation, other OS composition, cross-backend enums and acoustic
 acceptance remain full-Goal work; this increment does not close the task.
+
+## Paused Watch output replacement
+
+Records -> Watch -> actual Pause ACK -> F2 Output -> Apply -> Back -> Resume
+retains the SAME Play identity, worker and selected recording. Back leaves Watch
+paused. Screen ancestry and Results carry the original replay mode; Results
+requires owner join. Running, pausing, cancelling, terminal, network and
+unsupported sessions ignore Output without changing the session diagnostic.
+
+Reuse the existing complete-output retirement/open/held-start controller and
+bounded correlated command port. Watch has no physical input merger or live
+input authority. Validate every request before retirement where its facts are
+available. Preserve source rate/grid, recorded start/speed/preroll, frozen song,
+original operations/hash, actual feeder credit, Mixer and full converter state.
+Cold refusal retains the actual attached stream; after retirement, failure
+retains recovered/pending ownership and original errors, never claims a closed
+old stream was restored.
+
+Prepare pause and applicable finite/idle completion candidates and validate the
+actual applied capability before joint output/epoch/pause/completion publication.
+Require a fresh held generation and two progressing original native/host pairs.
+Reuse AudioAuthorityConfig::default().max_observation_age as a cold replay policy
+(currently one second), independent of the request wait deadline: matching
+domain, no future pair, age <= policy at readiness AND publication. Old native
+completion credit is cleared; genuine source chronology is retained.
+
+The real consumer services replacement before target observation. During the
+clock gap it grants no feeder, visual, pause or completion progress while
+cancellation remains active. Only successful authorized publication changes its
+expected identity. Pending output outcomes continue fencing coordinated resume.
+Stop, final native checks and last-source diagnostics handle current output and
+proven complete recovered ownership, including cancellation during waiting.
+No missing-current error may be invented for a successfully recovered owner.
+
+Existing late-reply, edited-draft, IME, focus, close and request-settlement rules
+apply to Watch unchanged. Business owners, real producer/Mixer/converter,
+recording/PCM and retained UI paths require executed software tests. Other OS
+Watch adapters, browser controls and actual GUI/device/acoustic/performance
+acceptance remain original full-Goal obligations, separately reported.

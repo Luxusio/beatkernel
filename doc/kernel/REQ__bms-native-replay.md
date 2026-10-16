@@ -64,8 +64,10 @@ fabricated. Live physical-input ASIO play requires separate presentation mapping
 Default sample features include no SDK. Its ASIO SDK-combined builds follow
 the selected [GPLv3 distribution policy](../platform/REQ__asio-distribution.md)
 while project-authored source remains MIT.
-Native sound output/timing, tests, examples, reviews and QA remain unexecuted
-under the user's deferral; cross-compilation proves source compatibility only.
+Historical snapshot: native sound output/timing, tests, examples, reviews and QA
+were unexecuted under the earlier deferral. That restriction was lifted on
+2026-10-06; execute relevant software tests/reviews/QA now. Earlier
+cross-compilation remains source-compatibility evidence only.
 
 Eight additional ASIO/backend/routing CLI fixtures are authored and compiled
 without execution. Locked Rust 1.98.1 host workspace and default Windows GNU/macOS
@@ -168,6 +170,29 @@ exact playback-frame song freeze and explicit rejection of conflicting committed
 history. Those live input rules belong to the common gameplay owners; recorded
 Watch continues to use the replay policy above without physical keyboard input.
 Network pause remains unsupported. SDK integration is Windows+asio-sdk+MSVC;
-ordinary GNU checks do not compile that branch. Pure actual-Mixer, interval,
-replay and native-loop fixtures are authored and compiled only. Tests, driver,
-GUI, device, physical timing, formal review and QA execution remain deferred.
+ordinary GNU checks do not compile that branch. Historical interval snapshot: pure actual-Mixer, interval, replay and native-loop
+fixtures were authored and compiled only. This is not a current execution
+restriction. Record actual relevant software test/review/QA results separately;
+driver, GUI, device and physical timing still require their own evidence.
+
+## Output settings while Watch is paused
+
+Supported Linux converted ALSA Watch composes the existing retained
+[Output controls](REQ__live-output-controls.md#paused-watch-output-replacement).
+After genuine pause ACK, F2 opens Output for the same replay Play instance. Apply
+uses the original complete converted owner and statically injected native Port,
+without physical keyboard acquisition, new recorded operations or live input
+authority. Both finite and idle-drain completion owners adopt only authorized
+new-stream evidence; original source chronology and recording result/hash stay
+unchanged. Preserve original source PCM and any compatible retained target
+suffix; verify new output against an independent literal oracle for its actual
+applied rate, matrix and encoding. Back returns still paused; existing
+resume boundaries continue the original recording to joined replay Results.
+
+The real native loop services commands before reading current output. Waiting
+suspends playback-credit/visual/completion work while preserving cancellation.
+Only joint publication updates expected target identity; unrelated changes fail.
+Stop and final-check handle either current native output or proven complete
+recovery and preserve original native/core diagnostics. Unsupported native
+adapters and browser controls remain unavailable until their actual owners are
+composed. Portable software proof is not physical output or acoustic acceptance.

@@ -408,9 +408,10 @@ and native keyboard/IME acceptance remain deferred.
 
 ## Acceptance and scope
 
-The user's verification deferral remains in force: fixture authoring and source
-compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
-replay/network execution and independent reviews/QA remain required later.
+The earlier verification deferral was lifted on 2026-10-06. Execute relevant
+software tests and independent review/QA alongside implementation. Actual GUI
+rendering/focus/close/restart/input/audio and physical timing require their own
+evidence; earlier compile-only snapshots do not establish those results.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings and audio output metadata selectors now have source
 integration, including Linux, Windows and macOS local-player assignment.
@@ -2184,3 +2185,19 @@ stream reports startup acknowledgement even when bootstrap used its raw handle.
 Source/target rates cannot be changed here.
 Pure parser/mapper/retained-panel tests and an actual ALSA null request diagnostic
 are separate from physical-device/audio-sync acceptance and full player completion.
+
+## Same-instance Output settings during Watch
+
+Acknowledged-paused, nonterminal, nonnetwork Watch can enter the retained Output
+child only when its actual adapter advertises support. Linux converted ALSA is
+the first composed adapter. F2 -> Apply -> Back preserves the same replay Play
+identity, worker, selected recording and paused state; resume uses the original
+recorded operations and source grid. Both finite and recorded-prefix completion
+use genuinely new-stream native evidence after joint output/pause/completion
+publication. Unsupported or unavailable actions remain harmless no-ops.
+
+The existing [Output contract](REQ__live-output-controls.md#paused-watch-output-replacement)
+and [recorded native host](REQ__bms-native-replay.md#output-settings-while-watch-is-paused)
+define request, freshness, complete-owner recovery, PCM and cleanup requirements.
+Software component/consumer/desktop-fixture execution is required; real
+GUI/device/acoustic/other-OS/performance acceptance remains full-Goal work.
